@@ -67,6 +67,29 @@ pub fn check_reference_target(claude_md: &Path) -> anyhow::Result<()> {
             reference_line(&claude_md.with_file_name(RULES_FILE)),
         );
     }
+    // The mode bits and our own access are DIFFERENT QUESTIONS, and only the
+    // second one is the one being asked. `readonly()` is `mode & 0o222 == 0`:
+    // it reports whether the file has any write bit at all, not whether this
+    // process may read and write it. A root-owned 0644 `CLAUDE.md` has write
+    // bits and passes — and the write then fails after `write_body` has already
+    // landed, which is the half-install this whole pre-flight block exists to
+    // make impossible. A 0200 file reads as writable and cannot be read at all.
+    //
+    // So: probe both directions, for real. `write(true)` alone neither creates
+    // nor truncates, so asking the question does not answer it destructively.
+    let refusal = |verb: &str, e: std::io::Error| {
+        anyhow::anyhow!(
+            "cannot {verb} {}: {e}. Fix the permissions, or add this line to it \
+             yourself, then re-run:\n    {}",
+            claude_md.display(),
+            reference_line(&claude_md.with_file_name(RULES_FILE)),
+        )
+    };
+    std::fs::File::open(claude_md).map_err(|e| refusal("read", e))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(claude_md)
+        .map_err(|e| refusal("write", e))?;
     Ok(())
 }
 
@@ -104,8 +127,8 @@ pub fn remove_body(rules_path: &Path) -> anyhow::Result<()> {
 }
 
 /// Is the reference already somewhere in this file?
-pub fn has_reference(claude_md: &Path, line: &str) -> bool {
-    read(claude_md).lines().any(|l| l.trim() == line)
+pub fn has_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
+    Ok(read(claude_md)?.lines().any(|l| l.trim() == line))
 }
 
 /// Put the reference on the first line. Returns whether the file changed.
@@ -114,7 +137,7 @@ pub fn has_reference(claude_md: &Path, line: &str) -> bool {
 /// not written at all — not rewritten identically. Rewriting would change the
 /// mtime of a file yadgar does not own on every install, for no reason.
 pub fn ensure_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
-    let existing = read(claude_md);
+    let existing = read(claude_md)?;
     let desired = format!("{line}\n{}", without_line(&existing, line));
     if desired == existing {
         return Ok(false);
@@ -125,7 +148,7 @@ pub fn ensure_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
 
 /// Take the reference back out. Returns whether the file changed.
 pub fn remove_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
-    let existing = read(claude_md);
+    let existing = read(claude_md)?;
     let desired = without_line(&existing, line);
     if desired == existing {
         return Ok(false);
@@ -134,8 +157,25 @@ pub fn remove_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-fn read(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_default()
+/// The file's text, or an error — NEVER an empty string standing in for one.
+///
+/// This used to end in `unwrap_or_default()`, and that one call was the worst
+/// thing this program could do. A read failure became an empty string,
+/// [`ensure_reference`] then built a file consisting of the reference line and
+/// nothing else, and wrote it over the top: somebody's `CLAUDE.md` replaced by
+/// a single `@` line, by an installer that went on to report success. A file
+/// that cannot be read is a refusal.
+fn read(path: &Path) -> anyhow::Result<String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        // Absent is not unreadable — install is about to create the file.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => anyhow::bail!(
+            "cannot read {}: {e}.\nRefusing to touch it: writing over a file \
+             yadgar cannot read would destroy whatever is in there.",
+            path.display()
+        ),
+    }
 }
 
 /// Everything except the reference line, byte-for-byte.

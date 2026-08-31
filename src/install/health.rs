@@ -97,7 +97,7 @@ impl fmt::Display for Drift {
             Self::McpCarriesCredential => write!(
                 f,
                 "the yadgar MCP entry carries an Authorization header — a token at rest, \
-                 left over from an older install. Re-run `yadgar install`."
+                 left over from an older install. Re-run `yaadgaar install`."
             ),
             Self::RulesMissing { path } => write!(f, "the rules file {path} is missing"),
             Self::ReferenceMissing { path } => {
@@ -120,16 +120,16 @@ pub fn verify(home: &Path) -> anyhow::Result<()> {
     let found = drift(home);
     if found.is_empty() {
         println!(
-            "yadgar install: OK — {} hooks, MCP entry, rules file.",
+            "yaadgaar install: OK — {} hooks, MCP entry, rules file.",
             MANAGED_HOOKS.len()
         );
         return Ok(());
     }
     for item in &found {
-        println!("yadgar install: DRIFT — {item}");
+        println!("yaadgaar install: DRIFT — {item}");
     }
     anyhow::bail!(
-        "{} problem(s) with the yadgar install; run `yadgar install` to repair",
+        "{} problem(s) with the yadgar install; run `yaadgaar install` to repair",
         found.len()
     )
 }
@@ -201,13 +201,15 @@ fn registered_hooks(settings: &Value) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for (event, list) in events {
         for entry in list.as_array().unwrap_or(&Vec::new()) {
-            let Some(cmd) = hooks::entry_command(entry) else {
-                continue;
-            };
-            let Some(name) = hooks::managed_name(cmd) else {
-                continue;
-            };
-            out.push((event.clone(), name, first_word(cmd)));
+            // EVERY hook in the entry, not only the first. A second yadgar
+            // registration sitting behind a foreign hook in the same entry is
+            // exactly the doubled pipeline this check exists to notice.
+            for cmd in hooks::entry_commands(entry) {
+                let Some(name) = hooks::managed_name(cmd) else {
+                    continue;
+                };
+                out.push((event.clone(), name, hooks::command_path(cmd)));
+            }
         }
     }
     out
@@ -286,27 +288,18 @@ fn check_rules(layout: &Layout, found: &mut Vec<Drift>) {
     // precisely what they were told, which is how a scheduled check becomes a
     // check nobody reads. The reference still goes FIRST when yadgar writes it;
     // an import is read wherever it sits.
+    // An UNREADABLE CLAUDE.md is its own drift and must not be reported as a
+    // missing reference: the two have different fixes, and telling somebody to
+    // re-run `install` against a file nothing can read sends them in a circle.
     let reference = rules::reference_line(&layout.rules());
-    if !rules::has_reference(&layout.claude_md(), &reference) {
-        found.push(Drift::ReferenceMissing {
+    match rules::has_reference(&layout.claude_md(), &reference) {
+        Ok(true) => {}
+        Ok(false) => found.push(Drift::ReferenceMissing {
             path: layout.claude_md().display().to_string(),
-        });
-    }
-}
-
-/// The command's argv[0], quoting and all — the path the hook will actually run.
-fn first_word(cmd: &str) -> String {
-    let trimmed = cmd.trim_start();
-    let (quote, rest) = match trimmed.chars().next() {
-        Some(q @ ('\'' | '"')) => (Some(q), &trimmed[1..]),
-        _ => (None, trimmed),
-    };
-    match quote {
-        Some(q) => rest.split(q).next().unwrap_or_default().to_string(),
-        None => rest
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_string(),
+        }),
+        Err(e) => found.push(Drift::Unreadable {
+            path: layout.claude_md().display().to_string(),
+            detail: e.to_string(),
+        }),
     }
 }

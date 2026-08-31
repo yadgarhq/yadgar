@@ -8,7 +8,7 @@
 //! replaces shipped a directory of hook scripts; nix's home-manager kept its own
 //! copies of the same handlers; the two diverged on `project_id` and the capture
 //! pipeline was dead for six days while every signal still read healthy. So:
-//! one binary, at one durable path, invoked as `yadgar hook <name>` — there is
+//! one binary, at one durable path, invoked as `yaadgaar hook <name>` — there is
 //! no second copy to diverge from, and no script on disk to rename.
 //!
 //! The three properties that keep this from breaking somebody's machine:
@@ -174,7 +174,7 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
     // machine where install refused, uninstall has nothing to remove and says
     // so quietly rather than failing.
     let reference = rules::reference_line(&layout.rules());
-    if rules::has_reference(&layout.claude_md(), &reference) {
+    if rules::has_reference(&layout.claude_md(), &reference)? {
         rules::check_reference_target(&layout.claude_md())?;
     }
     let mut settings = jsonfile::load(&layout.settings())?;

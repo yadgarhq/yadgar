@@ -14,7 +14,13 @@ use std::path::{Path, PathBuf};
 
 /// Agent worktrees are created and deleted per task — a path through one is
 /// dead by the time the next session starts.
-const WORKTREE_MARKER: &str = "/.claude/worktrees/";
+///
+/// TWO DIRECTORY NAMES, not a substring with separators baked into it. The
+/// substring form was `"/.claude/worktrees/"`, and it cannot match on Windows:
+/// `C:\Users\x\repo\.claude\worktrees\w\yaadgaar.exe` spells its separators
+/// the other way, so the refusal D76 records as having been poisoned three
+/// times never fired there at all. This client ships to Windows.
+const WORKTREE_MARKER: [&str; 2] = [".claude", "worktrees"];
 
 /// This binary's own path, if it is somewhere that will still exist tomorrow.
 pub fn resolve_durable_command() -> anyhow::Result<PathBuf> {
@@ -28,7 +34,7 @@ pub fn resolve_durable_command() -> anyhow::Result<PathBuf> {
             "refusing to register {} in settings.json: {reason}.\n\
              Every hook would break the moment that path goes away, silently — \
              which is how the capture pipeline died three times before. \
-             Install yadgar to a permanent location and run `yadgar install` from there.",
+             Install yaadgaar to a permanent location and run `yaadgaar install` from there.",
             exe.display(),
         );
     }
@@ -41,8 +47,7 @@ pub fn resolve_durable_command() -> anyhow::Result<PathBuf> {
 /// scheduled health check must not shell out on a machine where `git` may not
 /// even be installed.
 pub fn ephemeral_reason(path: &Path) -> Option<String> {
-    let text = path.to_string_lossy();
-    if text.contains(WORKTREE_MARKER) {
+    if is_inside_agent_worktree(path) {
         return Some(
             "it is inside an agent worktree (.claude/worktrees), which is deleted \
              when the agent that made it finishes"
@@ -59,6 +64,39 @@ pub fn ephemeral_reason(path: &Path) -> Option<String> {
         }
     }
     linked_worktree_reason(path)
+}
+
+/// Does *path* run through a `.claude/worktrees` directory?
+///
+/// Compares DIRECTORY NAMES rather than searching for a substring, so the
+/// answer does not depend on which way the separators lean.
+fn is_inside_agent_worktree(path: &Path) -> bool {
+    let names = directory_names(path);
+    names
+        .windows(2)
+        .any(|pair| pair[0] == WORKTREE_MARKER[0] && pair[1] == WORKTREE_MARKER[1])
+}
+
+/// The path's components, split on the separators of BOTH platforms.
+///
+/// `Path::components` splits on `\` only when compiled for Windows, so a
+/// Windows path examined anywhere else arrives as one long component and every
+/// component-wise check silently answers "no". Splitting on both is also what
+/// makes the Windows shape testable on the Linux CI this repository has — and a
+/// Windows defect that only a Windows runner can catch is a defect nobody
+/// catches, which is how this module came to have no Windows coverage at all.
+///
+/// The cost is a Unix directory named literally `.claude\worktrees` reading as
+/// two components. That is a refusal carrying an explicit message, which is the
+/// side of this trade to be wrong on.
+fn directory_names(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .flat_map(|name| name.split('\\').map(str::to_string).collect::<Vec<_>>())
+        .collect()
 }
 
 fn temp_roots() -> Vec<PathBuf> {
@@ -112,6 +150,28 @@ mod tests {
             "/home/someone/repo/.claude/worktrees/feat-x/target/debug/yadgar",
         ));
         assert!(reason.unwrap().contains("worktree"));
+    }
+
+    #[test]
+    fn a_windows_worktree_path_is_refused_too() {
+        // The failure this prevents: the marker was the substring
+        // "/.claude/worktrees/", so on Windows — a platform this client ships
+        // to — it never matched, and the refusal that D76 records as having
+        // been poisoned three times silently did not exist there.
+        //
+        // NOT #[cfg(windows)]-gated, deliberately. CI here is Linux, and a
+        // Windows check only a Windows runner can reach is a check nobody runs.
+        let reason = ephemeral_reason(Path::new(
+            r"C:\Users\someone\repo\.claude\worktrees\feat-x\target\debug\yaadgaar.exe",
+        ));
+        assert!(reason.unwrap().contains("worktree"));
+    }
+
+    #[test]
+    fn an_ordinary_windows_install_path_is_accepted() {
+        // The other half, and the reason the check compares directory names
+        // rather than searching anywhere in the string for the two words.
+        assert!(ephemeral_reason(Path::new(r"C:\Program Files\yaadgaar\yaadgaar.exe")).is_none());
     }
 
     #[test]

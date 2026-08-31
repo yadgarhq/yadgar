@@ -3,7 +3,7 @@ name: release
 # THE ONE PLACE THIS REPOSITORY DEFINES ITS OWN CI, and the exception is
 # argued rather than assumed. D62 puts CI in `yadgarhq/actions` because ~61
 # repositories would otherwise hold ~61 copies of one definition — and
-# `ci-release.yml` there builds an image and packages a chart, detecting exactly
+# `ci-release.yaml` there builds an image and packages a chart, detecting exactly
 # `Containerfile` and `chart`. This repository has neither. What it ships is a
 # WHEEL to PyPI (D75), which is a different artifact with a different shape: not
 # one build on one Linux runner, but six, one per platform, each on a runner of

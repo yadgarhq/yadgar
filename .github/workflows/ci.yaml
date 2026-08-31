@@ -11,7 +11,7 @@ name: ci
 # when it tries is a run with ZERO JOBS and no logs.
 #
 # NO RELEASE JOB HERE, and no `tags:` trigger — but not because there is no
-# release. `ci-release.yml` in `actions` detects exactly `Containerfile` and
+# release. `ci-release.yaml` in `actions` detects exactly `Containerfile` and
 # `chart` and publishes an image and a chart; with neither present every one of
 # its jobs skips and the call goes green having published nothing, which is a
 # tick over an empty release. What this repository ships is a WHEEL to PyPI
@@ -29,6 +29,6 @@ on:
 
 jobs:
   ci:
-    uses: yadgarhq/actions/.github/workflows/ci-pr.yml@main
+    uses: yadgarhq/actions/.github/workflows/ci-pr.yaml@main
     permissions:
       contents: read

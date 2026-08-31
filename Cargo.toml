@@ -53,7 +53,15 @@ tokio = { version = "1", features = [
 ] }
 
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+
+# `preserve_order` IS REQUIRED, not a nicety. `install` rewrites `~/.claude.json`
+# — a file the agent client owns and yadgar only visits — and without this
+# serde_json reserialises it with its ~40 top-level keys in alphabetical order.
+# Nothing is lost and every line has moved, so the person opens a whole-file diff
+# they did not ask for and cannot easily read. Preserving insertion order costs
+# one feature flag (it swaps the map for `indexmap`) and is the difference
+# between a two-line diff and an unreviewable one.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # Two error crates, and the split is deliberate. `thiserror` for the typed errors
 # a caller matches on — `ConfigError::Missing` is the difference between "log in"

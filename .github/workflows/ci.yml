@@ -10,17 +10,15 @@ name: ci
 # repository: a job cannot ask for more than the workflow grants, and the failure
 # when it tries is a run with ZERO JOBS and no logs.
 #
-# NO RELEASE JOB, and NO `tags:` TRIGGER. This is the one place this repository
-# genuinely differs from a service. `ci-release.yml` detects exactly two things,
-# `Containerfile` and `chart`, and publishes an image and a chart; with neither
-# present every one of its jobs skips and the release succeeds having published
-# nothing at all — a green tick over an empty release, which is worse than no
-# workflow. What this repository actually ships is a WHEEL to PyPI (D75), and
-# there is no wheel path in the shared workflow to call. Building one means a
-# cibuildwheel-shaped matrix — one job per platform and interpreter, a trusted
-# publisher on PyPI, `maturin build` per target and a single `twine upload` — and
-# that belongs in `actions` as its own reusable workflow, deliberately, rather
-# than bent into this file. Until it exists, releases are cut by hand.
+# NO RELEASE JOB HERE, and no `tags:` trigger — but not because there is no
+# release. `ci-release.yml` in `actions` detects exactly `Containerfile` and
+# `chart` and publishes an image and a chart; with neither present every one of
+# its jobs skips and the call goes green having published nothing, which is a
+# tick over an empty release. What this repository ships is a WHEEL to PyPI
+# (D75), across six platform targets, and that matrix lives in `release.yml`
+# beside this file. The argument for keeping it out of `actions` is written
+# there: D62 is about duplication, and this is the only repository shipping a
+# wheel.
 #
 # Push to main runs the version report only. Validating there would re-run what
 # the pull request just passed, on code already merged, with nobody watching.

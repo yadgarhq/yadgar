@@ -9,6 +9,11 @@
 # There is no Python source in this repository and there is no importable module
 # — `import yadgar` is not a thing and is not meant to be. ruff and uv ship the
 # same way, and they are the reference for this shape.
+#
+# NOTHING HERE SELECTS A PLATFORM, and that is correct rather than an omission: a
+# wheel is built for the machine maturin runs on, so the six platforms this
+# client supports are six CI jobs on six runners, not six entries in this file.
+# `.github/workflows/release.yml` is where that matrix lives.
 
 [build-system]
 requires = ["maturin>=1.9,<2.0"]

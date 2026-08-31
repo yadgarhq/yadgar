@@ -57,6 +57,12 @@ was rejected for exactly that reason.
 The wheel carries the compiled binary and no Python at all — `bindings = "bin"`
 in `pyproject.toml` — so `import yadgar` is not a thing and is not meant to be.
 
+A wheel is per-platform, so there are **six**: Linux, macOS and Windows, each on
+x86_64 and aarch64. Every one is built on a runner of its own architecture rather
+than cross-compiled, and `release.yml` refuses to publish unless all six are
+present — shipping the four that built would leave two platforms silently
+installing an older version.
+
 ## Development
 
 ```bash
@@ -73,5 +79,10 @@ skips the image, chart and proto stages (D62).
 To build a wheel locally:
 
 ```bash
-maturin build --release   # → target/wheels/
+maturin build --release   # → target/wheels/, for THIS machine only
 ```
+
+The other five targets are built by `.github/workflows/release.yml`, which is
+this repository's one piece of local CI. The reason it is not in
+[`yadgarhq/actions`](https://github.com/yadgarhq/actions) with everything else is
+written at the top of that file.

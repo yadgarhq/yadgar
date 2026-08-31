@@ -36,6 +36,12 @@ pub fn merge(config: &mut Value, binary: &Path) {
 }
 
 /// Remove yadgar's entry and nothing else.
+///
+/// An `mcpServers` object left empty is NOT removed, and the asymmetry with the
+/// hook events — where an emptied key is dropped — is deliberate. Claude Code
+/// writes `mcpServers` itself and an empty one is its own resting state; the
+/// hook event keys it does not write, so `"PreCompact": []` is residue this
+/// installer created and nobody else's business.
 pub fn strip(config: &mut Value) {
     if let Some(servers) = config.get_mut("mcpServers").and_then(Value::as_object_mut) {
         servers.remove(SERVER_KEY);

@@ -278,15 +278,16 @@ fn check_rules(layout: &Layout, found: &mut Vec<Drift>) {
             path: layout.rules().display().to_string(),
         });
     }
+    // ANYWHERE in the file, not on the first line, and the difference matters on
+    // exactly the machine that made this module careful. Where `CLAUDE.md` is a
+    // nix symlink, `install` refuses and says to add the line to whatever
+    // generates it — and whatever generates it puts the line where it likes.
+    // Insisting on the first line would report drift forever at somebody who did
+    // precisely what they were told, which is how a scheduled check becomes a
+    // check nobody reads. The reference still goes FIRST when yadgar writes it;
+    // an import is read wherever it sits.
     let reference = rules::reference_line(&layout.rules());
-    let first = std::fs::read_to_string(layout.claude_md())
-        .unwrap_or_default()
-        .lines()
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    if first != reference {
+    if !rules::has_reference(&layout.claude_md(), &reference) {
         found.push(Drift::ReferenceMissing {
             path: layout.claude_md().display().to_string(),
         });

@@ -402,3 +402,45 @@ fn the_rules_file_is_owned_and_referenced_from_the_first_line() {
         .unwrap()
         .contains("Yadgar"));
 }
+
+#[cfg(unix)]
+#[test]
+fn verify_is_clean_on_the_machine_where_install_refused() {
+    // The failure this prevents: `install` refuses on a nix box because
+    // CLAUDE.md is a store symlink, the person does what the refusal message
+    // says and adds the reference to whatever generates that file — and then a
+    // scheduled `verify` reports drift at them forever. A check that cries wolf
+    // at somebody who followed the instructions is a check they turn off, which
+    // is the same ending as never writing it.
+    let home = scratch("verify-after-refusal");
+    let layout = Layout::new(&home);
+    std::fs::create_dir_all(layout.claude_dir()).unwrap();
+
+    // Everything install would have written, written by hand instead.
+    std::fs::create_dir_all(layout.claude_dir()).unwrap();
+    let store = home.join("nix-store-CLAUDE.md");
+    std::fs::write(
+        &store,
+        format!("# declared elsewhere\n@{}\n", layout.rules().display()),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(&store, layout.claude_md()).unwrap();
+    std::fs::write(layout.rules(), "# rules").unwrap();
+    let mut settings = serde_json::json!({});
+    super::hooks::merge(&mut settings, Path::new(BINARY));
+    std::fs::write(layout.settings(), settings.to_string()).unwrap();
+    let mut mcp = serde_json::json!({});
+    super::mcp::merge(&mut mcp, Path::new(BINARY));
+    std::fs::write(layout.mcp_config(), mcp.to_string()).unwrap();
+
+    let structural: Vec<_> = drift(&home)
+        .into_iter()
+        .filter(|d| {
+            !matches!(
+                d,
+                Drift::CommandMissing { .. } | Drift::CommandEphemeral { .. }
+            )
+        })
+        .collect();
+    assert!(structural.is_empty(), "{structural:#?}");
+}

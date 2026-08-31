@@ -24,7 +24,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
-    name = "yadgar",
+    name = "yaadgaar",
     version,
     about = "Log in once, then serve MCP to your agent by proxying to the gateway."
 )]

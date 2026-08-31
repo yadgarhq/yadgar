@@ -1,6 +1,7 @@
 [package]
-name = "yadgar"
-# UNRESOLVED, AND IT BLOCKS THE FIRST PUBLISH — recorded here rather than in a
+name = "yaadgaar"
+# RESOLVED — the note below is kept because the reasoning still binds.
+# WAS UNRESOLVED, AND IT BLOCKED THE FIRST PUBLISH — recorded here rather than in a
 # document, because this is the file the number is read from.
 #
 # `yadgar` ALREADY EXISTS ON PyPI, at 5.193.0: the Python client this replaces.
@@ -24,7 +25,15 @@ description = "The yadgar client: one binary that logs in, proxies MCP to the ga
 # word is a coincidence that must not be relied on. maturin packages whatever
 # Cargo produces, and `pipx install yadgar` must put `yadgar` on the PATH.
 [[bin]]
-name = "yadgar"
+# The BINARY is renamed too, not only the PyPI project.
+#
+# The Python client installs an executable called `yadgar`. Two projects
+# installing the same executable name collide on PATH and cannot coexist — which
+# is the entire reason for publishing under a separate name during the
+# transition. So the command is `yaadgaar`, and the MCP registration and hook
+# entries name it explicitly. Both can be installed at once, and which one runs
+# is never ambiguous.
+name = "yaadgaar"
 path = "src/main.rs"
 
 [dependencies]

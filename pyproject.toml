@@ -20,7 +20,7 @@ requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "yadgar"
+name = "yaadgaar"
 description = "The yadgar client: logs in once, then serves MCP to your agent by proxying to the gateway."
 readme = "README.md"
 requires-python = ">=3.9"

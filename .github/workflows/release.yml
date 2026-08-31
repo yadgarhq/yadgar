@@ -82,6 +82,10 @@ jobs:
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
           target: ${{ matrix.target }}
+          # Scoped to Linux by the action's own definition ("control the
+          # manylinux platform tag on linux"), so the value the four non-Linux
+          # legs carry is inert. Passed uniformly anyway rather than making the
+          # matrix rows differ in shape.
           manylinux: ${{ matrix.manylinux }}
           # `--locked`: the wheel is built from Cargo.lock, not from whatever
           # the registry resolves to that morning. A release nobody can

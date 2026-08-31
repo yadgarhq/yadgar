@@ -1,5 +1,19 @@
 [package]
 name = "yadgar"
+# UNRESOLVED, AND IT BLOCKS THE FIRST PUBLISH — recorded here rather than in a
+# document, because this is the file the number is read from.
+#
+# `yadgar` ALREADY EXISTS ON PyPI, at 5.193.0: the Python client this replaces.
+# `pipx install yadgar` resolves the HIGHEST version, so publishing 0.1.0 would
+# succeed and then never be installed — every existing user would keep getting
+# 5.193.0, silently, with no error anywhere. That is precisely the regression
+# D75 says a rewrite may not cause.
+#
+# Two ways out, and choosing is a versioning decision rather than a packaging
+# one: continue the series (the first Rust release is 6.0.0, and the major bump
+# is honest — it IS a breaking rewrite), or publish under a different project
+# name and leave 5.193.0 where it is. Until that is settled this number is a
+# placeholder and MUST NOT be tagged.
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.90"

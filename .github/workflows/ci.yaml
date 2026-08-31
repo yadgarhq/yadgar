@@ -15,7 +15,7 @@ name: ci
 # `chart` and publishes an image and a chart; with neither present every one of
 # its jobs skips and the call goes green having published nothing, which is a
 # tick over an empty release. What this repository ships is a WHEEL to PyPI
-# (D75), across six platform targets, and that matrix lives in `release.yml`
+# (D75), across six platform targets, and that matrix lives in `release.yaml`
 # beside this file. The argument for keeping it out of `actions` is written
 # there: D62 is about duplication, and this is the only repository shipping a
 # wheel.

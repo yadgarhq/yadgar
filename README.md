@@ -59,7 +59,7 @@ in `pyproject.toml` — so `import yadgar` is not a thing and is not meant to be
 
 A wheel is per-platform, so there are **six**: Linux, macOS and Windows, each on
 x86_64 and aarch64. Every one is built on a runner of its own architecture rather
-than cross-compiled, and `release.yml` refuses to publish unless all six are
+than cross-compiled, and `release.yaml` refuses to publish unless all six are
 present — shipping the four that built would leave two platforms silently
 installing an older version.
 
@@ -82,7 +82,7 @@ To build a wheel locally:
 maturin build --release   # → target/wheels/, for THIS machine only
 ```
 
-The other five targets are built by `.github/workflows/release.yml`, which is
+The other five targets are built by `.github/workflows/release.yaml`, which is
 this repository's one piece of local CI. The reason it is not in
 [`yadgarhq/actions`](https://github.com/yadgarhq/actions) with everything else is
 written at the top of that file.

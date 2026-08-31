@@ -107,12 +107,19 @@ jobs:
     needs: wheels
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    # PyPI trusted publishing: the workflow's own OIDC identity, so there is no
-    # long-lived API token to hold, leak or rotate. Same argument D61 makes for
-    # signing images with the workflow identity rather than a key.
+    # Publishes with a repository secret rather than trusted publishing.
+    #
+    # Trusted publishing is the better posture and the intended destination: it
+    # mints a short-lived credential from the workflow's own OIDC identity, so
+    # there is nothing to hold, leak or rotate — the same argument D61 makes for
+    # signing images with the workflow identity rather than a key. Swapping back
+    # is deleting `password:` and restoring `id-token: write`.
+    #
+    # The environment gate stays regardless: it is what stops a workflow run from
+    # a fork or an unreviewed branch reaching the secret at all.
     environment: pypi
     permissions:
-      id-token: write
+      contents: read
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -133,3 +140,5 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: dist
+          # Through the action's own input, never an env var echoed by a shell.
+          password: ${{ secrets.PYPI_API_TOKEN }}

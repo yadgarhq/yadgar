@@ -189,3 +189,44 @@ fn an_uninstall_leaves_a_symlinked_rules_file_alone() {
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "# not ours\n");
 }
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_claude_md_does_not_stop_an_uninstall() {
+    // The failure this prevents, and it was introduced by the fix for the
+    // install side: making the reference check fail loudly turned an
+    // unreadable `CLAUDE.md` into a machine yadgar cannot be removed from at
+    // all. The hooks and the MCP entry come out without ever reading that
+    // file, so they must come out; the one thing that genuinely needs it is
+    // reported at the end, after everything removable has gone.
+    use std::os::unix::fs::PermissionsExt;
+    let home = scratch("uninstall-unreadable");
+    let layout = Layout::new(&home);
+    install_with(&home, Path::new(BINARY)).unwrap();
+    std::fs::set_permissions(layout.claude_md(), std::fs::Permissions::from_mode(0o200)).unwrap();
+    if std::fs::read_to_string(layout.claude_md()).is_ok() {
+        std::fs::set_permissions(layout.claude_md(), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        return; // Root, or a filesystem that ignores the mode.
+    }
+
+    let outcome = uninstall(&home);
+
+    std::fs::set_permissions(layout.claude_md(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        outcome.is_err(),
+        "the reference line is still in a file yadgar cannot read, and nothing said so"
+    );
+    let settings = read_json(&layout.settings());
+    assert!(
+        settings
+            .get("hooks")
+            .is_none_or(|h| h.as_object().unwrap().is_empty()),
+        "the hooks were left registered against an install that is gone: {settings:#?}"
+    );
+    let config = read_json(&layout.mcp_config());
+    assert!(
+        config["mcpServers"].get("yadgar").is_none(),
+        "the MCP entry was left behind: {config:#?}"
+    );
+}

@@ -173,8 +173,18 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
     // CLAUDE.md is only an obstacle if the reference is actually in it. On the
     // machine where install refused, uninstall has nothing to remove and says
     // so quietly rather than failing.
+    //
+    // `unwrap_or(false)` rather than `?`, and the difference is the whole
+    // asymmetry. Install REFUSES on a CLAUDE.md it cannot read, because it is
+    // about to write to it. Uninstall must not: the hooks and the MCP entry
+    // come out without that file being readable at all, and bailing here would
+    // leave somebody unable to remove yadgar from their machine because of a
+    // file yadgar is only trying to tidy. The one step that genuinely needs to
+    // read it is `remove_reference`, at the very end — so everything removable
+    // is already gone by the time the problem is reported, and re-running after
+    // fixing the permissions finishes the job.
     let reference = rules::reference_line(&layout.rules());
-    if rules::has_reference(&layout.claude_md(), &reference)? {
+    if rules::has_reference(&layout.claude_md(), &reference).unwrap_or(false) {
         rules::check_reference_target(&layout.claude_md())?;
     }
     let mut settings = jsonfile::load(&layout.settings())?;

@@ -1,0 +1,34 @@
+name: ci
+
+# CI is defined once in yadgarhq/actions (D62). This file is the whole of this
+# repository's CI configuration: the shared workflow detects what the repository
+# is and runs what applies. Here it detects `Cargo.toml` and nothing else — no
+# chart, no Containerfile, no PROTO_VERSION — so the chart, image and proto
+# stages skip and say so in the run summary.
+#
+# NO WORKFLOW-LEVEL `permissions:` BLOCK, deliberately, matching every other
+# repository: a job cannot ask for more than the workflow grants, and the failure
+# when it tries is a run with ZERO JOBS and no logs.
+#
+# NO RELEASE JOB HERE, and no `tags:` trigger — but not because there is no
+# release. `ci-release.yml` in `actions` detects exactly `Containerfile` and
+# `chart` and publishes an image and a chart; with neither present every one of
+# its jobs skips and the call goes green having published nothing, which is a
+# tick over an empty release. What this repository ships is a WHEEL to PyPI
+# (D75), across six platform targets, and that matrix lives in `release.yml`
+# beside this file. The argument for keeping it out of `actions` is written
+# there: D62 is about duplication, and this is the only repository shipping a
+# wheel.
+#
+# Push to main runs the version report only. Validating there would re-run what
+# the pull request just passed, on code already merged, with nobody watching.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: yadgarhq/actions/.github/workflows/ci-pr.yml@main
+    permissions:
+      contents: read

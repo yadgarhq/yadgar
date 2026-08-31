@@ -1,0 +1,115 @@
+[package]
+name = "yaadgaar"
+# RESOLVED — the note below is kept because the reasoning still binds.
+# WAS UNRESOLVED, AND IT BLOCKED THE FIRST PUBLISH — recorded here rather than in a
+# document, because this is the file the number is read from.
+#
+# `yadgar` ALREADY EXISTS ON PyPI, at 5.193.0: the Python client this replaces.
+# `pipx install yadgar` resolves the HIGHEST version, so publishing 0.1.0 would
+# succeed and then never be installed — every existing user would keep getting
+# 5.193.0, silently, with no error anywhere. That is precisely the regression
+# D75 says a rewrite may not cause.
+#
+# Two ways out, and choosing is a versioning decision rather than a packaging
+# one: continue the series (the first Rust release is 6.0.0, and the major bump
+# is honest — it IS a breaking rewrite), or publish under a different project
+# name and leave 5.193.0 where it is. Until that is settled this number is a
+# placeholder and MUST NOT be tagged.
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "Apache-2.0"
+description = "The yadgar client: one binary that logs in, proxies MCP to the gateway, and owns the agent environment (D75, D76)."
+
+# NAMED EXPLICITLY, because the package name and the binary name being the same
+# word is a coincidence that must not be relied on. maturin packages whatever
+# Cargo produces, and `pipx install yadgar` must put `yadgar` on the PATH.
+[[bin]]
+# The BINARY is renamed too, not only the PyPI project.
+#
+# The Python client installs an executable called `yadgar`. Two projects
+# installing the same executable name collide on PATH and cannot coexist — which
+# is the entire reason for publishing under a separate name during the
+# transition. So the command is `yaadgaar`, and the MCP registration and hook
+# entries name it explicitly. Both can be installed at once, and which one runs
+# is never ambiguous.
+name = "yaadgaar"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP TO THE GATEWAY, and nothing else. No tonic, no prost, no proto: the
+# client speaks MCP over HTTPS and the gateway does the translation (D16, D75).
+# It also holds no database — there is no sqlx and no yadgar-store here, for the
+# reason a logic service has none (D4).
+#
+# `default-features = false` is a PIN, not a fix. In reqwest 0.13 `default-tls`
+# already resolves to `rustls` — but that is upstream's default, and D63 forbids
+# native-tls in this tree regardless of what upstream defaults to next. Naming
+# the features is what makes the rule enforced here rather than inherited.
+#
+# The three non-TLS defaults are restated deliberately:
+#   charset       reqwest's own default; dropping it silently changes decoding
+#   http2         the gateway serves h2, and h1-only would work while being slower
+#   system-proxy  THE CLIENT RUNS ON LAPTOPS. Behind a corporate proxy, a client
+#                 that ignores the system proxy simply cannot reach anything, and
+#                 the error is a timeout that names nothing.
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls",
+  "charset",
+  "http2",
+  "system-proxy",
+  "json",
+] }
+
+clap = { version = "4", features = ["derive"] }
+
+# `io-std` and `io-util` are both load-bearing for `serve`: the first gives the
+# async stdin/stdout the MCP stdio transport is, the second gives the BufReader
+# and `AsyncBufReadExt` that turn it into lines. `process` is for the install
+# path, which resolves and probes the agent client's own command (D76).
+tokio = { version = "1", features = [
+  "macros",
+  "rt-multi-thread",
+  "io-std",
+  "io-util",
+  "process",
+] }
+
+serde = { version = "1", features = ["derive"] }
+
+# `preserve_order` IS REQUIRED, not a nicety. `install` rewrites `~/.claude.json`
+# — a file the agent client owns and yadgar only visits — and without this
+# serde_json reserialises it with its ~40 top-level keys in alphabetical order.
+# Nothing is lost and every line has moved, so the person opens a whole-file diff
+# they did not ask for and cannot easily read. Preserving insertion order costs
+# one feature flag (it swaps the map for `indexmap`) and is the difference
+# between a two-line diff and an unreviewable one.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+# Two error crates, and the split is deliberate. `thiserror` for the typed errors
+# a caller matches on — `ConfigError::Missing` is the difference between "log in"
+# and "this file is corrupt", and a string cannot carry that. `anyhow` for the
+# top of `main` and the proxy loop, where the only thing left to do is print.
+thiserror = "2"
+anyhow = "1"
+
+tracing = "0.1"
+# `env-filter` so RUST_LOG works. NO `json` feature: this process logs for one
+# person at a terminal, not for a scraper — the gateway is what emits structured
+# records (D67), and the client is not a service.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# The config directory, per platform. `~/.config/yadgar` on Linux is not the
+# answer on macOS or Windows, and hardcoding it is how a client works on the
+# machine it was written on.
+dirs = "6"
+
+# The password prompt at login, which must not echo and must not land in shell
+# history — the two ways a credential leaks from an interactive CLI.
+rpassword = "7"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }

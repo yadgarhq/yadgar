@@ -1,0 +1,56 @@
+# PyPI is the DISTRIBUTION channel, not a second implementation (D75). The client
+# is Rust like everything else here; this file exists so `pipx install yadgar`
+# keeps working exactly as it does today, which is the one thing a rewrite must
+# not take away from the people already using it.
+#
+# `bindings = "bin"` is what makes that a wheel of a BINARY rather than a Python
+# extension module: maturin compiles the crate and places the executable in the
+# wheel's `.data/scripts/` directory, where pipx and pip put it on the PATH.
+# There is no Python source in this repository and there is no importable module
+# — `import yadgar` is not a thing and is not meant to be. ruff and uv ship the
+# same way, and they are the reference for this shape.
+#
+# NOTHING HERE SELECTS A PLATFORM, and that is correct rather than an omission: a
+# wheel is built for the machine maturin runs on, so the six platforms this
+# client supports are six CI jobs on six runners, not six entries in this file.
+# `.github/workflows/release.yml` is where that matrix lives.
+
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "yaadgaar"
+description = "The yadgar client: logs in once, then serves MCP to your agent by proxying to the gateway."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+keywords = ["mcp", "agent", "memory", "yadgar"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Rust",
+  "Topic :: Software Development :: Libraries",
+]
+# ONE version, in Cargo.toml. Written in both files it is written in one of them
+# wrongly, and the wheel and the binary then disagree about what they are —
+# which is exactly the report nobody can act on.
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/yadgarhq/yadgar"
+Decisions = "https://github.com/yadgarhq/docs"
+
+[tool.maturin]
+bindings = "bin"
+# `strip` keeps the wheel small; there is no symbolicated crash reporting here to
+# lose, and the wheel is downloaded by every user on every upgrade.
+strip = true
+# NO `python-source` and NO `[project.scripts]`, both deliberate. `python-source`
+# points at a Python package to ship alongside the binary and there is none;
+# pointing it at a directory that does not exist fails the build. A
+# `[project.scripts]` entry would declare a console script whose target is an
+# importable Python callable — there is none of that either, and maturin already
+# installs the executable itself.

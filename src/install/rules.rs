@@ -221,6 +221,40 @@ mod tests {
         );
     }
 
+    /// Pins `read` itself, not the pre-flight check that also catches this.
+    ///
+    /// `install` refuses an unreadable `CLAUDE.md` twice over: once in
+    /// `check_reference_target`, before anything is written, and once here.
+    /// The end-to-end test can only ever see the first of them, so removing
+    /// this one — going back to `unwrap_or_default()` — was invisible through
+    /// the public path. Two independent defenses need two independent tests,
+    /// or one of them is decoration.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_an_error_rather_than_an_empty_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::install::tests::scratch("rules-unreadable");
+        let path = dir.join("CLAUDE.md");
+        let theirs = "# my own instructions\n";
+        std::fs::write(&path, theirs).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
+        if std::fs::read_to_string(&path).is_ok() {
+            // Root, or a filesystem that ignores the mode: nothing to test.
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+
+        let outcome = ensure_reference(&path, "@/opt/yadgar-rules.md");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(outcome.is_err(), "an unreadable file was treated as empty");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            theirs,
+            "the person's instructions were overwritten"
+        );
+    }
+
     #[test]
     fn a_reference_further_down_is_moved_to_the_front_not_duplicated() {
         let dir = crate::install::tests::scratch("rules-move");

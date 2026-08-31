@@ -13,7 +13,7 @@
 # NOTHING HERE SELECTS A PLATFORM, and that is correct rather than an omission: a
 # wheel is built for the machine maturin runs on, so the six platforms this
 # client supports are six CI jobs on six runners, not six entries in this file.
-# `.github/workflows/release.yml` is where that matrix lives.
+# `.github/workflows/release.yaml` is where that matrix lives.
 
 [build-system]
 requires = ["maturin>=1.9,<2.0"]

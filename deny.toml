@@ -1,0 +1,95 @@
+# D24: a stack composed only of permissively-licensed components must remain
+# viable end to end — no BSL or source-available component may become a hard
+# requirement. Many organisations refuse those by policy regardless of whether
+# the restriction would actually apply to them, and this project is meant to be
+# self-hosted by exactly those organisations.
+#
+# O10 instructs that the licence audit be re-run before adding any dependency.
+# That instruction lives in a document and depends on somebody remembering it;
+# this file is the same rule enforced by something that runs.
+#
+# IT MATTERS MOST HERE, and for a reason the services do not have: this is the
+# artifact that is REDISTRIBUTED. A wheel on PyPI is a binary a stranger
+# downloads, so every licence in this tree ships inside it.
+
+[licenses]
+# Permissive only. A copyleft dependency is not automatically disqualifying —
+# MPL-2.0 is file-level and unencumbering as an unmodified dependency — but it
+# is a decision, so it belongs in an explicit exception below rather than in a
+# blanket allow.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+
+    # ADDED DELIBERATELY 2026-08-31, which is this file working as intended.
+    # Both entries are decisions, in the sense the paragraph above means it: the
+    # gate refused, and the answer is written down rather than the finding
+    # silenced. Neither is BSL nor source-available, so D24 is satisfied.
+    #
+    # MPL-2.0 — `option-ext`, reached through `dirs-sys` from `dirs`.
+    # File-level weak copyleft: the obligation attaches to modifications of the
+    # MPL-licensed FILES, and an unmodified dependency carries none beyond making
+    # that crate's source available, which crates.io already does. Exactly the
+    # case the paragraph above anticipated, so this is the exception it asked for
+    # rather than a widening of the rule.
+    #
+    # Not avoidable while `dirs` is used, and it is used for a real reason:
+    # `~/.config/yadgar` is not the answer on macOS or Windows, and hardcoding it
+    # is how a client works only on the machine it was written on.
+    #
+    # CDLA-Permissive-2.0 — `webpki-root-certs`, reached through
+    # `rustls-platform-verifier` from reqwest's `rustls` feature.
+    # A DATA licence, not a software one, which is why it was not already in a
+    # list of software licences: the crate ships the Mozilla CA certificate
+    # bundle, and certificates are data. Version 2.0 is the permissive member of
+    # the family — no copyleft and no share-alike, unlike CDLA-Sharing — and its
+    # only obligation is retaining the disclaimer.
+    #
+    # Not avoidable: TLS needs roots, and the alternative is native-tls, which
+    # D63 rules out.
+    #
+    # THE STAKES ARE HIGHER HERE THAN IN A SERVICE, and that is the reason both
+    # got a paragraph rather than a line: this is the artifact that is
+    # redistributed, so every licence in this tree ships inside the wheel.
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+# The allowlist is a DECIDED set, not a description of today's tree. Entries
+# nothing currently uses are pre-approved judgements, not dead config, so an
+# unmatched allowance is not worth a warning. What must stay loud is a licence
+# NOT on the list — that is the O10 decision point.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+
+[advisories]
+yanked = "deny"
+
+# NO `ignore` LIST, and its absence is the point rather than an omission. The
+# gateway carries one accepted advisory, justified entirely by a `sqlx-mysql`
+# code path; there is no sqlx here and no database at all, so copying that entry
+# would mean starting this repository with an exemption for a dependency it does
+# not have. A limit adopted already-breached is a limit that stops meaning
+# anything — the same argument the complexity ceilings are adopted early for.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# THE CLIENT HAS NO GIT DEPENDENCIES TODAY, and this is a pre-approved judgement
+# rather than a description of the tree — the same footing as the licence
+# allowlist above. If an in-org crate is ever pinned here it will be pinned by
+# revision (D62's argument for SHA pins, applied to a crate); a dependency from
+# any other git host or organisation still fails.
+[sources.allow-org]
+github = ["yadgarhq"]

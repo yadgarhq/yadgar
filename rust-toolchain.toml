@@ -1,0 +1,13 @@
+[toolchain]
+# Aligned with the rest of the organisation's repositories, so a developer moving
+# between them compiles with one toolchain rather than making rustup fetch a
+# second one per checkout.
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]
+
+# NO `targets`. The services declare `x86_64-unknown-linux-musl` because their
+# runtime image is distroless/static and musl is what makes it so (D63). This
+# repository builds no image: it ships wheels, and a wheel is built for the
+# platform it targets by the release job, on a runner of that platform. Carrying
+# the musl target here would make every developer machine and every CI run fetch
+# a musl std nothing links against.

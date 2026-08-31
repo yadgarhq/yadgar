@@ -1,0 +1,47 @@
+# Every yadgarhq repo carries pre-commit (D59). Hook failure is signal, not
+# obstacle: fix the cause and re-stage. Never --no-verify.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      # No exclusions. The services exclude `chart/templates/` because a Helm
+      # template is a Go template that only looks like YAML; there is no chart
+      # here, so every YAML in this repository is real YAML.
+      - id: check-yaml
+      - id: check-toml
+
+  # Shared, from yadgarhq/actions (D62). IMMUTABLE rev: pre-commit caches a rev
+  # at first install and never re-resolves it, so a moving tag would silently
+  # freeze each machine at whatever it meant the day it first ran.
+  - repo: https://github.com/yadgarhq/actions
+    rev: v1.6.0
+    hooks:
+      - id: gitleaks
+      - id: prettier
+      - id: cargo-fmt
+      - id: cargo-clippy
+      # The two complexity gates, adopted on day one rather than once something
+      # is already over the line: 500 lines a file and 120 a function, plus
+      # clippy's nesting and branching lints, which measure what a line count
+      # cannot. Starting a repository with an exemption list is how a ceiling
+      # stops meaning anything.
+      - id: complexity
+      - id: cargo-clippy-complexity
+      - id: cargo-deny
+      # KEPT, though it currently finds nothing to check: the client implements
+      # no tonic service and registers no HTTP routes, so there are no handlers
+      # here and the hook passes trivially. It stays because the day one appears
+      # is exactly the day nobody would think to add it (D67).
+      - id: observe-coverage
+
+  # NOT `hadolint` and NOT `helm-lint`, and their absence is a fact about this
+  # repository rather than a relaxation: the first matches `types: [dockerfile]`
+  # and the second `files: ^chart/`, and this repository ships a wheel rather
+  # than an image or a chart, so both would be permanently inert. A hook that can
+  # never fire is indistinguishable from one that is broken.

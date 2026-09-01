@@ -21,6 +21,26 @@
 //! `hooks::merge`. Writing the JSON by hand is also the more honest fixture —
 //! it is what is actually on a machine, rather than what this crate believes it
 //! wrote there.
+//!
+//! **`#![cfg(unix)]`, and the reason is a destroyed machine rather than a
+//! platform difference.** These are the only tests in this repository that go
+//! through `main::home()`, and therefore through `dirs::home_dir()`. On Unix
+//! that reads `$HOME`, so the binary can be pointed at a scratch directory. On
+//! Windows it is `known_folder_profile()` — `SHGetKnownFolderPath` with
+//! `FOLDERID_Profile` — which reads NEITHER `HOME` nor `USERPROFILE`. Running
+//! these there would run a real `yaadgaar uninstall` against the developer's own
+//! `~/.claude`: their hooks stripped, their MCP entry removed, their rules file
+//! deleted. `install/tests/mod.rs` states the invariant these would break — a
+//! test that writes into somebody's live settings has already failed at the
+//! thing this module is for — and it held until now only because every other
+//! test takes the home as a parameter.
+//!
+//! Setting `USERPROFILE` as well would not help and would be worse: it buys
+//! nothing against the known-folder API, and leaves a test that LOOKS hermetic.
+//! What both reports SAY is platform-independent and covered by the
+//! `report_lines` unit tests, which run everywhere; only the wiring is gated.
+
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};

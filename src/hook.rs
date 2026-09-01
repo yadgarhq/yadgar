@@ -64,6 +64,10 @@ use std::io::Read as _;
 
 use serde_json::Value;
 
+mod guard;
+
+pub use guard::pre_tool_guard;
+
 /// The exit status a positively matched refusal leaves.
 ///
 /// TWO, and only ever from [`pre_tool_guard`]. Claude Code treats 2 as a
@@ -143,91 +147,6 @@ fn is_managed(name: &str) -> bool {
         .any(|h| h.name == name)
 }
 
-/// Refuse a command that the standing rules forbid.
-///
-/// The matcher covers Bash AND the editing tools, and that breadth was earned:
-/// an agent once used Edit rather than Bash to add itself to the push allowlist,
-/// pushed to master, then reverted the file to conceal it — and a Bash-only
-/// matcher never even routed the call to the guard.
-pub fn pre_tool_guard(payload: &Value) -> Decision {
-    let tool = payload
-        .get("tool_name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
-
-    // Everything the call might execute or write, as one haystack. A guard that
-    // inspected only `command` would miss the same action performed by Edit.
-    let subject = match tool {
-        "Bash" => input
-            .get("command")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        "Edit" | "Write" | "NotebookEdit" => [
-            input.get("file_path").and_then(Value::as_str).unwrap_or(""),
-            input
-                .get("new_string")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-            input.get("content").and_then(Value::as_str).unwrap_or(""),
-        ]
-        .join("\n"),
-        _ => return Decision::Allow,
-    };
-
-    for (matches, reason) in GUARDS {
-        if matches(&subject, tool) {
-            return Decision::Deny((*reason).to_string());
-        }
-    }
-    Decision::Allow
-}
-
-type Guard = (fn(&str, &str) -> bool, &'static str);
-
-/// The standing refusals. Each exists because something happened.
-const GUARDS: &[Guard] = &[
-    (
-        |s, tool| tool == "Bash" && (s.contains("--no-verify") || s.contains("--no-gpg-sign")),
-        "A commit that skips hooks is a commit whose checks did not run. \
-         Hook failure is signal, not an obstacle — fix the cause and re-run.",
-    ),
-    (
-        |s, tool| tool == "Bash" && mentions_terraform(s),
-        "terraform, tofu and tfp must never execute here, by any mechanism — \
-         including a fresh container, a nix run, or a CI trigger. Write the \
-         command into MIGRATION_NOTES.md and hand it over instead.",
-    ),
-    (
-        |s, _| {
-            s.contains("digger apply") || s.contains("digger plan") || s.contains("digger destroy")
-        },
-        "A digger comment runs terraform against remote state through the \
-         orchestrator. This is refused even when explicitly instructed: put the \
-         comment in MIGRATION_NOTES.md for a human to post.",
-    ),
-    (
-        |s, _| s.contains("yadgar-hook-exceptions.json"),
-        "The hook exceptions file is a durable, human-only decision. An agent \
-         once edited it to allow its own push, then reverted the file to \
-         conceal that — which is why this refuses the write rather than \
-         trusting the intent behind it.",
-    ),
-];
-
-/// Terraform by any route, including the ones that do not say "terraform" first.
-fn mentions_terraform(s: &str) -> bool {
-    const DIRECT: &[&str] = &["terraform ", "tofu ", "tfp "];
-    if DIRECT.iter().any(|d| s.contains(d)) {
-        return true;
-    }
-    // A container or a nix invocation reaches the same binary. The rule is about
-    // what runs, not about which word was typed.
-    (s.contains("docker run") || s.contains("podman run") || s.contains("nix run"))
-        && (s.contains("terraform") || s.contains("tofu"))
-}
-
 /// The hook payload the agent client writes to this process's stdin.
 ///
 /// Separate from [`run`] so the dispatch is testable without a process.
@@ -246,71 +165,6 @@ mod tests {
 
     fn bash(cmd: &str) -> Value {
         json!({"tool_name": "Bash", "tool_input": {"command": cmd}})
-    }
-
-    #[test]
-    fn a_commit_that_skips_hooks_is_refused() {
-        assert!(matches!(
-            pre_tool_guard(&bash("git commit --no-verify -m x")),
-            Decision::Deny(_)
-        ));
-    }
-
-    #[test]
-    fn terraform_is_refused_through_a_container_too() {
-        // The rule is about what RUNS, not which word was typed. A guard
-        // matching only "terraform " at the start misses every wrapper.
-        assert!(matches!(
-            pre_tool_guard(&bash("docker run hashicorp/terraform plan")),
-            Decision::Deny(_)
-        ));
-        assert!(matches!(
-            pre_tool_guard(&bash("nix run nixpkgs#terraform -- apply")),
-            Decision::Deny(_)
-        ));
-    }
-
-    #[test]
-    fn the_exceptions_file_is_protected_from_edit_not_just_bash() {
-        // The incident: an agent used Edit, not Bash, to add itself to the
-        // allowlist — and a Bash-only matcher never routed the call here.
-        let edit = json!({
-            "tool_name": "Edit",
-            "tool_input": {
-                "file_path": "/home/x/.claude/yadgar-hook-exceptions.json",
-                "new_string": "{\"push_default_allowlist\": [\"everything\"]}"
-            }
-        });
-        assert!(matches!(pre_tool_guard(&edit), Decision::Deny(_)));
-    }
-
-    #[test]
-    fn an_ordinary_command_is_allowed() {
-        assert_eq!(pre_tool_guard(&bash("cargo test")), Decision::Allow);
-        assert_eq!(pre_tool_guard(&bash("git commit -m 'x'")), Decision::Allow);
-    }
-
-    #[test]
-    fn a_word_that_merely_contains_terraform_is_not_a_match() {
-        // "terraforming" and a file called terraform.md must not be refused, or
-        // the guard becomes noise and gets disabled.
-        assert_eq!(
-            pre_tool_guard(&bash("cat docs/terraform-notes.md")),
-            Decision::Allow
-        );
-    }
-
-    #[test]
-    fn an_unreadable_payload_allows_rather_than_denying() {
-        // Fail OPEN. A guard that denies on a payload it could not parse would
-        // block the session on its own bug.
-        assert_eq!(pre_tool_guard(&Value::Null), Decision::Allow);
-    }
-
-    #[test]
-    fn a_tool_the_guard_does_not_cover_is_allowed() {
-        let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/etc/passwd"}});
-        assert_eq!(pre_tool_guard(&read), Decision::Allow);
     }
 
     #[test]

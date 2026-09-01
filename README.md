@@ -51,21 +51,26 @@ registration serves every repository and a fresh checkout works immediately.
 ## Installing
 
 ```bash
-pip install --no-cache-dir yaadgaar==0.1.0a2
+pip install --no-cache-dir yaadgaar
 yaadgaar login
 yaadgaar install
 ```
 
-**`--no-cache-dir` and an exact `==` pin, both of them, for as long as the only
-releases are prereleases.** This is not belt-and-braces; each one fixes a
-different failure, and without either the install silently gives you an old
-version rather than an error.
+To upgrade, the same line with `--upgrade`:
 
-`--no-cache-dir` is the one that matters. pip caches the simple-index page it
-fetched for a project, so a machine that has resolved `yaadgaar` once keeps
-serving itself that page and cannot see anything published since. Measured on a
-fresh Debian VM with `0.1.0a2` already on PyPI — the VM's own `curl` of the index
-showed all six `a2` wheels at the same moment:
+```bash
+pip install --no-cache-dir --upgrade yaadgaar
+```
+
+**`--no-cache-dir` is not optional while the only releases are prereleases, and
+it is the whole of the problem.** pip caches the simple-index page it fetched for
+a project. A machine that has resolved `yaadgaar` once keeps serving itself that
+page and cannot see anything published since — so an upgrade reports success
+against a version that is already stale, rather than failing.
+
+Measured on a fresh Debian VM with `0.1.0a2` already on PyPI. The VM's own `curl`
+of the simple index showed all six `a2` wheels at the same moment pip insisted
+only `a1` existed:
 
 | Command                                          | What it did                                               |
 | ------------------------------------------------ | --------------------------------------------------------- |
@@ -74,17 +79,29 @@ showed all six `a2` wheels at the same moment:
 | `pipx install --force yaadgaar==0.1.0a2`         | "Could not find a version that satisfies the requirement" |
 | `pip install --no-cache-dir yaadgaar==0.1.0a2`   | worked, first try                                         |
 
-The exact pin is the second failure: pip does not select a prerelease for a bare
-requirement, so `pip install yaadgaar` resolves to nothing at all while every
-release is an `aN`. `--pre` widens the requirement but does not refetch the
-index, which is why the second row above still installed `a1`.
+Every row is the same cache. The third one is worth reading twice: an EXACT
+version that PyPI was serving at that moment came back as no such version, which
+is what a stale index page looks like from the inside.
 
-Once a stable release exists, both go away and `pipx install yaadgaar` /
-`pipx upgrade yaadgaar` are the lines. Until then, an upgrade is the same command
-with the new version in it — pipx's own upgrade path is the one measured
-failing above. The pipx equivalent, `pipx install --force
---pip-args="--no-cache-dir" yaadgaar==0.1.0a2`, is **untested**; the `pip` line
-is the one that was actually run.
+**No `--pre` and no version pin are needed**, and this is measured rather than
+reasoned — a bare `pip download --no-deps --no-cache-dir yaadgaar` against a
+fresh index fetches `0.1.0a2`, and `pip install --no-cache-dir --upgrade
+--dry-run yaadgaar` resolves to `Would install yaadgaar-0.1.0a2`. PEP 440 falls
+back to prereleases when a requirement matches nothing else, so pinning would
+only fix this README to a version that goes stale on the next release. `--pre`
+widens a requirement and does not refetch anything, which is why it changed
+nothing on the VM.
+
+One command does NOT take that fallback: `pip index versions yaadgaar` reports
+"No matching distribution found" while `pip index versions --pre yaadgaar` lists
+both. It is a diagnostic, not an install, and it is the one place `--pre` earns
+its keep here.
+
+Once a stable release exists, all of this goes away and `pipx install yaadgaar` /
+`pipx upgrade yaadgaar` are the lines. Until then pipx's own upgrade path is the
+one measured failing above; the pipx equivalent,
+`pipx install --force --pip-args="--no-cache-dir" yaadgaar`, is **untested** — the
+`pip` lines are the ones that were actually run.
 
 Rust, shipped to PyPI as wheels via maturin. The language follows the rest of the
 system; the channel follows the people already using it, and a `pip`-installable command

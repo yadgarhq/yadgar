@@ -42,6 +42,13 @@ pub fn merge(config: &mut Value, binary: &Path) {
 /// writes `mcpServers` itself and an empty one is its own resting state; the
 /// hook event keys it does not write, so `"PreCompact": []` is residue this
 /// installer created and nobody else's business.
+///
+/// That is a decision about the KEY, not about the file. One call up,
+/// `jsonfile::write_or_prune` deletes `~/.claude.json` outright when stripping
+/// this entry leaves the whole file holding nothing — a file yadgar created on
+/// a machine that had none. The two do not disagree: an empty `mcpServers` is
+/// left alone inside a file somebody else has things in, and is not worth
+/// keeping a file alive for on its own.
 pub fn strip(config: &mut Value) {
     if let Some(servers) = config.get_mut("mcpServers").and_then(Value::as_object_mut) {
         servers.remove(SERVER_KEY);

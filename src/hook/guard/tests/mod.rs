@@ -187,13 +187,21 @@ fn a_tool_the_guard_does_not_cover_is_allowed() {
 }
 
 #[test]
-fn a_nested_script_is_followed_only_so_far() {
-    // Followed, because `sh -c 'terraform apply'` runs terraform. Bounded,
-    // because a payload can nest as deeply as it likes and a guard that
-    // recurses on it hangs the session it exists to protect.
+fn a_nested_script_is_followed_to_a_stated_bound() {
+    // FOLLOWED, because `sh -c 'terraform apply'` runs terraform, and the
+    // script is part of the command rather than a file this would have to open.
+    assert!(denies("sh -c 'terraform apply'"));
     assert!(denies(r#"sh -c "sh -c 'terraform apply'""#));
-    let deep = r#"sh -c "sh -c \"sh -c 'terraform apply'\"""#;
-    assert!(!denies(deep), "the recursion is unbounded");
+
+    // BOUNDED, because a payload can nest as deeply as it likes and a guard
+    // that recurses on it hangs the session it exists to protect.
+    //
+    // The bound is pinned as a NUMBER, not as a command that gets through.
+    // Asserting that a deep nest is allowed would turn a stated limitation into
+    // a protected one: raising the bound would then fail a test whose easiest
+    // fix is to loosen it, and the message on that failure would describe the
+    // opposite of what went wrong.
+    assert_eq!(MAX_NESTING, 2);
 }
 
 #[test]

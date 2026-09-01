@@ -73,13 +73,20 @@ fn assert_no_managed_hooks(path: &Path) {
 }
 
 /// Assert the MCP entry is gone — same two correct outcomes as above.
+///
+/// Both keys come from the module that owns them. Spelling `"yadgar"` here
+/// meant this helper went on checking for a key nothing writes the day the
+/// registration was renamed — and it would have reported the rename as a clean
+/// uninstall.
 fn assert_no_mcp_entry(path: &Path) {
     if !path.exists() {
         return;
     }
     let config = read_json(path);
     assert!(
-        config["mcpServers"].get("yadgar").is_none(),
+        config[super::mcp::SERVERS_KEY]
+            .get(super::mcp::SERVER_KEY)
+            .is_none(),
         "the MCP entry was left behind: {config:#?}"
     );
 }
@@ -116,7 +123,7 @@ fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
 ///
 /// Making one on Windows needs developer mode or an elevated process. That is
 /// a thing to fix on the machine, and the message says so.
-fn require_symlink(target: &Path, link: &Path) {
+pub(super) fn require_symlink(target: &Path, link: &Path) {
     if let Err(e) = symlink_file(target, link) {
         panic!(
             "cannot create the symlink this test is about ({} -> {}): {e}\n\

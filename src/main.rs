@@ -178,13 +178,26 @@ fn home() -> anyhow::Result<std::path::PathBuf> {
 /// *nothing* is said when no line was: a command that prints nothing at all
 /// reads as a command that did not run.
 fn report(verb: &str, nothing: &str, s: install::Summary) -> anyhow::Result<()> {
-    let mut said = false;
-    let mut line = |text: String| {
-        println!("{text}");
-        said = true;
-    };
+    for line in report_lines(verb, nothing, &s) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The lines [`report`] prints, as data.
+///
+/// Separated from the printing for the same reason `health::report_lines` was:
+/// while this was one function ending in `println!`, NOTHING covered it.
+/// Deleting the `settings_changed` gate so its line always prints, INVERTING
+/// ALL FOUR GATES — the whole of the fix this report exists for, exactly
+/// reversed — and deleting the "nothing to do" block were each measured
+/// against the suite, and each left it green. The report is what somebody
+/// reads to tell a repair from a no-op, and a report nothing can read is a
+/// report nothing can check.
+fn report_lines(verb: &str, nothing: &str, s: &install::Summary) -> Vec<String> {
+    let mut lines = Vec::new();
     if s.settings_changed {
-        line(format!(
+        lines.push(format!(
             "{} {} hook(s) in {}",
             verb,
             s.hooks,
@@ -192,19 +205,101 @@ fn report(verb: &str, nothing: &str, s: install::Summary) -> anyhow::Result<()> 
         ));
     }
     if s.mcp_changed {
-        line(format!(
+        lines.push(format!(
             "{verb} the MCP entry in {}",
             s.mcp_config.display()
         ));
     }
     if s.rules_changed {
-        line(format!("{verb} the rules file {}", s.rules.display()));
+        lines.push(format!("{verb} the rules file {}", s.rules.display()));
     }
     if s.claude_md_changed {
-        line(format!("{verb} the reference line in CLAUDE.md"));
+        lines.push(format!("{verb} the reference line in CLAUDE.md"));
     }
-    if !said {
-        println!("{nothing}");
+    if lines.is_empty() {
+        lines.push(nothing.to_string());
     }
-    Ok(())
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sets exactly one of the four "this file changed" flags.
+    type RaiseOneFlag = fn(&mut install::Summary);
+
+    /// A summary with every flag off, and paths that name themselves.
+    fn summary() -> install::Summary {
+        install::Summary {
+            hooks: 12,
+            settings: std::path::PathBuf::from("/home/x/.claude/settings.json"),
+            mcp_config: std::path::PathBuf::from("/home/x/.claude.json"),
+            rules: std::path::PathBuf::from("/home/x/.claude/yadgar-rules.md"),
+            settings_changed: false,
+            mcp_changed: false,
+            rules_changed: false,
+            claude_md_changed: false,
+        }
+    }
+
+    #[test]
+    fn a_run_that_changed_nothing_says_so_and_nothing_else() {
+        // Two failures at once. A command that prints NOTHING AT ALL reads as a
+        // command that did not run, and deleting that block was invisible. A
+        // gate deleted so its line always prints makes a no-op claim work
+        // nobody did, which is the whole of what this report is for.
+        let lines = report_lines("installed", "nothing to do", &summary());
+        assert_eq!(lines, vec!["nothing to do".to_string()]);
+    }
+
+    #[test]
+    fn every_line_is_gated_on_its_own_file_having_changed() {
+        // ONE FLAG AT A TIME, so no gate can be deleted, inverted, or wired to
+        // another flag without a failure. Inverting all four together was
+        // measured and left the suite green: the fix this PR exists for, fully
+        // reversed and undetected, because nothing read the report.
+        let cases: [(RaiseOneFlag, &str); 4] = [
+            (|s| s.settings_changed = true, "12 hook(s)"),
+            (|s| s.mcp_changed = true, "the MCP entry"),
+            (|s| s.rules_changed = true, "the rules file"),
+            (|s| s.claude_md_changed = true, "the reference line"),
+        ];
+        for (set, expected) in cases {
+            let mut s = summary();
+            set(&mut s);
+            let lines = report_lines("removed", "nothing to do", &s);
+            assert_eq!(lines.len(), 1, "{expected}: {lines:#?}");
+            assert!(lines[0].contains(expected), "{lines:#?}");
+            assert!(lines[0].starts_with("removed "), "{lines:#?}");
+        }
+    }
+
+    #[test]
+    fn a_run_that_changed_everything_names_every_file_by_path() {
+        // The point of the report is that somebody can go and look, so the
+        // paths are the payload — "3 hooks installed" says nothing about where.
+        // And the "nothing to do" line must not appear beside them.
+        let mut s = summary();
+        s.settings_changed = true;
+        s.mcp_changed = true;
+        s.rules_changed = true;
+        s.claude_md_changed = true;
+        let lines = report_lines("installed", "nothing to do", &s);
+        assert_eq!(lines.len(), 4, "{lines:#?}");
+        assert!(
+            lines[0].contains("/home/x/.claude/settings.json"),
+            "{lines:#?}"
+        );
+        assert!(lines[1].contains("/home/x/.claude.json"), "{lines:#?}");
+        assert!(
+            lines[2].contains("/home/x/.claude/yadgar-rules.md"),
+            "{lines:#?}"
+        );
+        assert!(lines[3].contains("CLAUDE.md"), "{lines:#?}");
+        assert!(
+            !lines.iter().any(|l| l.contains("nothing to do")),
+            "{lines:#?}"
+        );
+    }
 }

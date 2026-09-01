@@ -260,9 +260,23 @@ fn an_unreadable_claude_md_does_not_stop_an_uninstall() {
     // all. The hooks and the MCP entry come out without ever reading that
     // file, so they must come out; the one thing that genuinely needs it is
     // reported at the end, after everything removable has gone.
+    //
+    // SEEDED with somebody's own settings, and that is what makes the two
+    // assertions at the end mean anything. On a fresh home both configs hold
+    // nothing but yadgar's registrations, so the uninstall DELETES them — and
+    // `assert_no_managed_hooks` and `assert_no_mcp_entry` each return at once
+    // on a file that is not there. The test read green with both helpers
+    // asserting nothing at all: replacing their bodies with `panic!` failed
+    // only this test and the symlinked one below.
     use std::os::unix::fs::PermissionsExt;
     let home = scratch("uninstall-unreadable");
     let layout = Layout::new(&home);
+    seed(&home, json!({ "model": "opus" }));
+    std::fs::write(
+        layout.mcp_config(),
+        json!({ "numStartups": 41 }).to_string(),
+    )
+    .unwrap();
     install_with(&home, Path::new(BINARY)).unwrap();
     std::fs::set_permissions(layout.claude_md(), std::fs::Permissions::from_mode(0o200)).unwrap();
     if std::fs::read_to_string(layout.claude_md()).is_ok() {
@@ -307,10 +321,14 @@ fn a_symlinked_claude_md_does_not_stop_an_uninstall() {
     std::fs::write(&store, &declared).unwrap();
     require_symlink(&store, &layout.claude_md());
     std::fs::write(layout.rules(), "# rules").unwrap();
-    let mut settings = serde_json::json!({});
+    // Both configs carry something of the person's beside yadgar's entries, so
+    // that they SURVIVE the uninstall and the two helpers below have a file to
+    // read. See the note in the test above: on a home holding only yadgar's
+    // registrations both files are deleted, and both helpers assert nothing.
+    let mut settings = serde_json::json!({ "model": "opus" });
     hooks::merge(&mut settings, Path::new(BINARY));
     std::fs::write(layout.settings(), settings.to_string()).unwrap();
-    let mut config = serde_json::json!({});
+    let mut config = serde_json::json!({ "numStartups": 41 });
     mcp::merge(&mut config, Path::new(BINARY));
     std::fs::write(layout.mcp_config(), config.to_string()).unwrap();
 

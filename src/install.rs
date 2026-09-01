@@ -209,15 +209,23 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
     let mut settings = jsonfile::load(&layout.settings())?;
     let mut mcp = jsonfile::load(&layout.mcp_config())?;
 
+    // The GATES here are not an optimisation. `write_or_prune` on an untouched
+    // machine REWRITES a `settings.json` yadgar never registered anything in —
+    // reformatting a file it does not own, on an uninstall that removed nothing.
+    //
+    // Each call also names the one key in that file yadgar creates itself,
+    // because "does this file still hold anything of anybody's?" cannot be
+    // answered without knowing which key is structure and which is a name
+    // somebody chose. Getting that wrong deleted both files.
     let mut removed = 0;
     let settings_changed = merged(&mut settings, |s| removed = hooks::strip(s));
     if settings_changed {
-        jsonfile::write_or_prune(&layout.settings(), &settings)?;
+        jsonfile::write_or_prune(&layout.settings(), &settings, hooks::HOOKS_KEY)?;
     }
 
     let mcp_changed = merged(&mut mcp, mcp::strip);
     if mcp_changed {
-        jsonfile::write_or_prune(&layout.mcp_config(), &mcp)?;
+        jsonfile::write_or_prune(&layout.mcp_config(), &mcp, mcp::SERVERS_KEY)?;
     }
 
     let rules_changed = rules::remove_body(&layout.rules())?;

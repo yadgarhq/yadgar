@@ -18,6 +18,16 @@ use super::jsonfile::ensure_object;
 /// The key under `mcpServers` that yadgar owns.
 pub const SERVER_KEY: &str = "yadgar";
 
+/// The one key in `~/.claude.json` that yadgar creates itself.
+///
+/// The counterpart of [`super::hooks::HOOKS_KEY`], and the distinction it
+/// carries is the whole of the bug that made both constants exist: THIS key is
+/// structure, and every key UNDER it is a name a person chose. An empty
+/// `mcpServers` is nothing; an `mcpServers` holding `other-server` with an
+/// empty body is somebody's registration, because the name IS the data — and
+/// uninstall deleted the file for want of a scalar in it.
+pub const SERVERS_KEY: &str = "mcpServers";
+
 /// The subcommand the agent spawns (D75).
 pub const SERVE_VERB: &str = "serve";
 
@@ -29,7 +39,7 @@ pub const SERVE_VERB: &str = "serve";
 /// token sitting beside the new `command`, so an install whose entire purpose is
 /// to stop carrying tokens would have carried one forward.
 pub fn merge(config: &mut Value, binary: &Path) {
-    let Some(servers) = ensure_object(config, "mcpServers") else {
+    let Some(servers) = ensure_object(config, SERVERS_KEY) else {
         return;
     };
     servers.insert(SERVER_KEY.to_string(), entry_for(binary));
@@ -50,7 +60,7 @@ pub fn merge(config: &mut Value, binary: &Path) {
 /// left alone inside a file somebody else has things in, and is not worth
 /// keeping a file alive for on its own.
 pub fn strip(config: &mut Value) {
-    if let Some(servers) = config.get_mut("mcpServers").and_then(Value::as_object_mut) {
+    if let Some(servers) = config.get_mut(SERVERS_KEY).and_then(Value::as_object_mut) {
         servers.remove(SERVER_KEY);
     }
 }

@@ -140,9 +140,7 @@ fn verify_is_clean_on_the_machine_where_install_refused() {
         format!("# declared elsewhere\n@{}\n", layout.rules().display()),
     )
     .unwrap();
-    if symlink_file(&store, &layout.claude_md()).is_err() {
-        return; // No privilege to make one; the machine this pins cannot exist.
-    }
+    require_symlink(&store, &layout.claude_md());
     std::fs::write(layout.rules(), "# rules").unwrap();
     let mut settings = serde_json::json!({});
     hooks::merge(&mut settings, Path::new(BINARY));

@@ -169,24 +169,23 @@ pub fn install_with(home: &Path, binary: &Path) -> anyhow::Result<Summary> {
 pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
     let layout = Layout::new(home);
 
-    // Same pre-flight discipline, and asymmetric on purpose: a symlinked
-    // CLAUDE.md is only an obstacle if the reference is actually in it. On the
-    // machine where install refused, uninstall has nothing to remove and says
-    // so quietly rather than failing.
+    // NO PRE-FLIGHT ON CLAUDE.md, and the asymmetry with `install` above is the
+    // whole point. Install refuses before writing, because it is about to write
+    // to a file it does not own. Uninstall must remove everything it CAN and
+    // report what it could not at the END: the hooks and the MCP entry come out
+    // without `CLAUDE.md` being touched at all, so a problem with that file may
+    // not stop them coming out. Bailing first leaves somebody unable to remove
+    // yadgar from their machine because of a file yadgar is only trying to tidy.
     //
-    // `unwrap_or(false)` rather than `?`, and the difference is the whole
-    // asymmetry. Install REFUSES on a CLAUDE.md it cannot read, because it is
-    // about to write to it. Uninstall must not: the hooks and the MCP entry
-    // come out without that file being readable at all, and bailing here would
-    // leave somebody unable to remove yadgar from their machine because of a
-    // file yadgar is only trying to tidy. The one step that genuinely needs to
-    // read it is `remove_reference`, at the very end — so everything removable
-    // is already gone by the time the problem is reported, and re-running after
-    // fixing the permissions finishes the job.
-    let reference = rules::reference_line(&layout.rules());
-    if rules::has_reference(&layout.claude_md(), &reference).unwrap_or(false) {
-        rules::check_reference_target(&layout.claude_md())?;
-    }
+    // Both refusals were reintroduced here once already, and each time by a
+    // check placed at the top. `unwrap_or(false)` fixed the UNREADABLE case and
+    // the very next line reinstated it for the SYMLINKED one — on a nix-managed
+    // machine, where `~/.claude/CLAUDE.md` is a store symlink, which is the
+    // machine this module exists for. Twelve hooks and the MCP entry stayed live.
+    //
+    // A parse failure in the two JSON configs is different and still refuses
+    // first: those are the files being REWRITTEN, and D75 is explicit that a
+    // config which cannot be parsed must never be clobbered.
     let mut settings = jsonfile::load(&layout.settings())?;
     let mut mcp = jsonfile::load(&layout.mcp_config())?;
 
@@ -197,6 +196,17 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
     jsonfile::write_atomic(&layout.mcp_config(), &mcp)?;
 
     rules::remove_body(&layout.rules())?;
+
+    // LAST, and the only step that needs `CLAUDE.md` — so everything removable
+    // is already gone by the time any of this can fail, and re-running after
+    // fixing the file finishes the job. The check still guards the write: a
+    // symlink is never written through, because replacing it with a regular
+    // file would drift the machine from its own declared configuration. It is
+    // reported rather than pre-flighted.
+    let reference = rules::reference_line(&layout.rules());
+    if rules::has_reference(&layout.claude_md(), &reference).unwrap_or(false) {
+        rules::check_reference_target(&layout.claude_md())?;
+    }
     let claude_md_changed = rules::remove_reference(&layout.claude_md(), &reference)?;
 
     Ok(Summary {

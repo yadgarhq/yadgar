@@ -45,12 +45,12 @@ fn read_json(path: &Path) -> Value {
 
 /// Make a symlink at *link* pointing at *target*, on whichever platform.
 ///
-/// Returns the error instead of panicking, because creating a symlink on
-/// Windows needs developer mode or an elevated process. A test that cannot
-/// make one has nothing to say rather than something false to say — and the
-/// REFUSALS it guards are platform-independent, which is why the tests below
-/// are no longer `#[cfg(unix)]`. Three of them were, on a client that ships to
-/// Windows, so Windows had no refusal coverage at all. The one gate left is the
+/// Returns the error rather than panicking so [`require_symlink`] can turn it
+/// into a message that names the precondition. Creating a symlink on Windows
+/// needs developer mode or an elevated process; the REFUSALS these guard are
+/// platform-independent, which is why the tests below are no longer
+/// `#[cfg(unix)]`. Three of them were, on a client that ships to Windows, so
+/// Windows had no refusal coverage at all. The one gate left is the
 /// unreadable-`CLAUDE.md` test, which needs a mode Windows has no equivalent
 /// for: a file that may be written and not read.
 #[cfg(unix)]
@@ -61,6 +61,30 @@ fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
+}
+
+/// Make the symlink a test is about, or FAIL saying why it could not.
+///
+/// **A precondition that cannot be met is a failure, not a pass.** Four tests
+/// used to `return` here with no assertions behind them, so on Windows without
+/// developer mode they reported green having asserted nothing at all — on the
+/// one platform `binary_stem` and `directory_names` were written for, and the
+/// platform with no other refusal coverage. A green tick that means "this
+/// machine could not run the test" is the same lie as a health check that only
+/// ever prints reassuring things, which is the whole of D76.
+///
+/// Making one on Windows needs developer mode or an elevated process. That is
+/// a thing to fix on the machine, and the message says so.
+fn require_symlink(target: &Path, link: &Path) {
+    if let Err(e) = symlink_file(target, link) {
+        panic!(
+            "cannot create the symlink this test is about ({} -> {}): {e}\n\
+             On Windows this needs developer mode or an elevated process. \
+             Refusing to report green having asserted nothing.",
+            link.display(),
+            target.display(),
+        );
+    }
 }
 
 /// Make *path* unwritable, and give back what it takes to undo that.

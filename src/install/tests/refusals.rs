@@ -2,10 +2,26 @@
 //!
 //! Split out of one file because the repository caps a file at 500 lines
 //! (D59's complexity gate); the helpers and fixtures live in the parent.
+//!
+//! **Where the coverage stops, written down so it is not mistaken for green.**
+//! Two tests here are `#[cfg(unix)]` — `an_unreadable_claude_md_is_refused_…`
+//! and `an_unreadable_claude_md_does_not_stop_an_uninstall` — plus
+//! `an_unreadable_file_is_an_error_rather_than_an_empty_one` in `rules.rs`.
+//! All three need a file that may be WRITTEN and not READ, and Windows has no
+//! such mode; they do not exist there rather than failing there. Every other
+//! refusal in this file is platform-independent and runs everywhere, which is
+//! why they no longer carry a `#[cfg]` and why [`super::require_symlink`] fails
+//! instead of returning: three of them WERE gated, on a client that ships to
+//! Windows, and four more skipped silently, so Windows had no refusal coverage
+//! at all while the suite read green.
+//!
+//! Each `#[cfg(unix)]` test also returns early when it finds it can read a 0200
+//! file — running as root, or on a filesystem that ignores the mode. That skip
+//! is a real precondition failure and is still silent; it is the one hole left.
 
 use std::path::Path;
 
-use super::super::{install_with, uninstall, Layout};
+use super::super::{hooks, install_with, mcp, uninstall, Layout};
 use super::*;
 
 #[test]
@@ -20,9 +36,7 @@ fn a_symlinked_claude_md_is_refused_before_anything_is_written() {
     std::fs::create_dir_all(layout.claude_dir()).unwrap();
     let target = home.join("nix-store-CLAUDE.md");
     std::fs::write(&target, "# managed elsewhere\n").unwrap();
-    if symlink_file(&target, &layout.claude_md()).is_err() {
-        return; // No privilege to make one; there is nothing to refuse.
-    }
+    require_symlink(&target, &layout.claude_md());
 
     let err = install_with(&home, Path::new(BINARY))
         .unwrap_err()
@@ -148,9 +162,7 @@ fn a_symlinked_rules_file_is_refused_and_never_written_through() {
     std::fs::create_dir_all(layout.claude_dir()).unwrap();
     let target = home.join("somebody-elses.md");
     std::fs::write(&target, "# not ours\n").unwrap();
-    if symlink_file(&target, &layout.rules()).is_err() {
-        return; // No privilege to make one; there is nothing to refuse.
-    }
+    require_symlink(&target, &layout.rules());
 
     let err = install_with(&home, Path::new(BINARY))
         .unwrap_err()
@@ -177,9 +189,7 @@ fn an_uninstall_leaves_a_symlinked_rules_file_alone() {
     std::fs::create_dir_all(layout.claude_dir()).unwrap();
     let target = home.join("somebody-elses.md");
     std::fs::write(&target, "# not ours\n").unwrap();
-    if symlink_file(&target, &layout.rules()).is_err() {
-        return; // No privilege to make one; there is nothing to leave alone.
-    }
+    require_symlink(&target, &layout.rules());
 
     uninstall(&home).unwrap();
 
@@ -229,4 +239,69 @@ fn an_unreadable_claude_md_does_not_stop_an_uninstall() {
         config["mcpServers"].get("yadgar").is_none(),
         "the MCP entry was left behind: {config:#?}"
     );
+}
+
+#[test]
+fn a_symlinked_claude_md_does_not_stop_an_uninstall() {
+    // The same failure as the test above, on the machine this whole module was
+    // written for. `~/.claude/CLAUDE.md` here is a nix store symlink, so a
+    // pre-flight `check_reference_target(&claude_md)?` at the TOP of `uninstall`
+    // returned before `hooks::strip` ever ran: twelve hooks and the MCP entry
+    // stayed live, and yadgar could not be removed from the machine at all
+    // because of a file it was only trying to tidy.
+    //
+    // The symlink is still never written through — that is the refusal install
+    // exists for — it is only reported at the END, once everything removable is
+    // already gone, so re-running after taking the line out of whatever
+    // generates that file finishes the job.
+    let home = scratch("uninstall-symlinked");
+    let layout = Layout::new(&home);
+    std::fs::create_dir_all(layout.claude_dir()).unwrap();
+
+    // Everything install would have written, written by hand instead — because
+    // on this machine `install` refuses, and the person adds the reference to
+    // whatever generates `CLAUDE.md`, exactly as the refusal tells them to.
+    let store = home.join("nix-store-CLAUDE.md");
+    let declared = format!("# declared elsewhere\n@{}\n", layout.rules().display());
+    std::fs::write(&store, &declared).unwrap();
+    require_symlink(&store, &layout.claude_md());
+    std::fs::write(layout.rules(), "# rules").unwrap();
+    let mut settings = serde_json::json!({});
+    hooks::merge(&mut settings, Path::new(BINARY));
+    std::fs::write(layout.settings(), settings.to_string()).unwrap();
+    let mut config = serde_json::json!({});
+    mcp::merge(&mut config, Path::new(BINARY));
+    std::fs::write(layout.mcp_config(), config.to_string()).unwrap();
+
+    let outcome = uninstall(&home);
+
+    assert!(
+        outcome.is_err(),
+        "the reference line is still in a file yadgar may not write, and nothing said so"
+    );
+    let settings = read_json(&layout.settings());
+    assert!(
+        settings
+            .get("hooks")
+            .is_none_or(|h| h.as_object().unwrap().is_empty()),
+        "the hooks were left registered against an install that is gone: {settings:#?}"
+    );
+    let config = read_json(&layout.mcp_config());
+    assert!(
+        config["mcpServers"].get("yadgar").is_none(),
+        "the MCP entry was left behind: {config:#?}"
+    );
+    assert!(
+        !layout.rules().exists(),
+        "the owned rules file was left behind"
+    );
+    // And the file yadgar does not own came through untouched, symlink included.
+    assert!(
+        std::fs::symlink_metadata(layout.claude_md())
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlink was replaced with a regular file"
+    );
+    assert_eq!(std::fs::read_to_string(&store).unwrap(), declared);
 }

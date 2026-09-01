@@ -50,7 +50,7 @@ pub enum LoginError {
 
 /// Prompt, exchange, store.
 pub async fn login(config_dir: &Path) -> Result<Config, LoginError> {
-    let gateway = prompt("Gateway address (e.g. https://gateway.yadgar.localhost:18443): ")?;
+    let gateway = prompt("Gateway address (e.g. https://gateway.yadgar.test:18443): ")?;
     let username = prompt("Username: ")?;
     // Read without echo. A password in the terminal's scrollback outlives the
     // session and reaches whatever records it.
@@ -206,8 +206,8 @@ mod tests {
         // The development gateway is on 18443, so eating the port would break
         // every local login.
         assert_eq!(
-            normalise("https://gateway.yadgar.localhost:18443"),
-            "https://gateway.yadgar.localhost:18443/"
+            normalise("https://gateway.yadgar.test:18443"),
+            "https://gateway.yadgar.test:18443/"
         );
     }
 
@@ -221,8 +221,8 @@ mod tests {
         assert_eq!(login_url("https://gw"), "https://gw/auth/login");
         assert_eq!(login_url("https://gw/"), "https://gw/auth/login");
         assert_eq!(
-            login_url("https://gateway.yadgar.localhost:18443"),
-            "https://gateway.yadgar.localhost:18443/auth/login"
+            login_url("https://gateway.yadgar.test:18443"),
+            "https://gateway.yadgar.test:18443/auth/login"
         );
     }
 

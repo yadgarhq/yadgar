@@ -59,8 +59,8 @@ pub async fn login(config_dir: &Path) -> Result<Config, LoginError> {
     let gateway = normalise(&gateway);
     let token = exchange(&gateway, &username, &password).await?;
 
-    let config = Config::new(gateway, token);
-    config.save_to(config_dir)?;
+    let config = Config::new(config_dir, gateway, token);
+    config.save()?;
     Ok(config)
 }
 

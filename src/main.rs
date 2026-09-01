@@ -13,6 +13,9 @@ mod install;
 mod login;
 mod proxy;
 
+#[cfg(test)]
+mod testserver;
+
 use std::io::Write as _;
 
 use clap::{Parser, Subcommand};

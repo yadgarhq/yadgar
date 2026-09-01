@@ -22,6 +22,23 @@ pub struct Config {
     /// The long-lived credential. Shown once by `iam` at login and stored here;
     /// the server holds only a hash.
     token: String,
+
+    /// The directory this config was loaded from, and the only one it writes to.
+    ///
+    /// A FIELD, not a call to [`base_dir`], and that is the difference between a
+    /// test and a hazard. The tool cache used to be read and written through the
+    /// process-global directory while the config itself came from wherever
+    /// [`Config::load_from`] was pointed — so a test that loaded a config from a
+    /// temp directory still read and OVERWROTE the real
+    /// `~/.config/yadgar/tools-cache.json` on the machine running it. Every
+    /// path a `Config` touches now comes from the `Config`.
+    ///
+    /// Skipped by serde in BOTH directions: it is where the file is, so writing
+    /// it into the file would be a second answer to a question the file's own
+    /// location already answers, and an older config would deserialise without
+    /// it anyway.
+    #[serde(skip)]
+    dir: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,18 +78,26 @@ impl Config {
         }
         let text =
             std::fs::read_to_string(&path).map_err(|e| ConfigError::Unreadable(path.clone(), e))?;
-        serde_json::from_str(&text).map_err(|e| ConfigError::Malformed(path, e))
+        let mut config: Self =
+            serde_json::from_str(&text).map_err(|e| ConfigError::Malformed(path, e))?;
+        config.dir = dir.to_path_buf();
+        Ok(config)
     }
 
-    pub fn new(gateway: String, token: String) -> Self {
-        Self { gateway, token }
+    pub fn new(dir: &Path, gateway: String, token: String) -> Self {
+        Self {
+            gateway,
+            token,
+            dir: dir.to_path_buf(),
+        }
     }
 
     /// Write both fields together, atomically, readable only by this user.
     ///
     /// A half-written config is worse than none: it fails later, somewhere else,
     /// with an error about the gateway rather than about the file.
-    pub fn save_to(&self, dir: &Path) -> Result<(), ConfigError> {
+    pub fn save(&self) -> Result<(), ConfigError> {
+        let dir = &self.dir;
         std::fs::create_dir_all(dir).map_err(|e| ConfigError::Unwritable(dir.into(), e))?;
         let path = dir.join(FILE);
         let tmp = dir.join(format!(".{FILE}.tmp"));
@@ -102,14 +127,14 @@ impl Config {
     /// empty list would be indistinguishable from yadgar not being installed,
     /// and the agent would silently lose memory and tasks with nothing to report.
     pub fn read_tool_cache(&self) -> Option<String> {
-        std::fs::read_to_string(base_dir().join(TOOL_CACHE)).ok()
+        std::fs::read_to_string(self.dir.join(TOOL_CACHE)).ok()
     }
 
     /// Best effort. A cache that cannot be written must never fail the request
     /// that produced it — the answer is already correct and already going back.
     pub fn write_tool_cache(&self, body: &str) -> std::io::Result<()> {
-        let dir = base_dir();
-        std::fs::create_dir_all(&dir)?;
+        let dir = &self.dir;
+        std::fs::create_dir_all(dir)?;
         let tmp = dir.join(format!(".{TOOL_CACHE}.tmp"));
         std::fs::write(&tmp, body)?;
         std::fs::rename(tmp, dir.join(TOOL_CACHE))
@@ -140,12 +165,75 @@ mod tests {
     #[test]
     fn address_and_token_round_trip_together() {
         let dir = tempdir();
-        Config::new("https://gw.example:18443/".into(), "tok-abc".into())
-            .save_to(&dir)
+        Config::new(&dir, "https://gw.example:18443/".into(), "tok-abc".into())
+            .save()
             .unwrap();
         let back = Config::load_from(&dir).unwrap();
         assert_eq!(back.gateway_url(), "https://gw.example:18443/");
         assert_eq!(back.token(), "tok-abc");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The file, spelled out. Not generated, not round-tripped.
+    ///
+    /// `config.json` is a DURABLE format: every machine that has ever run
+    /// `yaadgaar login` holds one, and this client has to keep reading it. A
+    /// round trip cannot notice a rename, because both halves rename together
+    /// — `#[serde(rename = "gw")]` on `gateway` writes `gw`, reads `gw`, and
+    /// leaves the suite green while every config in existence stops resolving
+    /// and every person is told to log in again.
+    const KNOWN_CONFIG: &str = r#"{
+  "gateway": "https://gw.example:18443/",
+  "token": "tok-abc"
+}"#;
+
+    #[test]
+    fn a_config_written_by_an_older_client_still_parses() {
+        // Fixed bytes IN, expected values OUT. The literal is what is on disk on
+        // somebody's laptop; nothing in this test can rename with the struct.
+        let dir = tempdir();
+        std::fs::write(dir.join(FILE), KNOWN_CONFIG).unwrap();
+        let config = Config::load_from(&dir).unwrap();
+        assert_eq!(config.gateway_url(), "https://gw.example:18443/");
+        assert_eq!(config.token(), "tok-abc");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_config_this_client_writes_is_byte_identical_to_that_format() {
+        // The other direction, and it needs saying separately: a client that
+        // READS the old name and WRITES a new one leaves a file the previous
+        // release cannot read, which is the same outage pointing backwards.
+        //
+        // The directory is deliberately absent from these bytes. It is where the
+        // file IS, and a file that records its own location is a second answer
+        // to a question that cannot disagree with itself while it has only one.
+        let dir = tempdir();
+        Config::new(&dir, "https://gw.example:18443/".into(), "tok-abc".into())
+            .save()
+            .unwrap();
+        let written = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        assert_eq!(written, KNOWN_CONFIG);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_tool_cache_lands_beside_the_config_it_was_loaded_with() {
+        // The hazard this replaces: `read_tool_cache` and `write_tool_cache`
+        // went through the process-global `base_dir()` while the config came
+        // from wherever `load_from` was pointed. A test that loaded a config
+        // from a temp directory read and OVERWROTE the real
+        // `~/.config/yadgar/tools-cache.json` belonging to the person running
+        // it, and nothing said so.
+        let dir = tempdir();
+        let config = Config::new(&dir, "https://gw".into(), "tok".into());
+        assert_eq!(config.read_tool_cache(), None);
+        config.write_tool_cache("{\"tools\":[]}").unwrap();
+        assert_eq!(config.read_tool_cache().as_deref(), Some("{\"tools\":[]}"));
+        assert!(
+            dir.join(TOOL_CACHE).exists(),
+            "the cache was written somewhere other than beside its own config"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -178,8 +266,8 @@ mod tests {
     fn the_config_is_not_world_readable() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempdir();
-        Config::new("https://gw".into(), "secret".into())
-            .save_to(&dir)
+        Config::new(&dir, "https://gw".into(), "secret".into())
+            .save()
             .unwrap();
         let mode = std::fs::metadata(dir.join(FILE))
             .unwrap()

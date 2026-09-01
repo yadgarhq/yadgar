@@ -49,6 +49,11 @@ fn uninstall_removes_ours_and_keeps_everything_else() {
     let home = scratch("uninstall");
     let layout = Layout::new(&home);
     seed(&home, foreign_settings());
+    // Somebody's own instructions, so `CLAUDE.md` is a file that must SURVIVE
+    // the uninstall with its reference line taken out. One created by install
+    // and holding nothing else is deleted instead, and that is pinned on its own
+    // below — the two cases are opposite and a single fixture cannot show both.
+    std::fs::write(layout.claude_md(), "# my own instructions\n").unwrap();
     install_with(&home, Path::new(BINARY)).unwrap();
     std::fs::write(
         layout.exceptions(),
@@ -159,4 +164,76 @@ fn verify_is_clean_on_the_machine_where_install_refused() {
         })
         .collect();
     assert!(structural.is_empty(), "{structural:#?}");
+}
+
+#[test]
+fn uninstall_removes_the_files_install_created() {
+    // The failure this prevents: on a machine with no `~/.claude` at all,
+    // install created all three files and uninstall left every one of them
+    // behind, emptied — `{"hooks":{}}`, `{"mcpServers":{}}` and a zero-byte
+    // `CLAUDE.md`. D76 says uninstall removes exactly what install added, and a
+    // file yadgar created, then emptied and left, is not that.
+    //
+    // The delete is safe WITHOUT KNOWING WHO CREATED THE FILE, which is the
+    // only thing that could be known here: what is left after the strip holds
+    // nothing at all, so there is nothing of anybody's in it to lose. The other
+    // direction is pinned by the test below, and it is the one that matters —
+    // this module has already had one bug that replaced somebody's `CLAUDE.md`
+    // with a single line.
+    let home = scratch("uninstall-created-files");
+    let layout = Layout::new(&home);
+
+    install_with(&home, Path::new(BINARY)).unwrap();
+    assert!(layout.settings().exists(), "install wrote no settings.json");
+    assert!(layout.mcp_config().exists(), "install wrote no MCP config");
+    assert!(layout.claude_md().exists(), "install wrote no CLAUDE.md");
+
+    uninstall(&home).unwrap();
+
+    assert!(
+        !layout.settings().exists(),
+        "settings.json was left behind: {:?}",
+        std::fs::read_to_string(layout.settings())
+    );
+    assert!(
+        !layout.mcp_config().exists(),
+        "the MCP config was left behind: {:?}",
+        std::fs::read_to_string(layout.mcp_config())
+    );
+    assert!(
+        !layout.claude_md().exists(),
+        "CLAUDE.md was left behind: {:?}",
+        std::fs::read_to_string(layout.claude_md())
+    );
+    assert!(!layout.rules().exists(), "the rules file was left behind");
+}
+
+#[test]
+fn uninstall_leaves_every_file_that_holds_somebody_elses_content() {
+    // The direction that matters, and the reason the rule is "what remains is
+    // nothing at all" rather than "yadgar created it". A `settings.json` whose
+    // `hooks` yadgar has just emptied still carries the person's `model`; a
+    // `CLAUDE.md` still carries their instructions. Removing either is
+    // destroying their work, and the asymmetry with the test above is total:
+    // leaving an empty file is untidy, and this is not.
+    let home = scratch("uninstall-keeps-content");
+    let layout = Layout::new(&home);
+    seed(&home, json!({ "model": "opus" }));
+    std::fs::write(
+        layout.mcp_config(),
+        json!({ "numStartups": 41 }).to_string(),
+    )
+    .unwrap();
+    std::fs::write(layout.claude_md(), "# my own instructions\n").unwrap();
+
+    install_with(&home, Path::new(BINARY)).unwrap();
+    uninstall(&home).unwrap();
+
+    assert_eq!(read_json(&layout.settings())["model"], "opus");
+    assert_eq!(read_json(&layout.mcp_config())["numStartups"], 41);
+    assert_eq!(
+        std::fs::read_to_string(layout.claude_md()).unwrap(),
+        "# my own instructions\n",
+        "somebody's own instructions were deleted"
+    );
 }

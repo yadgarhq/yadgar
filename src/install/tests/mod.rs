@@ -43,6 +43,47 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// Assert no yadgar hook is registered any more — file gone, or file emptied.
+///
+/// BOTH outcomes are correct and the assertion must not pick one. Uninstall
+/// deletes a config it finds holding nothing at all, so a home that had only
+/// yadgar's hooks in it loses the file, and a home carrying somebody's own
+/// settings keeps it with the hooks taken out. What is never correct is a
+/// managed hook still sitting there, and that is what this reads for — through
+/// the JSON, one command at a time, rather than through "the `hooks` key is
+/// empty", which passes just as well when the key holds an entry of ours.
+fn assert_no_managed_hooks(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let settings = read_json(path);
+    let Some(events) = settings.get("hooks").and_then(Value::as_object) else {
+        return;
+    };
+    for (event, list) in events {
+        for entry in list.as_array().into_iter().flatten() {
+            for command in super::hooks::entry_commands(entry) {
+                assert!(
+                    !super::hooks::is_managed(command),
+                    "a yadgar hook is still registered under {event}: {command}"
+                );
+            }
+        }
+    }
+}
+
+/// Assert the MCP entry is gone — same two correct outcomes as above.
+fn assert_no_mcp_entry(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let config = read_json(path);
+    assert!(
+        config["mcpServers"].get("yadgar").is_none(),
+        "the MCP entry was left behind: {config:#?}"
+    );
+}
+
 /// Make a symlink at *link* pointing at *target*, on whichever platform.
 ///
 /// Returns the error rather than panicking so [`require_symlink`] can turn it

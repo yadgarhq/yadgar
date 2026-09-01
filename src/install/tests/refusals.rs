@@ -278,18 +278,8 @@ fn an_unreadable_claude_md_does_not_stop_an_uninstall() {
         outcome.is_err(),
         "the reference line is still in a file yadgar cannot read, and nothing said so"
     );
-    let settings = read_json(&layout.settings());
-    assert!(
-        settings
-            .get("hooks")
-            .is_none_or(|h| h.as_object().unwrap().is_empty()),
-        "the hooks were left registered against an install that is gone: {settings:#?}"
-    );
-    let config = read_json(&layout.mcp_config());
-    assert!(
-        config["mcpServers"].get("yadgar").is_none(),
-        "the MCP entry was left behind: {config:#?}"
-    );
+    assert_no_managed_hooks(&layout.settings());
+    assert_no_mcp_entry(&layout.mcp_config());
 }
 
 #[test]
@@ -330,18 +320,8 @@ fn a_symlinked_claude_md_does_not_stop_an_uninstall() {
         outcome.is_err(),
         "the reference line is still in a file yadgar may not write, and nothing said so"
     );
-    let settings = read_json(&layout.settings());
-    assert!(
-        settings
-            .get("hooks")
-            .is_none_or(|h| h.as_object().unwrap().is_empty()),
-        "the hooks were left registered against an install that is gone: {settings:#?}"
-    );
-    let config = read_json(&layout.mcp_config());
-    assert!(
-        config["mcpServers"].get("yadgar").is_none(),
-        "the MCP entry was left behind: {config:#?}"
-    );
+    assert_no_managed_hooks(&layout.settings());
+    assert_no_mcp_entry(&layout.mcp_config());
     assert!(
         !layout.rules().exists(),
         "the owned rules file was left behind"

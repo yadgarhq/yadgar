@@ -7,7 +7,7 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::super::health::{drift, Drift};
+use super::super::health::{drift, report_lines, Drift};
 use super::super::{install_with, Layout};
 use super::*;
 
@@ -322,5 +322,30 @@ fn every_drift_variant_has_a_test_that_makes_it_fire() {
     assert_eq!(
         covered_by(&Drift::McpMissing),
         "an_install_removed_by_hand_is_never_reported_clean"
+    );
+}
+
+#[test]
+fn the_report_names_the_command_that_is_running() {
+    // The failure this prevents: every line `verify` printed said `yaadgaar
+    // install`, on both the clean and the drifted path. A scheduled run's
+    // output then names a command that did not produce it, and the obvious
+    // reading — that `install` reported this — sends somebody to the wrong
+    // place. The two commands also disagree about what a line MEANS: install
+    // reports what it wrote, verify reports what it found.
+    let clean = report_lines(&[]);
+    assert_eq!(clean.len(), 1, "{clean:#?}");
+    assert!(
+        clean[0].starts_with("yaadgaar verify: OK"),
+        "a clean verify labelled itself with another command: {}",
+        clean[0]
+    );
+
+    let drifted = report_lines(&[Drift::McpMissing]);
+    assert_eq!(drifted.len(), 1, "{drifted:#?}");
+    assert!(
+        drifted[0].starts_with("yaadgaar verify: DRIFT"),
+        "a drifted verify labelled itself with another command: {}",
+        drifted[0]
     );
 }

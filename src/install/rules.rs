@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use super::jsonfile::write_atomic_text;
+use super::jsonfile::{remove_regular_file, write_atomic_text};
 
 /// The owned file's name, beside `CLAUDE.md` in the same directory.
 pub const RULES_FILE: &str = "yadgar-rules.md";
@@ -109,21 +109,26 @@ pub fn check_owned(rules_path: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Write the owned rules file: a whole-file replace, every time.
-pub fn write_body(rules_path: &Path) -> anyhow::Result<()> {
-    write_atomic_text(rules_path, RULES_BODY)
+/// Write the owned rules file: a whole-file replace. Returns whether it changed.
+///
+/// Not written at all when the body on disk is already exactly this one — the
+/// same idempotence [`ensure_reference`] has, and for the second of its two
+/// reasons: a `Summary` that says "installed the rules file" on a run that
+/// wrote nothing is reporting work nobody did.
+pub fn write_body(rules_path: &Path) -> anyhow::Result<bool> {
+    if std::fs::read_to_string(rules_path).is_ok_and(|body| body == RULES_BODY) {
+        return Ok(false);
+    }
+    write_atomic_text(rules_path, RULES_BODY)?;
+    Ok(true)
 }
 
-/// Remove the owned rules file, if it is still ours.
-pub fn remove_body(rules_path: &Path) -> anyhow::Result<()> {
+/// Remove the owned rules file, if it is still ours. Returns whether it went.
+pub fn remove_body(rules_path: &Path) -> anyhow::Result<bool> {
     if check_owned(rules_path).is_err() {
-        return Ok(());
+        return Ok(false);
     }
-    match std::fs::remove_file(rules_path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => anyhow::bail!("cannot remove {}: {e}", rules_path.display()),
-    }
+    remove_regular_file(rules_path)
 }
 
 /// Is the reference already somewhere in this file?
@@ -147,11 +152,25 @@ pub fn ensure_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
 }
 
 /// Take the reference back out. Returns whether the file changed.
+///
+/// A file whose ENTIRE content was yadgar's one line is deleted rather than
+/// written back empty. Uninstall used to leave a zero-byte `CLAUDE.md` on every
+/// machine that had none before install, which is not "removes exactly what
+/// install added" (D76).
+///
+/// The condition is that nothing is left, not that yadgar created it: what
+/// remains here is the empty string, so there is nothing of anybody's in the
+/// file to lose. One line of somebody's prose and it is written back instead —
+/// this module has already had one bug that replaced a person's `CLAUDE.md`
+/// with a single line, and every judgement call in it errs the same way since.
 pub fn remove_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
     let existing = read(claude_md)?;
     let desired = without_line(&existing, line);
     if desired == existing {
         return Ok(false);
+    }
+    if desired.is_empty() && remove_regular_file(claude_md)? {
+        return Ok(true);
     }
     write_atomic_text(claude_md, &desired)?;
     Ok(true)

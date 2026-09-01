@@ -52,7 +52,11 @@ enum Command {
     /// gateway needs no client release (D75).
     Serve,
 
-    /// Register hooks, the rules reference and the MCP entry, then check them.
+    /// Register hooks, the rules reference and the MCP entry.
+    ///
+    /// Says what it CHANGED and nothing about what it did not, so a repair and
+    /// a no-op do not read alike. It does not run `verify` afterwards, and the
+    /// help text used to say it did.
     Install,
 
     /// Remove exactly what `install` added, and nothing else.
@@ -96,8 +100,16 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Serve => proxy::serve(config::Config::load()?).await,
 
-        Command::Install => report("installed", install::install(&home()?)?),
-        Command::Uninstall => report("removed", install::uninstall(&home()?)?),
+        Command::Install => report(
+            "installed",
+            "nothing to do — the agent environment is already registered.",
+            install::install(&home()?)?,
+        ),
+        Command::Uninstall => report(
+            "removed",
+            "nothing to do — none of yadgar's registrations were there.",
+            install::uninstall(&home()?)?,
+        ),
         // `verify` prints its own report and returns `Err` on drift, so this
         // exits non-zero without anyone remembering to check a return value.
         Command::Verify => install::verify(&home()?),
@@ -152,16 +164,47 @@ fn home() -> anyhow::Result<std::path::PathBuf> {
     dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine the home directory"))
 }
 
-/// Say what was touched, by path.
+/// Say what was touched, by path — and NOTHING about what was not.
 ///
 /// Named files rather than a count: the point of the report is that somebody can
 /// go and look, and "3 hooks installed" tells them nothing about where.
-fn report(verb: &str, s: install::Summary) -> anyhow::Result<()> {
-    println!("{} {} hook(s) in {}", verb, s.hooks, s.settings.display());
-    println!("{verb} the MCP entry in {}", s.mcp_config.display());
-    println!("{verb} the rules file {}", s.rules.display());
+///
+/// Every line is gated on that file having actually changed. A second install
+/// printed all four unconditionally — over files a test proves do not move a
+/// byte on a reinstall — so a repair and a no-op read exactly alike, and the
+/// person cannot tell whether anything was wrong. The `CLAUDE.md` line was
+/// already gated, which is the whole argument that the others can be.
+///
+/// *nothing* is said when no line was: a command that prints nothing at all
+/// reads as a command that did not run.
+fn report(verb: &str, nothing: &str, s: install::Summary) -> anyhow::Result<()> {
+    let mut said = false;
+    let mut line = |text: String| {
+        println!("{text}");
+        said = true;
+    };
+    if s.settings_changed {
+        line(format!(
+            "{} {} hook(s) in {}",
+            verb,
+            s.hooks,
+            s.settings.display()
+        ));
+    }
+    if s.mcp_changed {
+        line(format!(
+            "{verb} the MCP entry in {}",
+            s.mcp_config.display()
+        ));
+    }
+    if s.rules_changed {
+        line(format!("{verb} the rules file {}", s.rules.display()));
+    }
     if s.claude_md_changed {
-        println!("{verb} the reference line in CLAUDE.md");
+        line(format!("{verb} the reference line in CLAUDE.md"));
+    }
+    if !said {
+        println!("{nothing}");
     }
     Ok(())
 }

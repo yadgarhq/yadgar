@@ -243,8 +243,15 @@ pub fn merge(settings: &mut Value, binary: &Path) {
 }
 
 /// Remove every managed hook entry; returns how many were removed.
+///
+/// Reaches for the key rather than [`ensure_object`], and the difference is a
+/// defect rather than a style: `ensure_object` CREATES `"hooks": {}` when it is
+/// absent, so an uninstall on a machine with no `settings.json` wrote one — an
+/// installer leaving behind a file that never existed, while removing nothing.
+/// It also made "did this change anything?" unanswerable by comparison, because
+/// the answer was always yes.
 pub fn strip(settings: &mut Value) -> usize {
-    let Some(hooks) = ensure_object(settings, "hooks") else {
+    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else {
         return 0;
     };
     strip_managed(hooks)

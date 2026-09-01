@@ -327,3 +327,43 @@ fn verify_sees_a_duplicate_hidden_behind_a_foreign_hook_in_the_same_entry() {
         "{found:#?}"
     );
 }
+
+#[test]
+fn a_second_install_reports_only_what_it_actually_changed() {
+    // The failure this prevents: a reinstall printed "installed 12 hook(s)",
+    // "installed the MCP entry" and "installed the rules file" over files that
+    // `installing_twice_is_byte_identical` proves did not change a byte. The
+    // CONTENTS were pinned and the REPORT was not, so three of the four lines
+    // claimed work nobody did — and somebody reading them cannot tell a repair
+    // from a no-op. The fourth line, the `CLAUDE.md` one, was already honest,
+    // which is how we know the other three can be.
+    let home = scratch("summary-idempotent");
+    seed(&home, foreign_settings());
+
+    let first = install_with(&home, Path::new(BINARY)).unwrap();
+    assert!(
+        first.settings_changed
+            && first.mcp_changed
+            && first.rules_changed
+            && first.claude_md_changed,
+        "the first install reported doing nothing: {first:#?}"
+    );
+
+    let second = install_with(&home, Path::new(BINARY)).unwrap();
+    assert!(
+        !second.settings_changed,
+        "a second install claimed it wrote settings.json"
+    );
+    assert!(
+        !second.mcp_changed,
+        "a second install claimed it wrote the MCP entry"
+    );
+    assert!(
+        !second.rules_changed,
+        "a second install claimed it wrote the rules file"
+    );
+    assert!(
+        !second.claude_md_changed,
+        "a second install claimed it wrote the CLAUDE.md reference"
+    );
+}

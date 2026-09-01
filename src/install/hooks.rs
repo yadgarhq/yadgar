@@ -16,6 +16,7 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use super::jsonfile::ensure_object;
+use super::shellword::{shell_quote, shell_split};
 
 /// The command's own name, and the identity of a yadgar-managed entry.
 ///
@@ -311,63 +312,6 @@ fn entry_for(binary: &Path, spec: &HookSpec) -> Value {
     json!({ "matcher": spec.matcher, "hooks": [hook] })
 }
 
-/// Quote a path for a command string that a shell will parse.
-fn shell_quote(text: &str) -> String {
-    let safe = |c: char| c.is_ascii_alphanumeric() || "-_./:=@,+".contains(c);
-    if !text.is_empty() && text.chars().all(safe) {
-        return text.to_string();
-    }
-    format!("'{}'", text.replace('\'', r"'\''"))
-}
-
-/// Split a command string the way a shell would, enough to read argv[0..2].
-///
-/// Not a shell: no expansion, no operators. It exists so that identity survives
-/// a quoted path — `'/opt/my tools/yadgar' hook prompt-recall` is yadgar's, and
-/// a naive `split_whitespace` would call it somebody else's.
-fn shell_split(cmd: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut started = false;
-    let mut quote: Option<char> = None;
-    let mut chars = cmd.chars();
-    while let Some(c) = chars.next() {
-        match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some('"'), '\\') => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
-                }
-            }
-            (Some(_), c) => current.push(c),
-            (None, '\'') | (None, '"') => {
-                quote = Some(c);
-                started = true;
-            }
-            (None, '\\') => {
-                if let Some(next) = chars.next() {
-                    current.push(next);
-                    started = true;
-                }
-            }
-            (None, c) if c.is_whitespace() => {
-                if started {
-                    out.push(std::mem::take(&mut current));
-                    started = false;
-                }
-            }
-            (None, c) => {
-                current.push(c);
-                started = true;
-            }
-        }
-    }
-    if started {
-        out.push(current);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +355,33 @@ mod tests {
             assert!(!is_managed(&cmd), "{cmd}");
         }
         assert!(!is_managed("'/opt/my tools/other' hook prompt-recall"));
+    }
+
+    #[test]
+    fn a_path_is_quoted_for_the_shell_that_actually_parses_it() {
+        // Pins the CONVENTION, which the round-trip tests above cannot. They
+        // quote and split through this crate's own pair, so swapping both to
+        // PowerShell's doubled `''` would keep them green while every hook
+        // string in `settings.json` changed. This one names the bytes, so the
+        // next person to reach for platform-conditional quoting lands on the
+        // citation over `shell_quote` first.
+        assert_eq!(
+            command_for(
+                Path::new(r"C:\Program Files\yaadgaar\yaadgaar.exe"),
+                "prompt-recall"
+            ),
+            r"'C:\Program Files\yaadgaar\yaadgaar.exe' hook prompt-recall"
+        );
+        assert_eq!(
+            command_for(Path::new("/opt/don't/yaadgaar"), "stop-checkpoint"),
+            r"'/opt/don'\''t/yaadgaar' hook stop-checkpoint"
+        );
+        // An ordinary path is not quoted at all. Quoting everything would parse
+        // identically and make every settings.json diff noisier than it is.
+        assert_eq!(
+            command_for(Path::new("/usr/local/bin/yaadgaar"), "prompt-recall"),
+            "/usr/local/bin/yaadgaar hook prompt-recall"
+        );
     }
 
     #[test]

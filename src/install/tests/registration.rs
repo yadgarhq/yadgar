@@ -129,6 +129,32 @@ fn every_managed_hook_is_registered_once_with_the_matcher_and_async_flag_it_need
 }
 
 #[test]
+fn one_written_entry_is_pinned_as_literal_bytes() {
+    // EXPECTED_REGISTRATIONS above pins the event, the name, the matcher and
+    // the async flag — and not one thing about the JSON around them. The
+    // `{"type":"command","command":…}` framing is what Claude Code actually
+    // reads, this is a durable format in a third party's file, and the shape
+    // could change entirely with every assertion in this module still green.
+    //
+    // So: the bytes. Two entries, because the async one and the ordinary one
+    // are different shapes and `async` is absent rather than false on the
+    // second. Compared as text rather than as `Value`, so key ORDER is pinned
+    // too — a `Value` comparison is order-insensitive and would not notice.
+    let home = scratch("entry-bytes");
+    install_with(&home, Path::new(BINARY)).unwrap();
+    let settings = read_json(&Layout::new(&home).settings());
+
+    assert_eq!(
+        settings["hooks"]["PreCompact"].to_string(),
+        r#"[{"matcher":"","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-compact-drain","async":true}]}]"#
+    );
+    assert_eq!(
+        settings["hooks"]["UserPromptSubmit"].to_string(),
+        r#"[{"matcher":"","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook prompt-recall"}]}]"#
+    );
+}
+
+#[test]
 fn the_registered_command_names_the_binary_this_crate_actually_builds() {
     // The failure this prevents: `BINARY_NAME` and Cargo's `[[bin]] name` are
     // two spellings of one word, kept in two files. If they drift, every hook

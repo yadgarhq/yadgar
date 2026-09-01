@@ -119,4 +119,71 @@ mod tests {
         let value = load(&dir.join("nope.json")).unwrap();
         assert_eq!(value, serde_json::json!({}));
     }
+
+    #[test]
+    fn a_write_replaces_the_file_rather_than_writing_through_it() {
+        // Atomicity is named as an earned rule at the top of this module and
+        // nothing tested it: replacing the temp-file-and-rename with a straight
+        // `fs::write` left the suite green. A truncating write over a
+        // settings.json yadgar does not own leaves it half-written when the
+        // process dies or the disk fills — the exact loss the rule is for.
+        //
+        // A HARD LINK is what makes the difference observable. A rename gives
+        // the name a new inode and leaves the old one whole; a write through
+        // changes the bytes both names see.
+        let dir = crate::install::tests::scratch("jsonfile-atomic");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "theirs\n").unwrap();
+        let witness = dir.join("witness.json");
+        std::fs::hard_link(&path, &witness).unwrap();
+
+        write_atomic_text(&path, "ours\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ours\n");
+        assert_eq!(
+            std::fs::read_to_string(&witness).unwrap(),
+            "theirs\n",
+            "the file was written through instead of replaced, so a crash \
+             mid-write would have truncated it"
+        );
+        // And the temp file is not left lying beside it.
+        let strays: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("yadgar-tmp"))
+            .collect();
+        assert!(strays.is_empty(), "{strays:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_carries_the_existing_files_mode_across() {
+        // Deleting the carry-over left the suite green, so re-permissioning a
+        // settings.json yadgar does not own went unnoticed. The temp file is
+        // created fresh and takes the umask's mode, and renaming it over the
+        // target hands the person's file whatever that happened to be.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::install::tests::scratch("jsonfile-mode");
+
+        // A mode a fresh file will NOT have on its own, so the assertion cannot
+        // pass by coincidence of this machine's umask.
+        let probe = dir.join("umask-probe");
+        std::fs::write(&probe, "x").unwrap();
+        let fresh = std::fs::metadata(&probe).unwrap().permissions().mode() & 0o777;
+        let wanted = if fresh == 0o600 { 0o640 } else { 0o600 };
+
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "theirs\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(wanted)).unwrap();
+
+        write_atomic_text(&path, "ours\n").unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            wanted,
+            "the rename re-permissioned a file yadgar does not own (fresh files \
+             here are {fresh:o})"
+        );
+    }
 }

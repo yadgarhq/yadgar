@@ -102,6 +102,55 @@ fn an_unparseable_settings_file_stops_the_install() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_claude_md_this_process_cannot_write_is_refused_though_its_mode_bits_say_writable() {
+    // The failure this prevents, and the reason the pre-flight PROBES rather
+    // than reading mode bits: `permissions().readonly()` is `mode & 0o222 == 0`
+    // — it answers "does this file carry any write bit", not "may this process
+    // write it". A root-owned 0644 CLAUDE.md sails through the mode check, and
+    // the write then fails AFTER `write_body` has landed: the half-install the
+    // whole pre-flight block exists to make impossible. Deleting the write
+    // probe left the suite green.
+    //
+    // Mode 0466 is that case without needing root. Group and other may write,
+    // so `readonly()` is false; the owner may read and not write, so only an
+    // actual open can tell.
+    use std::os::unix::fs::PermissionsExt;
+    let home = scratch("unwritable-claude-md");
+    let layout = Layout::new(&home);
+    std::fs::create_dir_all(layout.claude_dir()).unwrap();
+    let theirs = "# my own instructions\n";
+    std::fs::write(layout.claude_md(), theirs).unwrap();
+    std::fs::set_permissions(layout.claude_md(), std::fs::Permissions::from_mode(0o466)).unwrap();
+    if std::fs::OpenOptions::new()
+        .write(true)
+        .open(layout.claude_md())
+        .is_ok()
+    {
+        // Root, or a filesystem that ignores the mode. There is no unwritable
+        // file to test with, and the install is right to proceed.
+        std::fs::set_permissions(layout.claude_md(), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        return;
+    }
+
+    let outcome = install_with(&home, Path::new(BINARY));
+
+    std::fs::set_permissions(layout.claude_md(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    let err = outcome.unwrap_err().to_string();
+    assert!(err.contains("cannot write"), "{err}");
+    assert_eq!(std::fs::read_to_string(layout.claude_md()).unwrap(), theirs);
+    assert!(
+        !layout.rules().exists(),
+        "the rules file was written before the install had finished refusing"
+    );
+    assert!(
+        !layout.settings().exists(),
+        "hooks were written despite the refusal"
+    );
+}
+
 // ─── The rules file, and the file yadgar does not own ────────────────────────
 
 #[cfg(unix)]

@@ -37,6 +37,7 @@ pub mod hooks;
 mod jsonfile;
 mod mcp;
 mod rules;
+mod shellword;
 
 #[cfg(test)]
 mod tests;

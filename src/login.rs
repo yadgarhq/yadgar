@@ -64,8 +64,43 @@ pub async fn login(config_dir: &Path) -> Result<Config, LoginError> {
     Ok(config)
 }
 
+/// The URL a login request goes to, composed in ONE place.
+///
+/// Each half is already pinned — [`normalise`] guarantees exactly one trailing
+/// slash, and `LOGIN_PATH` carries none. The JOIN is what nothing covered:
+/// `LOGIN_PATH` gaining a leading slash makes `https://gw//auth/login`, which
+/// every test of either half still passes, most servers quietly accept, and
+/// some path-matching proxy in front of one does not.
+fn login_url(gateway: &str) -> String {
+    format!("{}{LOGIN_PATH}", normalise(gateway))
+}
+
+/// What the gateway's status means for the person at the terminal.
+///
+/// Separated from the request so the mapping is testable without a server, and
+/// so the 401 arm cannot be deleted unnoticed — it is what stops a refusal being
+/// reported as an outage, and sends somebody to retype a password instead of to
+/// look at their network.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// Read the token out of the body.
+    Issued,
+    /// The credentials were wrong.
+    Refused,
+    /// Not the person's to fix.
+    Unexpected,
+}
+
+fn verdict(status: reqwest::StatusCode) -> Verdict {
+    match status {
+        s if s.is_success() => Verdict::Issued,
+        reqwest::StatusCode::UNAUTHORIZED => Verdict::Refused,
+        _ => Verdict::Unexpected,
+    }
+}
+
 async fn exchange(gateway: &str, username: &str, password: &str) -> Result<String, LoginError> {
-    let url = format!("{gateway}{LOGIN_PATH}");
+    let url = login_url(gateway);
     let response = reqwest::Client::new()
         .post(&url)
         .json(&serde_json::json!({
@@ -79,14 +114,15 @@ async fn exchange(gateway: &str, username: &str, password: &str) -> Result<Strin
         .await
         .map_err(|e| LoginError::Unreachable(url, e))?;
 
-    match response.status() {
-        s if s.is_success() => Ok(response
+    let status = response.status();
+    match verdict(status) {
+        Verdict::Issued => Ok(response
             .json::<LoginResponse>()
             .await
             .map_err(LoginError::Malformed)?
             .token),
-        reqwest::StatusCode::UNAUTHORIZED => Err(LoginError::Refused),
-        other => Err(LoginError::Unexpected(other)),
+        Verdict::Refused => Err(LoginError::Refused),
+        Verdict::Unexpected => Err(LoginError::Unexpected(status)),
     }
 }
 
@@ -106,7 +142,11 @@ fn normalise(raw: &str) -> String {
 /// credential from their desktop's when revoking one, so a wrong answer here
 /// costs somebody the ability to revoke confidently.
 fn label() -> String {
-    hostname().unwrap_or_else(|| "unnamed machine".to_string())
+    label_from(|k| std::env::var(k).ok(), Path::new("/etc/hostname"))
+}
+
+fn label_from(var: impl Fn(&str) -> Option<String>, etc_hostname: &Path) -> String {
+    hostname_from(var, etc_hostname).unwrap_or_else(|| "unnamed machine".to_string())
 }
 
 /// Best effort, in the order most likely to be right on each platform.
@@ -115,17 +155,24 @@ fn label() -> String {
 /// silently have labelled every credential "unknown host" and the whole point of
 /// the field would have quietly stopped working on two of the three platforms.
 /// The client must run on x86_64 and aarch64 across Linux, macOS and Windows.
-fn hostname() -> Option<String> {
+///
+/// BOTH SOURCES ARE HANDED IN, rather than read here. Reading the environment
+/// and `/etc/hostname` directly is why none of this order was ever exercised: a
+/// test could only assert whatever the machine running it happened to be called,
+/// so on a Linux host with `HOSTNAME` set, every arm but the first is
+/// unreachable — and the fallbacks that exist FOR the other two platforms are
+/// then never executed anywhere.
+fn hostname_from(var: impl Fn(&str) -> Option<String>, etc_hostname: &Path) -> Option<String> {
     // Windows sets this; Unix shells usually export it, though a non-interactive
     // shell may not, which is why the file fallback stays.
-    for var in ["COMPUTERNAME", "HOSTNAME"] {
-        if let Some(v) = std::env::var(var).ok().filter(|v| !v.trim().is_empty()) {
+    for name in ["COMPUTERNAME", "HOSTNAME"] {
+        if let Some(v) = var(name).filter(|v| !v.trim().is_empty()) {
             return Some(v.trim().to_string());
         }
     }
     // Linux, and some BSDs. Absent on macOS and Windows, which is fine — the
     // environment above covers them, and the fallback covers neither being set.
-    std::fs::read_to_string("/etc/hostname")
+    std::fs::read_to_string(etc_hostname)
         .ok()
         .map(|h| h.trim().to_string())
         .filter(|h| !h.is_empty())
@@ -165,21 +212,126 @@ mod tests {
     }
 
     #[test]
-    fn every_refusal_reads_the_same() {
-        // iam returns one message for wrong-password, unknown-user and
-        // no-password-set so the endpoint cannot enumerate accounts.
+    fn the_login_url_is_pinned_as_a_whole_string() {
+        // Both halves are already tested and the JOIN is what is not. A leading
+        // slash on LOGIN_PATH gives "https://gw//auth/login": every test of
+        // `normalise` still passes, every test of the constant still passes, and
+        // the extra slash is the kind of thing nothing notices until a proxy in
+        // front of the gateway matches on the path.
+        assert_eq!(login_url("https://gw"), "https://gw/auth/login");
+        assert_eq!(login_url("https://gw/"), "https://gw/auth/login");
         assert_eq!(
-            LoginError::Refused.to_string(),
-            "invalid username or password"
+            login_url("https://gateway.yadgar.localhost:18443"),
+            "https://gateway.yadgar.localhost:18443/auth/login"
         );
     }
 
     #[test]
-    fn a_refusal_is_not_reported_as_an_outage() {
-        // A 401 and an unreachable gateway call for different actions from the
-        // person: retype the password, or check the network.
-        let refused = LoginError::Refused.to_string();
-        assert!(!refused.contains("unreachable"));
-        assert!(!refused.contains("gateway"));
+    fn a_401_is_a_refusal_and_every_other_failure_is_not() {
+        // Deleting the 401 arm makes a wrong password read as "the gateway
+        // answered with 401 Unauthorized" — technically true, and it sends
+        // somebody to look at their network instead of retyping a password.
+        assert_eq!(verdict(reqwest::StatusCode::UNAUTHORIZED), Verdict::Refused);
+        assert_eq!(verdict(reqwest::StatusCode::OK), Verdict::Issued);
+        assert_eq!(
+            verdict(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            Verdict::Unexpected
+        );
+        assert_eq!(verdict(reqwest::StatusCode::NOT_FOUND), Verdict::Unexpected);
+    }
+
+    #[tokio::test]
+    async fn no_refusal_can_tell_a_person_which_half_was_wrong() {
+        // THE PROPERTY, not the sentence. `iam` returns one answer for wrong
+        // password, unknown user and no-password-set so the endpoint cannot
+        // enumerate accounts (D73). Restating the `#[error]` string would pass
+        // whatever the code did with the body; this sends three 401s that say
+        // different things and asserts the person is shown one identical
+        // message, because the body is never read on this path at all.
+        let mut seen = std::collections::BTreeSet::new();
+        for body in [
+            r#"{"detail":"no such user"}"#,
+            r#"{"detail":"wrong password"}"#,
+            r#"{"detail":"that account has no password set"}"#,
+        ] {
+            let (addr, served) = crate::testserver::answer_once("401 Unauthorized", body).await;
+            let err = exchange(&format!("http://{addr}/"), "someone", "hunter2")
+                .await
+                .expect_err("a 401 is not a login");
+            let _ = served.await;
+            assert!(matches!(err, LoginError::Refused), "got {err:?}");
+            seen.insert(err.to_string());
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "the gateway's wording reached the person, and the endpoint now enumerates accounts: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_and_an_outage_are_different_things_to_the_caller() {
+        // THE PROPERTY, not the wording. The old test asserted the message did
+        // not contain "gateway", so rewording it broke the test while the thing
+        // that matters — that a caller can tell "retype your password" from
+        // "check the network" — was never checked at all.
+        let (addr, served) = crate::testserver::answer_once("401 Unauthorized", "{}").await;
+        let refused = exchange(&format!("http://{addr}/"), "someone", "hunter2")
+            .await
+            .expect_err("a 401 is not a login");
+        let _ = served.await;
+
+        // A port bound and immediately dropped: nothing is listening, so this is
+        // a connection failure rather than an answer.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        let unreachable = exchange(&format!("http://{dead_addr}/"), "someone", "hunter2")
+            .await
+            .expect_err("nothing is listening there");
+
+        assert!(matches!(refused, LoginError::Refused), "got {refused:?}");
+        assert!(
+            matches!(unreachable, LoginError::Unreachable(..)),
+            "an unreachable gateway was reported as something else: {unreachable:?}"
+        );
+    }
+
+    #[test]
+    fn the_machine_name_comes_from_the_environment_first() {
+        // Windows sets COMPUTERNAME and nothing else; this arm is why the label
+        // is not "unnamed machine" on two of the three platforms.
+        assert_eq!(
+            hostname_from(
+                |k| (k == "COMPUTERNAME").then(|| "DESK-01".to_string()),
+                Path::new("/nonexistent/etc/hostname"),
+            ),
+            Some("DESK-01".into())
+        );
+    }
+
+    #[test]
+    fn an_empty_variable_falls_through_rather_than_naming_the_machine_nothing() {
+        // A non-interactive shell can export HOSTNAME as an empty string, and a
+        // credential labelled "" is worse than one labelled by the file below.
+        let file = crate::testserver::scratch_dir("login-hostname").join("hostname");
+        std::fs::write(&file, "workshop\n").unwrap();
+        assert_eq!(
+            hostname_from(|_| Some("   ".to_string()), &file),
+            Some("workshop".into())
+        );
+        std::fs::remove_dir_all(file.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_machine_that_will_not_say_its_name_is_labelled_rather_than_left_blank() {
+        assert_eq!(
+            hostname_from(|_| None, Path::new("/nonexistent/etc/hostname")),
+            None
+        );
+        assert_eq!(
+            label_from(|_| None, Path::new("/nonexistent/etc/hostname")),
+            "unnamed machine"
+        );
     }
 }

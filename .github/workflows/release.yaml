@@ -16,7 +16,7 @@ name: release
 # there before then would be inventing a shared abstraction with one consumer.
 #
 # SIX TARGETS, and each is a real installation somebody has: Linux, macOS and
-# Windows on x86_64 and aarch64. `pipx install yadgar` has to work on all of
+# Windows on x86_64 and aarch64. `pipx install yaadgaar` has to work on all of
 # them, and a wheel is per-platform — publishing only what the CI runner happens
 # to be is how "it installs everywhere" quietly becomes "it installs on Linux".
 

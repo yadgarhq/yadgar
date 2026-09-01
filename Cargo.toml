@@ -1,20 +1,36 @@
 [package]
 name = "yaadgaar"
-# RESOLVED — the note below is kept because the reasoning still binds.
-# WAS UNRESOLVED, AND IT BLOCKED THE FIRST PUBLISH — recorded here rather than in a
-# document, because this is the file the number is read from.
+# RESOLVED — the reasoning below is kept because it still binds, and because
+# deleting it invites somebody to "fix" the name back to `yadgar`. Recorded here
+# rather than in a document, because this is the file the number is read from.
 #
 # `yadgar` ALREADY EXISTS ON PyPI, at 5.193.0: the Python client this replaces.
-# `pipx install yadgar` resolves the HIGHEST version, so publishing 0.1.0 would
-# succeed and then never be installed — every existing user would keep getting
-# 5.193.0, silently, with no error anywhere. That is precisely the regression
-# D75 says a rewrite may not cause.
+# `pipx install yadgar` resolves the HIGHEST version, so publishing 0.1.0 under
+# that name would succeed and then never be installed — every existing user
+# would keep getting 5.193.0, silently, with no error anywhere. That is
+# precisely the regression D75 says a rewrite may not cause.
 #
-# Two ways out, and choosing is a versioning decision rather than a packaging
-# one: continue the series (the first Rust release is 6.0.0, and the major bump
-# is honest — it IS a breaking rewrite), or publish under a different project
-# name and leave 5.193.0 where it is. Until that is settled this number is a
-# placeholder and MUST NOT be tagged.
+# THE PROJECT NAME IS `yaadgaar`, AND THIS VERSION SERIES IS ITS OWN, starting
+# at 0.x. This client is not a continuation of the Python one — it is the client
+# for the new system, and it inherits neither that client's numbers nor its
+# history. `yadgar` keeps its name and keeps its 5.x series. Both have to be
+# installable at once because they are INCOMPATIBLE — this client cannot work
+# against the Python yadgar — so a premature rename takes a working install away
+# rather than merely colliding on PATH (ADR-0505).
+#
+# `0.1.0` PROPER IS NOT CLAIMED YET: ADR-0498 gives the real version number to
+# the first release that does something, so the value below is a prerelease on
+# purpose and stays one until then.
+#
+# Rejected for the transitional release: 6.0.0, to out-rank 5.193.0. Under a
+# separate project name there is nothing to out-rank, because no resolver ever
+# compares the two, so the major bump would change no behaviour and would assert
+# a lineage that does not exist. That rejection is scoped, not permanent: the
+# name holds at `yaadgaar` until the new system is fully functional, and whether
+# `yadgar` is reclaimed afterwards is an open decision rather than a scheduled
+# one (ADR-0505). If it is ever taken, exactly two routes make the reclaimed
+# name installable — publish above the Python client's highest version, or yank
+# the Python 5.x files under PEP 592 — and this file chooses neither.
 version = "0.1.0-alpha.3"
 edition = "2021"
 rust-version = "1.90"
@@ -23,16 +39,17 @@ description = "The yadgar client: one binary that logs in, proxies MCP to the ga
 
 # NAMED EXPLICITLY, because the package name and the binary name being the same
 # word is a coincidence that must not be relied on. maturin packages whatever
-# Cargo produces, and `pipx install yadgar` must put `yadgar` on the PATH.
+# Cargo produces, and `pipx install yaadgaar` must put `yaadgaar` on the PATH.
 [[bin]]
 # The BINARY is renamed too, not only the PyPI project.
 #
 # The Python client installs an executable called `yadgar`. Two projects
-# installing the same executable name collide on PATH and cannot coexist — which
-# is the entire reason for publishing under a separate name during the
-# transition. So the command is `yaadgaar`, and the MCP registration and hook
-# entries name it explicitly. Both can be installed at once, and which one runs
-# is never ambiguous.
+# installing the same executable name collide on PATH and cannot coexist — one
+# reason for publishing under a separate name during the transition, and the
+# weaker one. The incompatibility recorded in `[package]` above is why both must
+# coexist at all (ADR-0505). So the command is `yaadgaar`, and the MCP
+# registration and hook entries name it explicitly. Both can be installed at
+# once, and which one runs is never ambiguous.
 name = "yaadgaar"
 path = "src/main.rs"
 

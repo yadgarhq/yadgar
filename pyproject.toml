@@ -1,14 +1,16 @@
 # PyPI is the DISTRIBUTION channel, not a second implementation (D75). The client
-# is Rust like everything else here; this file exists so `pipx install yadgar`
-# keeps working exactly as it does today, which is the one thing a rewrite must
-# not take away from the people already using it.
+# is Rust like everything else here; this file exists so the `pipx install`
+# channel keeps working exactly as it does today, which is the one thing a
+# rewrite must not take away from the people already using it. The command is
+# `pipx install yaadgaar`: `yadgar` on PyPI stays the Python client for the
+# transition (ADR-0505).
 #
 # `bindings = "bin"` is what makes that a wheel of a BINARY rather than a Python
 # extension module: maturin compiles the crate and places the executable in the
 # wheel's `.data/scripts/` directory, where pipx and pip put it on the PATH.
 # There is no Python source in this repository and there is no importable module
-# — `import yadgar` is not a thing and is not meant to be. ruff and uv ship the
-# same way, and they are the reference for this shape.
+# — `import yaadgaar` is not a thing and is not meant to be. ruff and uv ship
+# the same way, and they are the reference for this shape.
 #
 # NOTHING HERE SELECTS A PLATFORM, and that is correct rather than an omission: a
 # wheel is built for the machine maturin runs on, so the six platforms this

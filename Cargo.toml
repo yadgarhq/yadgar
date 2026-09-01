@@ -113,3 +113,17 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }
+
+[dev-dependencies]
+# ONE REAL SOCKET, for the two properties no unit test can reach.
+#
+# The credential is attached inside the request builder, so the only way to
+# assert it is actually sent is to read a request off a socket — deleting
+# `.bearer_auth(...)` broke nothing that was being checked, and attaching the
+# credential is the entire reason this shim exists rather than the agent talking
+# to the gateway directly (D75). The same server pins that a non-2xx status is
+# not treated as an answer, and that a refusal is told apart from an outage.
+#
+# `net` is here rather than in the runtime dependency above because nothing in
+# the client ever binds or listens; only the tests do.
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util"] }

@@ -118,20 +118,40 @@ impl fmt::Display for Drift {
 /// same class of mistake as a check nobody schedules.
 pub fn verify(home: &Path) -> anyhow::Result<()> {
     let found = drift(home);
-    if found.is_empty() {
-        println!(
-            "yaadgaar install: OK — {} hooks, MCP entry, rules file.",
-            MANAGED_HOOKS.len()
-        );
-        return Ok(());
+    for line in report_lines(&found) {
+        println!("{line}");
     }
-    for item in &found {
-        println!("yaadgaar install: DRIFT — {item}");
+    if found.is_empty() {
+        return Ok(());
     }
     anyhow::bail!(
         "{} problem(s) with the yadgar install; run `yaadgaar install` to repair",
         found.len()
     )
+}
+
+/// The report `verify` prints, one line per finding — or one line saying so.
+///
+/// Separated from the printing so a test can read what a scheduled run puts in
+/// front of somebody, which is otherwise only observable by capturing stdout.
+///
+/// Every line names `verify`, because `verify` is what produced it. They all
+/// said `install` — on a machine where nothing was installed at all, which is
+/// the case this command exists for, so the first thing somebody ever read from
+/// it named the wrong command. The two also mean different things by a line:
+/// install reports what it WROTE, verify reports what it FOUND.
+pub(super) fn report_lines(found: &[Drift]) -> Vec<String> {
+    let label = format!("{} verify", hooks::BINARY_NAME);
+    if found.is_empty() {
+        return vec![format!(
+            "{label}: OK — {} hooks, MCP entry, rules file.",
+            MANAGED_HOOKS.len()
+        )];
+    }
+    found
+        .iter()
+        .map(|item| format!("{label}: DRIFT — {item}"))
+        .collect()
 }
 
 /// Everything wrong with the installed state, as data.

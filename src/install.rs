@@ -110,6 +110,12 @@ pub struct Summary {
     pub settings: PathBuf,
     pub mcp_config: PathBuf,
     pub rules: PathBuf,
+    /// False when `settings.json` came out of this run byte-for-byte as it went in.
+    pub settings_changed: bool,
+    /// False when the MCP config came out of this run unchanged.
+    pub mcp_changed: bool,
+    /// False when the owned rules file already held exactly this body.
+    pub rules_changed: bool,
     /// False when the reference line was already the first line of `CLAUDE.md`.
     pub claude_md_changed: bool,
 }
@@ -140,21 +146,34 @@ pub fn install_with(home: &Path, binary: &Path) -> anyhow::Result<Summary> {
     let mut mcp = jsonfile::load(&layout.mcp_config())?;
 
     // ── Writes ───────────────────────────────────────────────────────────────
-    rules::write_body(&layout.rules())?;
+    //
+    // Each one reports whether it CHANGED anything, and a file that would come
+    // back identical is not written at all. Both halves matter: an unchanged
+    // file keeps its mtime, and the `Summary` stops claiming work nobody did —
+    // a second install printed "installed 12 hook(s)" over a `settings.json`
+    // that `installing_twice_is_byte_identical` proves did not move a byte.
+    let rules_changed = rules::write_body(&layout.rules())?;
     let reference = rules::reference_line(&layout.rules());
     let claude_md_changed = rules::ensure_reference(&layout.claude_md(), &reference)?;
 
-    hooks::merge(&mut settings, binary);
-    jsonfile::write_atomic(&layout.settings(), &settings)?;
+    let settings_changed = merged(&mut settings, |s| hooks::merge(s, binary));
+    if settings_changed {
+        jsonfile::write_atomic(&layout.settings(), &settings)?;
+    }
 
-    mcp::merge(&mut mcp, binary);
-    jsonfile::write_atomic(&layout.mcp_config(), &mcp)?;
+    let mcp_changed = merged(&mut mcp, |m| mcp::merge(m, binary));
+    if mcp_changed {
+        jsonfile::write_atomic(&layout.mcp_config(), &mcp)?;
+    }
 
     Ok(Summary {
         hooks: MANAGED_HOOKS.len(),
         settings: layout.settings(),
         mcp_config: layout.mcp_config(),
         rules: layout.rules(),
+        settings_changed,
+        mcp_changed,
+        rules_changed,
         claude_md_changed,
     })
 }
@@ -190,13 +209,26 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
     let mut settings = jsonfile::load(&layout.settings())?;
     let mut mcp = jsonfile::load(&layout.mcp_config())?;
 
-    let removed = hooks::strip(&mut settings);
-    jsonfile::write_atomic(&layout.settings(), &settings)?;
+    // The GATES here are not an optimisation. `write_or_prune` on an untouched
+    // machine REWRITES a `settings.json` yadgar never registered anything in —
+    // reformatting a file it does not own, on an uninstall that removed nothing.
+    //
+    // Each call also names the one key in that file yadgar creates itself,
+    // because "does this file still hold anything of anybody's?" cannot be
+    // answered without knowing which key is structure and which is a name
+    // somebody chose. Getting that wrong deleted both files.
+    let mut removed = 0;
+    let settings_changed = merged(&mut settings, |s| removed = hooks::strip(s));
+    if settings_changed {
+        jsonfile::write_or_prune(&layout.settings(), &settings, hooks::HOOKS_KEY)?;
+    }
 
-    mcp::strip(&mut mcp);
-    jsonfile::write_atomic(&layout.mcp_config(), &mcp)?;
+    let mcp_changed = merged(&mut mcp, mcp::strip);
+    if mcp_changed {
+        jsonfile::write_or_prune(&layout.mcp_config(), &mcp, mcp::SERVERS_KEY)?;
+    }
 
-    rules::remove_body(&layout.rules())?;
+    let rules_changed = rules::remove_body(&layout.rules())?;
 
     // LAST, and the only step that needs `CLAUDE.md` — so everything removable
     // is already gone by the time any of this can fail, and re-running after
@@ -215,6 +247,21 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
         settings: layout.settings(),
         mcp_config: layout.mcp_config(),
         rules: layout.rules(),
+        settings_changed,
+        mcp_changed,
+        rules_changed,
         claude_md_changed,
     })
+}
+
+/// Run *edit* over *config* and say whether it changed anything.
+///
+/// Compared rather than reported by the edit itself, because the question is
+/// about the FILE: `hooks::strip` returning 0 and the settings coming back
+/// identical are the same answer, and only one of them stays true when the edit
+/// grows a step. Whatever comes back false is neither written nor reported.
+fn merged(config: &mut serde_json::Value, edit: impl FnOnce(&mut serde_json::Value)) -> bool {
+    let before = config.clone();
+    edit(config);
+    *config != before
 }

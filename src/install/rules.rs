@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use super::jsonfile::write_atomic_text;
+use super::jsonfile::{remove_regular_file, write_atomic_text};
 
 /// The owned file's name, beside `CLAUDE.md` in the same directory.
 pub const RULES_FILE: &str = "yadgar-rules.md";
@@ -109,21 +109,26 @@ pub fn check_owned(rules_path: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// Write the owned rules file: a whole-file replace, every time.
-pub fn write_body(rules_path: &Path) -> anyhow::Result<()> {
-    write_atomic_text(rules_path, RULES_BODY)
+/// Write the owned rules file: a whole-file replace. Returns whether it changed.
+///
+/// Not written at all when the body on disk is already exactly this one — the
+/// same idempotence [`ensure_reference`] has, and for the second of its two
+/// reasons: a `Summary` that says "installed the rules file" on a run that
+/// wrote nothing is reporting work nobody did.
+pub fn write_body(rules_path: &Path) -> anyhow::Result<bool> {
+    if std::fs::read_to_string(rules_path).is_ok_and(|body| body == RULES_BODY) {
+        return Ok(false);
+    }
+    write_atomic_text(rules_path, RULES_BODY)?;
+    Ok(true)
 }
 
-/// Remove the owned rules file, if it is still ours.
-pub fn remove_body(rules_path: &Path) -> anyhow::Result<()> {
+/// Remove the owned rules file, if it is still ours. Returns whether it went.
+pub fn remove_body(rules_path: &Path) -> anyhow::Result<bool> {
     if check_owned(rules_path).is_err() {
-        return Ok(());
+        return Ok(false);
     }
-    match std::fs::remove_file(rules_path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => anyhow::bail!("cannot remove {}: {e}", rules_path.display()),
-    }
+    remove_regular_file(rules_path)
 }
 
 /// Is the reference already somewhere in this file?
@@ -147,11 +152,30 @@ pub fn ensure_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
 }
 
 /// Take the reference back out. Returns whether the file changed.
+///
+/// A file whose ENTIRE content was yadgar's one line is deleted rather than
+/// written back empty. Uninstall used to leave a zero-byte `CLAUDE.md` on every
+/// machine that had none before install, which is not "removes exactly what
+/// install added" (D76).
+///
+/// The condition is that nothing is left, not that yadgar created it: what
+/// remains here is whitespace, so there is nothing of anybody's in the file to
+/// lose. One line of somebody's prose and it is written back instead — this
+/// module has already had one bug that replaced a person's `CLAUDE.md` with a
+/// single line, and every judgement call in it errs the same way since.
+///
+/// WHITESPACE, not the empty string, and the difference is a whole byte that
+/// somebody has to go and delete. The reference line followed by a blank line
+/// left a `CLAUDE.md` holding `"\n"` behind — the same residue as before, one
+/// newline short of the case that was fixed.
 pub fn remove_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
     let existing = read(claude_md)?;
     let desired = without_line(&existing, line);
     if desired == existing {
         return Ok(false);
+    }
+    if desired.trim().is_empty() && remove_regular_file(claude_md)? {
+        return Ok(true);
     }
     write_atomic_text(claude_md, &desired)?;
     Ok(true)
@@ -218,6 +242,73 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "@/opt/rules.md\nexisting\n"
+        );
+    }
+
+    /// A second install must not TOUCH `CLAUDE.md`, not merely leave it equal.
+    ///
+    /// `#[cfg(unix)]` for the reason `refusals.rs` states the rule for: this
+    /// needs an inode, which Windows has no equivalent of. The inode is the
+    /// discriminator rather than the mtime because it cannot flake on a clock
+    /// or on a filesystem's timestamp granularity — `write_atomic_text` renames
+    /// a fresh temp file over the target, so a rewrite changes the inode while
+    /// leaving every byte the same.
+    ///
+    /// That is exactly why `installing_twice_is_byte_identical` cannot see
+    /// this: it compares BYTES, and the property here is that a file yadgar
+    /// does not own is not written to at all. Deleting the
+    /// `if desired == existing { return Ok(false) }` early return left the
+    /// suite green.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_install_does_not_touch_the_file_it_does_not_own() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = crate::install::tests::scratch("rules-untouched");
+        let path = dir.join("CLAUDE.md");
+        std::fs::write(&path, "# my own instructions\n").unwrap();
+
+        assert!(ensure_reference(&path, "@/opt/rules.md").unwrap());
+        let first = std::fs::metadata(&path).unwrap().ino();
+
+        assert!(!ensure_reference(&path, "@/opt/rules.md").unwrap());
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().ino(),
+            first,
+            "a second install rewrote a file it does not own — the bytes are \
+             the same, and the file is not"
+        );
+    }
+
+    #[test]
+    fn a_file_left_holding_only_blank_lines_is_removed_too() {
+        // The residue this module set out to remove, in its nearest neighbour
+        // case. A `CLAUDE.md` created by install and holding the reference line
+        // plus one blank line came out of an uninstall as a one-byte file
+        // holding `"\n"` — the emptied file D76 says must not be left behind,
+        // one newline short of the case that was fixed.
+        //
+        // Whitespace is nothing in the sense this decision needs: there is no
+        // prose in it to lose. ONE WORD of somebody's writing and the file is
+        // written back instead, which the second half asserts.
+        let dir = crate::install::tests::scratch("rules-blank-residue");
+
+        let residue = dir.join("CLAUDE.md");
+        std::fs::write(&residue, "@/opt/rules.md\n\n").unwrap();
+        assert!(remove_reference(&residue, "@/opt/rules.md").unwrap());
+        assert!(
+            !residue.exists(),
+            "a file holding one newline was left behind: {:?}",
+            std::fs::read_to_string(&residue)
+        );
+
+        let theirs = dir.join("theirs.md");
+        std::fs::write(&theirs, "@/opt/rules.md\n\nmine\n").unwrap();
+        assert!(remove_reference(&theirs, "@/opt/rules.md").unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&theirs).unwrap(),
+            "\nmine\n",
+            "somebody's own prose was deleted with the reference line"
         );
     }
 

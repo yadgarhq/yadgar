@@ -43,6 +43,54 @@ fn read_json(path: &Path) -> Value {
     serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
 }
 
+/// Assert no yadgar hook is registered any more — file gone, or file emptied.
+///
+/// BOTH outcomes are correct and the assertion must not pick one. Uninstall
+/// deletes a config it finds holding nothing at all, so a home that had only
+/// yadgar's hooks in it loses the file, and a home carrying somebody's own
+/// settings keeps it with the hooks taken out. What is never correct is a
+/// managed hook still sitting there, and that is what this reads for — through
+/// the JSON, one command at a time, rather than through "the `hooks` key is
+/// empty", which passes just as well when the key holds an entry of ours.
+fn assert_no_managed_hooks(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let settings = read_json(path);
+    let Some(events) = settings.get("hooks").and_then(Value::as_object) else {
+        return;
+    };
+    for (event, list) in events {
+        for entry in list.as_array().into_iter().flatten() {
+            for command in super::hooks::entry_commands(entry) {
+                assert!(
+                    !super::hooks::is_managed(command),
+                    "a yadgar hook is still registered under {event}: {command}"
+                );
+            }
+        }
+    }
+}
+
+/// Assert the MCP entry is gone — same two correct outcomes as above.
+///
+/// Both keys come from the module that owns them. Spelling `"yadgar"` here
+/// meant this helper went on checking for a key nothing writes the day the
+/// registration was renamed — and it would have reported the rename as a clean
+/// uninstall.
+fn assert_no_mcp_entry(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let config = read_json(path);
+    assert!(
+        config[super::mcp::SERVERS_KEY]
+            .get(super::mcp::SERVER_KEY)
+            .is_none(),
+        "the MCP entry was left behind: {config:#?}"
+    );
+}
+
 /// Make a symlink at *link* pointing at *target*, on whichever platform.
 ///
 /// Returns the error rather than panicking so [`require_symlink`] can turn it
@@ -75,7 +123,7 @@ fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
 ///
 /// Making one on Windows needs developer mode or an elevated process. That is
 /// a thing to fix on the machine, and the message says so.
-fn require_symlink(target: &Path, link: &Path) {
+pub(super) fn require_symlink(target: &Path, link: &Path) {
     if let Err(e) = symlink_file(target, link) {
         panic!(
             "cannot create the symlink this test is about ({} -> {}): {e}\n\

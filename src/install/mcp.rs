@@ -18,6 +18,16 @@ use super::jsonfile::ensure_object;
 /// The key under `mcpServers` that yadgar owns.
 pub const SERVER_KEY: &str = "yadgar";
 
+/// The one key in `~/.claude.json` that yadgar creates itself.
+///
+/// The counterpart of [`super::hooks::HOOKS_KEY`], and the distinction it
+/// carries is the whole of the bug that made both constants exist: THIS key is
+/// structure, and every key UNDER it is a name a person chose. An empty
+/// `mcpServers` is nothing; an `mcpServers` holding `other-server` with an
+/// empty body is somebody's registration, because the name IS the data — and
+/// uninstall deleted the file for want of a scalar in it.
+pub const SERVERS_KEY: &str = "mcpServers";
+
 /// The subcommand the agent spawns (D75).
 pub const SERVE_VERB: &str = "serve";
 
@@ -29,7 +39,7 @@ pub const SERVE_VERB: &str = "serve";
 /// token sitting beside the new `command`, so an install whose entire purpose is
 /// to stop carrying tokens would have carried one forward.
 pub fn merge(config: &mut Value, binary: &Path) {
-    let Some(servers) = ensure_object(config, "mcpServers") else {
+    let Some(servers) = ensure_object(config, SERVERS_KEY) else {
         return;
     };
     servers.insert(SERVER_KEY.to_string(), entry_for(binary));
@@ -42,8 +52,15 @@ pub fn merge(config: &mut Value, binary: &Path) {
 /// writes `mcpServers` itself and an empty one is its own resting state; the
 /// hook event keys it does not write, so `"PreCompact": []` is residue this
 /// installer created and nobody else's business.
+///
+/// That is a decision about the KEY, not about the file. One call up,
+/// `jsonfile::write_or_prune` deletes `~/.claude.json` outright when stripping
+/// this entry leaves the whole file holding nothing — a file yadgar created on
+/// a machine that had none. The two do not disagree: an empty `mcpServers` is
+/// left alone inside a file somebody else has things in, and is not worth
+/// keeping a file alive for on its own.
 pub fn strip(config: &mut Value) {
-    if let Some(servers) = config.get_mut("mcpServers").and_then(Value::as_object_mut) {
+    if let Some(servers) = config.get_mut(SERVERS_KEY).and_then(Value::as_object_mut) {
         servers.remove(SERVER_KEY);
     }
 }

@@ -34,6 +34,15 @@ pub const BINARY_NAME: &str = "yaadgaar";
 /// The subcommand every hook entry invokes.
 const HOOK_VERB: &str = "hook";
 
+/// The one key in `settings.json` that yadgar creates itself.
+///
+/// Named because [`crate::install::jsonfile::write_or_prune`] has to be TOLD
+/// which key in a file is structural: emptying that one is emptying the file,
+/// and every other key there is a name somebody chose. Reading a key somebody
+/// chose as structure is what deleted a `settings.json` holding nothing but
+/// its owner's `permissions`.
+pub const HOOKS_KEY: &str = "hooks";
+
 /// One registration in `settings.json`.
 pub struct HookSpec {
     /// The Claude Code event key.
@@ -227,7 +236,7 @@ pub fn entry_commands(entry: &Value) -> Vec<&str> {
 /// and an uninstall then has to edit a structure it does not own instead of
 /// deleting one it does.
 pub fn merge(settings: &mut Value, binary: &Path) {
-    let Some(hooks) = ensure_object(settings, "hooks") else {
+    let Some(hooks) = ensure_object(settings, HOOKS_KEY) else {
         return;
     };
     strip_managed(hooks);
@@ -243,8 +252,15 @@ pub fn merge(settings: &mut Value, binary: &Path) {
 }
 
 /// Remove every managed hook entry; returns how many were removed.
+///
+/// Reaches for the key rather than [`ensure_object`], and the difference is a
+/// defect rather than a style: `ensure_object` CREATES `"hooks": {}` when it is
+/// absent, so an uninstall on a machine with no `settings.json` wrote one — an
+/// installer leaving behind a file that never existed, while removing nothing.
+/// It also made "did this change anything?" unanswerable by comparison, because
+/// the answer was always yes.
 pub fn strip(settings: &mut Value) -> usize {
-    let Some(hooks) = ensure_object(settings, "hooks") else {
+    let Some(hooks) = settings.get_mut(HOOKS_KEY).and_then(Value::as_object_mut) else {
         return 0;
     };
     strip_managed(hooks)

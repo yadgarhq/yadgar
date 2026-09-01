@@ -28,6 +28,11 @@
 /// without the call operator `&`. The quote style is not what breaks; the
 /// shell-form contract is, so platform-conditional quoting buys nothing.
 ///
+/// The same page documents a `shell` field (`"bash"` / `"powershell"`) that
+/// would pin the dialect and remove the ambiguity. Not used here, and for a
+/// weaker version of the reason below: no version floor is established for it,
+/// where the exec form's is.
+///
 /// **The documented fix is the exec form, and it is a version floor rather than
 /// an edit.** `args: string[]` beside `command` spawns the binary with no shell
 /// and no quoting anywhere, added in Claude Code v2.1.139 — "so path

@@ -3,21 +3,23 @@
 //! Split out of one file because the repository caps a file at 500 lines
 //! (D59's complexity gate); the helpers and fixtures live in the parent.
 //!
-//! **Where the coverage stops, written down so it is not mistaken for green.**
-//! Two tests here are `#[cfg(unix)]` — `an_unreadable_claude_md_is_refused_…`
-//! and `an_unreadable_claude_md_does_not_stop_an_uninstall` — plus
-//! `an_unreadable_file_is_an_error_rather_than_an_empty_one` in `rules.rs`.
-//! All three need a file that may be WRITTEN and not READ, and Windows has no
-//! such mode; they do not exist there rather than failing there. Every other
-//! refusal in this file is platform-independent and runs everywhere, which is
-//! why they no longer carry a `#[cfg]` and why [`super::require_symlink`] fails
-//! instead of returning: three of them WERE gated, on a client that ships to
-//! Windows, and four more skipped silently, so Windows had no refusal coverage
-//! at all while the suite read green.
+//! **Where the coverage stops, stated as a property so it cannot go stale.**
+//! A test is `#[cfg(unix)]` here if and ONLY if it needs a permission mode
+//! Windows has no equivalent for — a file that may be written and not read, or
+//! read and not written. Those do not exist on Windows rather than failing
+//! there. Everything else is platform-independent and carries no `#[cfg]`,
+//! which is also why [`super::require_symlink`] fails instead of returning:
+//! three refusals WERE gated on a client that ships to Windows, and four more
+//! skipped silently, so Windows had no refusal coverage at all while the suite
+//! read green. Adding a `#[cfg(unix)]` for any other reason narrows the
+//! platform this client is actually tested on, and the reason belongs in the
+//! test.
 //!
-//! Each `#[cfg(unix)]` test also returns early when it finds it can read a 0200
-//! file — running as root, or on a filesystem that ignores the mode. That skip
-//! is a real precondition failure and is still silent; it is the one hole left.
+//! One silent skip is left, and it is a precondition rather than a platform:
+//! each of those tests returns early when it finds it can read or write the
+//! file it just restricted — running as root, or on a filesystem that ignores
+//! the mode. The case genuinely cannot be built there, and failing would turn
+//! every root CI container red.
 
 use std::path::Path;
 

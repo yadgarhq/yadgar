@@ -50,9 +50,9 @@ fn read_json(path: &Path) -> Value {
 /// needs developer mode or an elevated process; the REFUSALS these guard are
 /// platform-independent, which is why the tests below are no longer
 /// `#[cfg(unix)]`. Three of them were, on a client that ships to Windows, so
-/// Windows had no refusal coverage at all. The one gate left is the
-/// unreadable-`CLAUDE.md` test, which needs a mode Windows has no equivalent
-/// for: a file that may be written and not read.
+/// Windows had no refusal coverage at all. The gates that remain are exactly
+/// the tests needing a permission mode Windows has no equivalent for; the rule
+/// is stated in `refusals.rs`.
 #[cfg(unix)]
 fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)

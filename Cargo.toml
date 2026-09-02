@@ -80,6 +80,23 @@ reqwest = { version = "0.13", default-features = false, features = [
 
 clap = { version = "4", features = ["derive"] }
 
+# THE ENROLMENT TOKEN IS BASE64, STANDARD ALPHABET WITH PADDING (RFC 4648 §4).
+# The alphabet is the contract's word rather than a default worth guessing:
+# standard versus URL-safe is a token that decodes to noise on precisely the
+# machines that have never met this deployment and can least diagnose it.
+#
+# NO PROTOBUF RUNTIME CAME WITH IT, and the `[dependencies]` header above still
+# holds: no tonic, no prost, no generated code. One message with four scalar
+# fields is read by hand in `src/enrolment.rs`, which needs no build script and
+# keeps no second copy of a `.proto` in this tree to drift from.
+base64 = { version = "0.22", default-features = false, features = ["std"] }
+
+# ONE UUID PER INSTALL (ADR-0511), and nothing else is wanted from this crate.
+# `v4` is the only feature: a random id survives a directory move, leaks no
+# filesystem path and no hostname, and is what the ADR chose over a
+# hostname-and-path hash for exactly those reasons.
+uuid = { version = "1", default-features = false, features = ["v4"] }
+
 # `io-std` and `io-util` are both load-bearing for `serve`: the first gives the
 # async stdin/stdout the MCP stdio transport is, the second gives the BufReader
 # and `AsyncBufReadExt` that turn it into lines. `process` is for the install

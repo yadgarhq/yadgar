@@ -55,7 +55,7 @@ pub fn ephemeral_reason(path: &Path) -> Option<String> {
         );
     }
     for root in temp_roots() {
-        if path.starts_with(&root) {
+        if starts_with_ignoring_case(path, &root) {
             return Some(format!(
                 "it is under the temporary directory {}, whose contents are not \
                  promised to survive a reboot",
@@ -109,6 +109,29 @@ fn temp_roots() -> Vec<PathBuf> {
     roots
 }
 
+/// `path.starts_with(root)`, except that components are compared without regard
+/// to ASCII case.
+///
+/// `Path::starts_with` compares components byte for byte and Windows
+/// filesystems do not: a `%TMP%` of `C:\Users\x\AppData\Local\Temp` and a
+/// `current_exe()` spelling that same directory `…\TEMP\…` name one directory
+/// and compare unequal, so the temp refusal never fired for them.
+///
+/// NOT `#[cfg(windows)]`-gated. macOS is case-insensitive by default too, so a
+/// gate would leave a second platform broken while being unreachable from the
+/// Linux CI this repository has. The cost is a Unix machine holding `/tmp` and
+/// `/Tmp` as different directories, where an install under the second is
+/// refused — the same trade `directory_names` makes above, and a refusal
+/// carrying an explicit message is the side of it to be wrong on.
+fn starts_with_ignoring_case(path: &Path, root: &Path) -> bool {
+    let mut components = path.components();
+    root.components().all(|want| {
+        components
+            .next()
+            .is_some_and(|got| got.as_os_str().eq_ignore_ascii_case(want.as_os_str()))
+    })
+}
+
 /// Detects a linked git worktree ANYWHERE, not only under `.claude/worktrees`.
 ///
 /// A linked worktree's `.git` is a FILE containing `gitdir: …`; a normal
@@ -117,6 +140,17 @@ fn temp_roots() -> Vec<PathBuf> {
 /// repository the binary belongs to — a `.git` further up would be a different
 /// repo's and says nothing about this path.
 fn linked_worktree_reason(path: &Path) -> Option<String> {
+    // ONLY an absolute path may be probed. `Path::parent` of a single-component
+    // relative path is `Some("")`, and joining `.git` onto that asks the
+    // filesystem about the process's CURRENT directory rather than about
+    // *path* — so the answer moved with wherever the caller happened to be
+    // standing. A Windows path examined on Unix has exactly that shape, one
+    // component and no root, which is why the accepting test below was green
+    // only in a checkout whose own `.git` is a directory. `current_exe`, the
+    // path this module exists to judge, is always absolute.
+    if !path.is_absolute() {
+        return None;
+    }
     let mut dir = path.parent();
     while let Some(current) = dir {
         let git = current.join(".git");
@@ -171,12 +205,35 @@ mod tests {
     fn an_ordinary_windows_install_path_is_accepted() {
         // The other half, and the reason the check compares directory names
         // rather than searching anywhere in the string for the two words.
+        //
+        // It also pins that the answer does not depend on the CURRENT
+        // DIRECTORY. This path is relative on Unix, and the linked-worktree
+        // probe used to resolve `.git` against wherever the test binary ran, so
+        // this assertion held in a normal checkout and failed in a linked
+        // worktree while testing nothing about Windows either time.
         assert!(ephemeral_reason(Path::new(r"C:\Program Files\yaadgaar\yaadgaar.exe")).is_none());
     }
 
     #[test]
     fn a_temp_path_is_refused() {
         let reason = ephemeral_reason(&std::env::temp_dir().join("venv/bin/yadgar"));
+        assert!(reason.unwrap().contains("temporary"));
+    }
+
+    #[test]
+    fn a_temp_path_spelled_in_another_case_is_refused() {
+        // Windows filesystems are case-insensitive, so a `%TMP%` whose casing
+        // differs from `current_exe()`'s names the SAME directory. Comparing
+        // components byte for byte called the two different and let the
+        // ephemeral path through — the registration D76 records as fatal.
+        let temp = std::env::temp_dir();
+        let shouted = PathBuf::from(temp.to_string_lossy().to_uppercase());
+        assert_ne!(
+            shouted, temp,
+            "the temporary directory is already upper-case here, so this test \
+             proves nothing and must be given a case to change",
+        );
+        let reason = ephemeral_reason(&shouted.join("venv/bin/yaadgaar"));
         assert!(reason.unwrap().contains("temporary"));
     }
 

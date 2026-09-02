@@ -31,7 +31,7 @@ name = "yaadgaar"
 # one (ADR-0505). If it is ever taken, exactly two routes make the reclaimed
 # name installable — publish above the Python client's highest version, or yank
 # the Python 5.x files under PEP 592 — and this file chooses neither.
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 edition = "2021"
 rust-version = "1.90"
 license = "Apache-2.0"

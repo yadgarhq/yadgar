@@ -8,10 +8,13 @@
 //! no second copy to diverge from.
 
 mod config;
+mod enrolment;
 mod hook;
 mod install;
 mod login;
+mod project;
 mod proxy;
+mod trust;
 
 #[cfg(test)]
 mod testserver;
@@ -44,6 +47,25 @@ enum Command {
     /// client reads, so there is one command to undo and one to check. Claiming
     /// otherwise here would be a promise this arm does not keep.
     Login,
+
+    /// Redeem the enrolment token an admin gave you: set a password, learn your
+    /// username, and store the gateway address the token already names.
+    ///
+    /// A SEPARATE COMMAND rather than a first run of `login`, and the token is
+    /// why: it already carries the gateway address and, on a private
+    /// deployment, the CA to trust for it (D73). `login` would have to ask for
+    /// an address the blob already knows, from somebody who has never met this
+    /// deployment and cannot check the answer. It also SETS a password rather
+    /// than presenting one, so it asks twice — the admin never learns it, and a
+    /// typo is a lockout with nobody left to ask.
+    Enrol {
+        /// The base64 blob, exactly as it was handed over.
+        ///
+        /// It is not a secret in the credential sense — it is single-use and
+        /// expires in 24 hours — but it does reach the shell history, so
+        /// `enrol` reads it from stdin when the argument is omitted.
+        token: Option<String>,
+    },
 
     /// Run as a local stdio MCP server, forwarding to the gateway.
     ///
@@ -100,11 +122,19 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Serve => proxy::serve(config::Config::load()?).await,
 
-        Command::Install => report(
-            "installed",
-            "nothing to do — the agent environment is already registered.",
-            install::install(&home()?)?,
-        ),
+        Command::Install => {
+            // ADR-0511 mints the install id HERE. It is separate from the four
+            // files `install` manages — it lives in yadgar's own config rather
+            // than in anything the agent client reads — so it is minted beside
+            // the install and not inside it, and a machine that has not logged
+            // in yet simply has nothing to mint into.
+            mint_instance();
+            report(
+                "installed",
+                "nothing to do — the agent environment is already registered.",
+                install::install(&home()?)?,
+            )
+        }
         Command::Uninstall => report(
             "removed",
             "nothing to do — none of yadgar's registrations were there.",
@@ -122,6 +152,33 @@ async fn main() -> anyhow::Result<()> {
                 config.gateway_url(),
                 dir.display()
             );
+            println!("run `yaadgaar install` to register the hooks and the MCP entry");
+            Ok(())
+        }
+
+        Command::Enrol { token } => {
+            let dir = config::base_dir();
+            let blob = match token {
+                Some(blob) => blob,
+                None => {
+                    // Read from stdin so the blob need not reach shell history.
+                    print!("Paste the enrolment token: ");
+                    std::io::stdout().flush()?;
+                    let mut line = String::new();
+                    std::io::stdin().read_line(&mut line)?;
+                    line
+                }
+            };
+            let config = login::enrol(&dir, &blob).await?;
+            // THE USERNAME IS SAID HERE AND NOWHERE ELSE. `auth/enrol` is the
+            // only place the deployment ever tells a person what they are
+            // called, and they need it to log in on any other machine.
+            println!(
+                "enrolled with {} as {}",
+                config.gateway_url(),
+                config.username().unwrap_or("(the gateway named nobody)")
+            );
+            println!("the credential is stored in {}", dir.display());
             println!("run `yaadgaar install` to register the hooks and the MCP entry");
             Ok(())
         }
@@ -152,6 +209,20 @@ fn dispatch_hook(name: &str) -> anyhow::Result<()> {
             let _ = out.flush();
             drop(out);
             std::process::exit(hook::REFUSED_EXIT_CODE);
+        }
+    }
+}
+
+/// Mint this install's id, if there is a config to mint it into.
+///
+/// BEST EFFORT, and deliberately silent. A person who runs `install` before
+/// `login` has no config yet, and failing the install over an id that `serve`
+/// will mint anyway would refuse the whole agent environment for a header. The
+/// id is minted exactly once whichever of the two gets there first.
+fn mint_instance() {
+    if let Ok(mut config) = config::Config::load() {
+        if let Err(e) = config.ensure_instance() {
+            tracing::warn!("could not record this install's id: {e}");
         }
     }
 }

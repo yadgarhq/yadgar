@@ -3,6 +3,9 @@
 use super::*;
 use serde_json::json;
 
+/// The identity and context headers, asserted on the wire (ADR-0511).
+mod identity;
+
 #[test]
 fn a_cached_reply_is_retargeted_at_the_new_request() {
     // The failure this prevents: replaying a response carrying the OLD id
@@ -221,6 +224,7 @@ async fn the_credential_is_attached_to_the_request_that_leaves_this_process() {
     let outcome = forward(
         &reqwest::Client::new(),
         &config,
+        &Context::default(),
         r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
     )
     .await;
@@ -282,6 +286,7 @@ async fn the_protocol_headers_the_gateway_requires_leave_with_the_request() {
     let outcome = forward(
         &reqwest::Client::new(),
         &config,
+        &Context::default(),
         &an_envelope_no_hardcode_could_produce(),
     )
     .await;
@@ -319,6 +324,7 @@ async fn a_refusal_carries_the_gateway_s_own_message() {
     let outcome = forward(
         &reqwest::Client::new(),
         &config,
+        &Context::default(),
         &an_envelope_no_hardcode_could_produce(),
     )
     .await;
@@ -348,7 +354,7 @@ async fn a_five_hundred_and_two_arrives_as_a_refusal_and_not_as_a_body() {
     let dir = crate::testserver::scratch_dir("proxy-502");
     let config = Config::new(&dir, format!("http://{addr}/"), "tok".into());
 
-    let outcome = forward(&reqwest::Client::new(), &config, "{}").await;
+    let outcome = forward(&reqwest::Client::new(), &config, &Context::default(), "{}").await;
     let _ = served.await;
 
     match outcome {

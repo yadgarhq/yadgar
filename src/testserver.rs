@@ -17,8 +17,15 @@ use tokio::task::JoinHandle;
 
 /// Bind an ephemeral port and answer the first request with *status* and *body*.
 ///
-/// Returns the address to point a client at, and a handle yielding the request
-/// head exactly as it arrived on the wire.
+/// Returns the address to point a client at, and a handle yielding THE WHOLE
+/// REQUEST as it arrived on the wire — head, blank line, and the body when the
+/// request declared a `Content-Length`.
+///
+/// **THE BODY IS READ TOO, and it was not always.** A credential in a header is
+/// visible in the head alone; an enrolment secret is a field in a JSON body, and
+/// a test that stopped at the blank line could not tell a client sending the
+/// `secret` field from one sending the whole base64 blob — which the contract
+/// says are different requests, one of which the gateway refuses.
 pub async fn answer_once(
     status: &'static str,
     body: &'static str,
@@ -43,6 +50,27 @@ pub async fn answer_once(
             }
         }
 
+        // KEEP READING UNTIL THE DECLARED BODY HAS ARRIVED. reqwest sends the
+        // head and the body in separate writes, so a reader that stopped at the
+        // blank line would see an empty body on every run and a test asserting
+        // on a field would pass for a client that sent nothing at all.
+        //
+        // MEASURED FROM THE BLANK LINE, not from what has arrived: the head loop
+        // above stops on the first read that COMPLETES the head, and that read
+        // may already carry part of the body. Counting from `head.len()` would
+        // then wait for bytes nobody is going to send, and the test would hang
+        // rather than fail.
+        let wanted = head
+            .find("\r\n\r\n")
+            .zip(content_length(&head))
+            .map(|(blank, len)| blank + 4 + len);
+        while wanted.is_some_and(|w| head.len() < w) {
+            match socket.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => head.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+        }
+
         let response = format!(
             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len(),
@@ -53,6 +81,19 @@ pub async fn answer_once(
     });
 
     (addr, served)
+}
+
+/// The declared body length, or `None` when the request declared none.
+fn content_length(head: &str) -> Option<usize> {
+    head.lines()
+        .take_while(|l| !l.is_empty())
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim())
+        })
+        .and_then(|v| v.parse().ok())
 }
 
 /// A directory no test shares with another, and none shares with a real install.

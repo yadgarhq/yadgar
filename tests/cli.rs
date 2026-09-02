@@ -209,3 +209,44 @@ fn an_uninstall_leaves_the_configs_of_a_machine_it_was_installed_on() {
     assert!(config.contains("other-server"), "{config}");
     assert!(!config.contains("\"yadgar\""), "{config}");
 }
+
+#[test]
+fn enrol_is_a_command_the_binary_actually_has() {
+    // THE WIRING, and nothing about the decoding. `login::enrol` and every rule
+    // it enforces are covered as units; what no unit can see is a `Command`
+    // variant that parses and dispatches nowhere, or a subcommand somebody
+    // named `enroll` in one place and `enrol` in another. Clap answers an
+    // unknown subcommand with a usage error on stderr, which is what this tells
+    // apart from a refusal the command itself produced.
+    //
+    // The token is deliberately unusable, so nothing reaches a network: the
+    // point is that the argument was PARSED and handed to the enrolment path.
+    let home = scratch("enrol-wiring");
+    let output = Command::new(env!("CARGO_BIN_EXE_yaadgaar"))
+        .args(["enrol", "this-is-not-a-token"])
+        .env("HOME", &home)
+        // Its own directory, so a refused enrolment cannot be confused with —
+        // or write over — the config of whoever is running the tests.
+        .env("YADGAR_CONFIG_DIR", home.join("config"))
+        .output()
+        .expect("the binary under test did not run");
+
+    let said = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    assert!(
+        !output.status.success(),
+        "an unusable token enrolled: {said}"
+    );
+    assert!(
+        !said.contains("unrecognized subcommand") && !said.contains("unexpected argument"),
+        "`enrol` is not a subcommand this binary has: {said}"
+    );
+    assert!(
+        said.contains("not an enrolment token"),
+        "the refusal did not come from the enrolment path: {said}"
+    );
+    assert!(
+        !home.join("config").join("config.json").exists(),
+        "a refused enrolment wrote a config"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}

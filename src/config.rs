@@ -23,6 +23,42 @@ pub struct Config {
     /// the server holds only a hash.
     token: String,
 
+    /// Who this credential belongs to — **FOR DISPLAY, NEVER FOR AUTHORITY**.
+    ///
+    /// It is stored because `POST /auth/enrol` is the only place it is ever
+    /// said: a person enrolling on their first machine has no other way to
+    /// learn the username the deployment gave them, and without it a later
+    /// `login` on a second machine cannot be completed at all.
+    ///
+    /// **IT IS NEVER SENT.** ADR-0511: the gateway resolves the caller from the
+    /// bearer token via `iam.ResolveCredential` and mints the `Scope` itself,
+    /// because a self-asserted username is forgeable by anyone holding any
+    /// valid token — precisely what ADR-0488 exists to prevent. There is
+    /// deliberately no `x-yadgar-user` anywhere in this client, and adding one
+    /// would supersede a decision rather than fix a bug.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    username: Option<String>,
+
+    /// This install, as one UUID (ADR-0511).
+    ///
+    /// Minted ONCE and stored, so it survives restarts, re-logins and a moved
+    /// directory. A hostname-and-path hash was rejected for exactly that: it
+    /// changes when a directory moves, silently breaking the identity it exists
+    /// to provide, and it leaks a path and a hostname on every request. A
+    /// per-process value was rejected too — nothing could then correlate a
+    /// client across restarts, which rate-limit accounting and audit both need.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instance: Option<String>,
+
+    /// The root CA from the enrolment token, trusted for the gateway ALONE.
+    ///
+    /// It never touches the system trust store: the mechanism is scoped to one
+    /// host, and installing a CA machine-wide risks the whole machine to solve
+    /// that. `None` means the deployment uses a publicly-trusted certificate
+    /// and system trust applies — a legitimate deployment, not a gap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ca_pem: Option<String>,
+
     /// The directory this config was loaded from, and the only one it writes to.
     ///
     /// A FIELD, not a call to [`base_dir`], and that is the difference between a
@@ -45,7 +81,9 @@ pub struct Config {
 pub enum ConfigError {
     #[error(
         "not logged in. Run `yaadgaar login` — it asks for the gateway address and \
-         your credentials once, stores both, and registers the MCP server."
+         your credentials once and stores both. If an admin gave you an enrolment \
+         token and you have never set a password, run `yaadgaar enrol <token>` \
+         instead: the token already names the gateway, so nothing is typed twice."
     )]
     Missing,
     #[error("cannot read {0}: {1}")]
@@ -88,8 +126,67 @@ impl Config {
         Self {
             gateway,
             token,
+            username: None,
+            instance: None,
+            ca_pem: None,
             dir: dir.to_path_buf(),
         }
+    }
+
+    /// What `POST /auth/enrol` said this person is called. Display only.
+    pub fn with_username(mut self, username: Option<String>) -> Self {
+        self.username = username;
+        self
+    }
+
+    /// The CA the enrolment token carried, if it carried one.
+    pub fn with_ca_pem(mut self, ca_pem: Option<String>) -> Self {
+        self.ca_pem = ca_pem;
+        self
+    }
+
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    pub fn instance(&self) -> Option<&str> {
+        self.instance.as_deref()
+    }
+
+    /// Carry an existing install id into a config being rebuilt.
+    ///
+    /// NOT a builder like `with_username` and `with_ca_pem`, and named `set_`
+    /// deliberately: it restores a value that already existed rather than
+    /// choosing one. The only caller is `login::reconcile`, which rebuilds the
+    /// whole config after a new credential and must not let a re-login reset
+    /// the id ADR-0511 requires to be stable.
+    pub fn set_instance(&mut self, instance: Option<String>) {
+        self.instance = instance;
+    }
+
+    pub fn ca_pem(&self) -> Option<&str> {
+        self.ca_pem.as_deref()
+    }
+
+    /// Mint this install's id if it has none, and say whether one was minted.
+    ///
+    /// IDEMPOTENT, and that is the whole contract: called from `install`, where
+    /// ADR-0511 says the id is minted, AND from `serve`, so a config written by
+    /// a client that predates this field acquires one without the person having
+    /// to reinstall. Whichever runs first mints; every later call is a no-op and
+    /// the value never changes.
+    ///
+    /// A UUID, and nothing derived from the machine. ADR-0511 rejected a
+    /// hostname-and-path hash because it changes when a directory moves — the
+    /// one thing an install id must survive — and because it puts a filesystem
+    /// path and a hostname on every request.
+    pub fn ensure_instance(&mut self) -> Result<bool, ConfigError> {
+        if self.instance.is_some() {
+            return Ok(false);
+        }
+        self.instance = Some(uuid::Uuid::new_v4().to_string());
+        self.save()?;
+        Ok(true)
     }
 
     /// Write both fields together, atomically, readable only by this user.
@@ -130,6 +227,21 @@ impl Config {
         std::fs::read_to_string(self.dir.join(TOOL_CACHE)).ok()
     }
 
+    /// Drop the cached tool list, because it belongs to a different deployment.
+    ///
+    /// **AN ASSOCIATED FUNCTION taking the DIRECTORY, not a method**, because
+    /// the only caller is `login::reconcile` — which holds the OLD config while
+    /// building the new one, and so has no single `Config` whose cache this is.
+    /// The file is keyed by directory either way.
+    ///
+    /// The cache is served on an offline start (D75), so left in place across a
+    /// change of gateway it is deployment A's tool list presented as B's. Best
+    /// effort by design: a cache that will not delete must not fail a login, and
+    /// the worst case of deleting one that still mattered is one online fetch.
+    pub fn forget_tool_cache(dir: &Path) {
+        let _ = std::fs::remove_file(dir.join(TOOL_CACHE));
+    }
+
     /// Best effort. A cache that cannot be written must never fail the request
     /// that produced it — the answer is already correct and already going back.
     pub fn write_tool_cache(&self, body: &str) -> std::io::Result<()> {
@@ -159,138 +271,4 @@ fn restrict(path: &Path) {
 fn restrict(_path: &Path) {}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn address_and_token_round_trip_together() {
-        let dir = tempdir();
-        Config::new(&dir, "https://gw.example:18443/".into(), "tok-abc".into())
-            .save()
-            .unwrap();
-        let back = Config::load_from(&dir).unwrap();
-        assert_eq!(back.gateway_url(), "https://gw.example:18443/");
-        assert_eq!(back.token(), "tok-abc");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// The file, spelled out. Not generated, not round-tripped.
-    ///
-    /// `config.json` is a DURABLE format: every machine that has ever run
-    /// `yaadgaar login` holds one, and this client has to keep reading it. A
-    /// round trip cannot notice a rename, because both halves rename together
-    /// — `#[serde(rename = "gw")]` on `gateway` writes `gw`, reads `gw`, and
-    /// leaves the suite green while every config in existence stops resolving
-    /// and every person is told to log in again.
-    const KNOWN_CONFIG: &str = r#"{
-  "gateway": "https://gw.example:18443/",
-  "token": "tok-abc"
-}"#;
-
-    #[test]
-    fn a_config_written_by_an_older_client_still_parses() {
-        // Fixed bytes IN, expected values OUT. The literal is what is on disk on
-        // somebody's laptop; nothing in this test can rename with the struct.
-        let dir = tempdir();
-        std::fs::write(dir.join(FILE), KNOWN_CONFIG).unwrap();
-        let config = Config::load_from(&dir).unwrap();
-        assert_eq!(config.gateway_url(), "https://gw.example:18443/");
-        assert_eq!(config.token(), "tok-abc");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_config_this_client_writes_is_byte_identical_to_that_format() {
-        // The other direction, and it needs saying separately: a client that
-        // READS the old name and WRITES a new one leaves a file the previous
-        // release cannot read, which is the same outage pointing backwards.
-        //
-        // The directory is deliberately absent from these bytes. It is where the
-        // file IS, and a file that records its own location is a second answer
-        // to a question that cannot disagree with itself while it has only one.
-        let dir = tempdir();
-        Config::new(&dir, "https://gw.example:18443/".into(), "tok-abc".into())
-            .save()
-            .unwrap();
-        let written = std::fs::read_to_string(dir.join(FILE)).unwrap();
-        assert_eq!(written, KNOWN_CONFIG);
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn the_tool_cache_lands_beside_the_config_it_was_loaded_with() {
-        // The hazard this replaces: `read_tool_cache` and `write_tool_cache`
-        // went through the process-global `base_dir()` while the config came
-        // from wherever `load_from` was pointed. A test that loaded a config
-        // from a temp directory read and OVERWROTE the real
-        // `~/.config/yadgar/tools-cache.json` belonging to the person running
-        // it, and nothing said so.
-        let dir = tempdir();
-        let config = Config::new(&dir, "https://gw".into(), "tok".into());
-        assert_eq!(config.read_tool_cache(), None);
-        config.write_tool_cache("{\"tools\":[]}").unwrap();
-        assert_eq!(config.read_tool_cache().as_deref(), Some("{\"tools\":[]}"));
-        assert!(
-            dir.join(TOOL_CACHE).exists(),
-            "the cache was written somewhere other than beside its own config"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn a_missing_config_says_how_to_fix_it() {
-        // The error a person actually meets first. It must name the command, not
-        // the filename.
-        let err = Config::load_from(Path::new("/nonexistent/yadgar")).unwrap_err();
-        assert!(matches!(err, ConfigError::Missing));
-        assert!(err.to_string().contains("yaadgaar login"));
-    }
-
-    #[test]
-    fn malformed_config_is_distinguishable_from_absent() {
-        // Absent means "log in"; malformed means "this file is broken". Telling
-        // someone to log in when the file is corrupt sends them round a loop
-        // that cannot terminate.
-        let dir = tempdir();
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(FILE), "{ not json").unwrap();
-        assert!(matches!(
-            Config::load_from(&dir).unwrap_err(),
-            ConfigError::Malformed(..)
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_config_is_not_world_readable() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempdir();
-        Config::new(&dir, "https://gw".into(), "secret".into())
-            .save()
-            .unwrap();
-        let mode = std::fs::metadata(dir.join(FILE))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(
-            mode & 0o077,
-            0,
-            "a file holding a bearer token must be owner-only"
-        );
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    fn tempdir() -> PathBuf {
-        let p = std::env::temp_dir().join(format!(
-            "yadgar-cfg-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-}
+mod tests;

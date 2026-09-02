@@ -28,11 +28,17 @@
 //! stays the only authority. Pinning would also couple every spec revision to a
 //! client release, on laptops, which is exactly what forwarding avoids.
 
+mod context;
+mod replies;
+
 use std::io::{self, Write as _};
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::config::Config;
+
+use context::{Context, HEADER_INSTANCE, HEADER_PROJECT};
+use replies::{gateway_message, parse_error, rejected_error, retarget, unreachable_error};
 
 /// How long to wait for the gateway before giving up on one request.
 ///
@@ -65,10 +71,26 @@ const HEADER_PROTOCOL_VERSION: &str = "MCP-Protocol-Version";
 const HEADER_METHOD: &str = "Mcp-Method";
 const HEADER_NAME: &str = "Mcp-Name";
 
-pub async fn serve(config: Config) -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(REQUEST_TIMEOUT)
-        .build()?;
+pub async fn serve(mut config: Config) -> anyhow::Result<()> {
+    // Minted at `install` (ADR-0511) — and here too, idempotently, so a config
+    // written by a client that predates the field acquires one without the
+    // person being told to reinstall for a header they never asked about.
+    //
+    // WARNED ABOUT, NEVER FATAL. A config directory that cannot be written — a
+    // read-only home, a full disk — would otherwise stop the MCP server from
+    // starting at all, over one header. That is the same rule the tool cache
+    // already follows: a write that fails must not fail the thing that produced
+    // it. The value stays in memory for this process either way.
+    if let Err(e) = config.ensure_instance() {
+        tracing::warn!("could not record this install's id: {e}");
+    }
+
+    // The CA from the enrolment token, trusted for this connection and nothing
+    // else on the machine. `None` is system trust, which is the ordinary case.
+    let client = crate::trust::client(config.ca_pem(), Some(REQUEST_TIMEOUT))?;
+    // The agent spawns `serve` in the directory it is working in, and the
+    // process stays there for the session.
+    let context = Context::discover(&config, &std::env::current_dir()?);
 
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
@@ -84,7 +106,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let response = handle(&client, &config, &line).await;
+        let response = handle(&client, &config, &context, &line).await;
         if let Some(body) = response {
             let mut out = io::stdout().lock();
             writeln!(out, "{body}")?;
@@ -98,7 +120,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 }
 
 /// Forward one message. Returns `None` for a notification, which takes no reply.
-async fn handle(client: &reqwest::Client, config: &Config, line: &str) -> Option<String> {
+async fn handle(
+    client: &reqwest::Client,
+    config: &Config,
+    context: &Context,
+    line: &str,
+) -> Option<String> {
     // Parsed only far enough to answer two questions: does this need a reply,
     // and is it cacheable. The BODY is forwarded as received — reserialising it
     // would silently normalise a client's JSON and could change a field order or
@@ -117,7 +144,7 @@ async fn handle(client: &reqwest::Client, config: &Config, line: &str) -> Option
         .unwrap_or_default()
         .to_string();
 
-    let outcome = forward(client, config, line).await;
+    let outcome = forward(client, config, context, line).await;
 
     // The cache is read HERE rather than inside [`respond`], and only when it
     // could possibly be used. That is what keeps `respond` a pure function, and
@@ -288,7 +315,12 @@ fn mirrored(parsed: &serde_json::Value) -> Mirrored {
     }
 }
 
-async fn forward(client: &reqwest::Client, config: &Config, body: &str) -> Outcome {
+async fn forward(
+    client: &reqwest::Client,
+    config: &Config,
+    context: &Context,
+    body: &str,
+) -> Outcome {
     // Read, not rewritten: the body still goes out byte for byte below.
     //
     // Parsed a second time, after [`handle`] — which is the cost of this
@@ -320,6 +352,13 @@ async fn forward(client: &reqwest::Client, config: &Config, body: &str) -> Outco
         (HEADER_PROTOCOL_VERSION, &mirrored.version),
         (HEADER_METHOD, &mirrored.method),
         (HEADER_NAME, &mirrored.name),
+        // CONTEXT, not identity (ADR-0511). Sent on every POST rather than only
+        // on `tools/call`: the two are properties of this process, they do not
+        // vary by method, and a header the gateway may want on a call it has not
+        // required it on yet costs nothing. There is deliberately no third one
+        // naming the user.
+        (HEADER_PROJECT, &context.project),
+        (HEADER_INSTANCE, &context.instance),
     ] {
         if let Some(value) = value {
             request = request.header(header, value);
@@ -356,108 +395,6 @@ async fn forward(client: &reqwest::Client, config: &Config, body: &str) -> Outco
         // an answer.
         Err(e) => Outcome::Unreachable(e.to_string()),
     }
-}
-
-/// Re-point a cached response at the request that asked for it.
-///
-/// A JSON-RPC reply is matched by `id`, so replaying yesterday's response with
-/// yesterday's id would be a reply to nothing and the agent would wait forever.
-fn retarget(cached: &str, id: &serde_json::Value) -> String {
-    match serde_json::from_str::<serde_json::Value>(cached) {
-        Ok(mut v) => {
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("id".into(), id.clone());
-            }
-            v.to_string()
-        }
-        Err(_) => unreachable_error(id, &"the cached tool list is unreadable"),
-    }
-}
-
-fn parse_error() -> String {
-    // id is null: the request could not be parsed, so there is no id to answer.
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": serde_json::Value::Null,
-        "error": { "code": -32700, "message": "invalid JSON" },
-    })
-    .to_string()
-}
-
-/// What the gateway said, if it said anything a person can act on.
-///
-/// ONE FIELD, and the narrowness is the point. A refusal body is an error page as
-/// often as it is a JSON-RPC error, and an error page is what got cached and
-/// served back forever — so anything that is not `error.message` of parseable
-/// JSON is dropped exactly as before.
-fn gateway_message(body: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(body)
-        .ok()?
-        .get("error")?
-        .get("message")?
-        .as_str()
-        .filter(|m| !m.is_empty())
-        .map(str::to_string)
-}
-
-/// The gateway answered, and said no.
-///
-/// Separated from [`unreachable_error`] because the two call for different
-/// actions from the person: check the network, or log in again. A 401 reported
-/// as "unreachable" sends somebody to look at their wifi.
-///
-/// THE STATUS AND THE MESSAGE ARE BOTH KEPT. The status is what tells a request
-/// that was wrong from a gateway that is down; the message is the only part that
-/// says what to change.
-///
-/// **`run yaadgaar login again` is a GUESS, and it is only offered when the
-/// gateway made none of its own.** A 401 can mean the credential expired, and it
-/// can equally mean the request never carried an identity the gateway could
-/// attest — for which logging in again changes nothing. Printing the gateway's
-/// reason and that instruction together hands the person two answers that
-/// contradict each other, and the wrong one is the one phrased as an action. So
-/// a refusal that came with a reason shows the reason alone.
-fn rejected_error(
-    id: &serde_json::Value,
-    status: reqwest::StatusCode,
-    detail: Option<&str>,
-) -> String {
-    let credential_was_refused = matches!(
-        status,
-        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
-    );
-    let message = match (credential_was_refused, detail) {
-        (true, Some(detail)) => {
-            format!("yadgar gateway rejected the credential ({status}): {detail}")
-        }
-        (true, None) => {
-            format!("yadgar gateway rejected the credential ({status}); run `yaadgaar login` again")
-        }
-        (false, Some(detail)) => format!("yadgar gateway answered {status}: {detail}"),
-        (false, None) => format!("yadgar gateway answered {status}"),
-    };
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": { "code": -32603, "message": message },
-    })
-    .to_string()
-}
-
-fn unreachable_error(id: &serde_json::Value, e: &dyn std::fmt::Display) -> String {
-    // -32603 internal error, and the message names the GATEWAY rather than
-    // reporting a tool failure. The agent should be able to tell "yadgar is
-    // unreachable" from "the tool said no", because only one of them is worth
-    // telling the person about.
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": -32603,
-            "message": format!("yadgar gateway unreachable: {e}"),
-        },
-    })
-    .to_string()
 }
 
 #[cfg(test)]

@@ -119,6 +119,24 @@ pub enum LoginError {
     PasswordMismatch,
     #[error(transparent)]
     Trust(#[from] crate::trust::TrustError),
+    /// The address named no scheme at all.
+    ///
+    /// ADR-0569: a default chosen silently is a value nobody chose, used as
+    /// if somebody had. `https` is REQUIRED, never assumed — a bare host is
+    /// refused rather than completed to `https` on the person's behalf.
+    #[error("{0} names no scheme; write the full address as https://{0}")]
+    NoScheme(String),
+    /// Every scheme but `https` is refused, with no exemption for loopback.
+    ///
+    /// A gateway running on a developer's own machine can still be reached
+    /// over `https`: the same CA-distribution [`crate::trust`] already uses
+    /// for a private deployment works for one running on localhost, so the
+    /// exemption is not needed even for that case. It is also not safe to
+    /// grant: a carve-out keyed on the hostname "localhost" or "127.0.0.1" is
+    /// a rule an attacker can opt into with a hosts-file entry or a local
+    /// proxy, not a safety valve reserved for a developer.
+    #[error("{url} uses the `{scheme}` scheme; the gateway must be reached over https")]
+    InsecureScheme { url: String, scheme: String },
 }
 
 /// Prompt, exchange, store.
@@ -140,12 +158,17 @@ pub async fn login(config_dir: &Path) -> Result<Config, LoginError> {
     let stored = Config::load_from(config_dir).ok();
 
     let gateway = prompt("Gateway address (e.g. https://gateway.yadgar.internal:18443): ")?;
+    let gateway = normalise(&gateway);
+    // CHECKED BEFORE ASKING FOR CREDENTIALS. A person whose address is
+    // refused should not first type a username and a password that were
+    // always going to be sent nowhere.
+    require_https(&gateway)?;
+
     let username = prompt("Username: ")?;
     // Read without echo. A password in the terminal's scrollback outlives the
     // session and reaches whatever records it.
     let password = rpassword::prompt_password("Password: ")?;
 
-    let gateway = normalise(&gateway);
     // READ AFTER THE ADDRESS IS KNOWN, because whether it may be used depends on
     // the address.
     let ca_pem = ca_for(stored.as_ref(), &gateway);
@@ -257,6 +280,13 @@ pub async fn enrol(config_dir: &Path, blob: &str) -> Result<Config, LoginError> 
     if expired(enrolment.expires_at, now()) {
         return Err(LoginError::Expired);
     }
+    let gateway = normalise(&enrolment.gateway);
+    // CHECKED BEFORE ASKING FOR A PASSWORD, same reason as the expiry check
+    // above: nothing here is asked that a refusal would make pointless.
+    // `enrol` posts the new password to this same address, so a cleartext
+    // scheme is the identical exposure `login` refuses, arriving from a
+    // token an admin built rather than an address a person typed.
+    require_https(&gateway)?;
 
     println!("Enrolling with {}", enrolment.gateway);
     if enrolment.ca_pem.is_some() {
@@ -272,7 +302,6 @@ pub async fn enrol(config_dir: &Path, blob: &str) -> Result<Config, LoginError> 
         return Err(LoginError::PasswordMismatch);
     }
 
-    let gateway = normalise(&enrolment.gateway);
     let client =
         crate::trust::client(enrolment.ca_pem.as_deref(), None).map_err(LoginError::Trust)?;
     let redeemed = redeem(&client, &gateway, &enrolment.secret, &password).await?;
@@ -418,6 +447,30 @@ async fn exchange(
 fn normalise(raw: &str) -> String {
     let trimmed = raw.trim().trim_end_matches('/');
     format!("{trimmed}/")
+}
+
+/// Refuse anything but `https` (ledger 717).
+///
+/// **PURE, and split out for the reason [`expired`] is:** a rule about which
+/// scheme is safe is worth nothing if a test can only ever exercise it
+/// through a live socket. Takes an already-[`normalise`]d address so the
+/// scheme sits at a fixed offset and the check cannot be fooled by leading
+/// whitespace or a doubled slash.
+///
+/// **NOTHING IS DEFAULTED.** A bare host such as `gw.example.com` names no
+/// scheme, and completing it to `https` on the person's behalf is the same
+/// silent invented value ADR-0569 refuses for a configuration knob — visible
+/// nowhere, and wrong the one time somebody meant `http`. So it is refused
+/// exactly like `http://` is, not upgraded.
+fn require_https(gateway: &str) -> Result<(), LoginError> {
+    match gateway.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("https") => Ok(()),
+        Some((scheme, _)) => Err(LoginError::InsecureScheme {
+            url: gateway.to_string(),
+            scheme: scheme.to_string(),
+        }),
+        None => Err(LoginError::NoScheme(gateway.to_string())),
+    }
 }
 
 /// A human-readable name for this machine, for the credential's label.

@@ -126,24 +126,25 @@ pub enum ConfigError {
 
 /// Refuse a stored gateway that does not use `https` (ledger 717).
 ///
-/// PURE given the two things it needs, for the reason [`crate::login`]'s own
-/// copy of this check is pure: a security rule is worth nothing if a test can
-/// only ever exercise it through a real file on disk. Kept SEPARATE from
-/// `login`'s `require_https` rather than shared, because the two want
-/// different wording — one is said to a person mid-prompt about an address
-/// they just typed, the other is said about a file whose owner may not be
-/// watching a terminal at all, and "one function cannot hold two opposite
-/// correct answers behind one shape" (`login::reconcile` gives the same
-/// ruling for the CA fallback).
+/// PURE given the three things it needs, for the reason [`crate::login`]'s
+/// own copy of this check is pure: a security rule is worth nothing if a test
+/// can only ever exercise it through a real file on disk. The CLASSIFICATION
+/// is [`crate::scheme::scheme_of`], shared with `login`'s copy of this check
+/// so the rule itself — what counts as `https`, what a bare host means —
+/// lives once. Only the ERROR differs, and stays separate on purpose: this
+/// one is said about a file whose owner may not be watching a terminal at
+/// all, `login`'s is said to a person mid-prompt about an address they just
+/// typed, and "one function cannot hold two opposite correct answers behind
+/// one shape" (`login::reconcile` gives the same ruling for the CA fallback).
 fn require_https(gateway: &str, path: &Path) -> Result<(), ConfigError> {
-    match gateway.split_once("://") {
-        Some((scheme, _)) if scheme.eq_ignore_ascii_case("https") => Ok(()),
-        Some((scheme, _)) => Err(ConfigError::InsecureScheme {
+    match crate::scheme::scheme_of(gateway) {
+        crate::scheme::Scheme::Https => Ok(()),
+        crate::scheme::Scheme::Other(scheme) => Err(ConfigError::InsecureScheme {
             gateway: gateway.to_string(),
             scheme: scheme.to_string(),
             path: path.to_path_buf(),
         }),
-        None => Err(ConfigError::NoScheme {
+        crate::scheme::Scheme::Absent => Err(ConfigError::NoScheme {
             gateway: gateway.to_string(),
             path: path.to_path_buf(),
         }),

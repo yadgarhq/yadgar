@@ -464,14 +464,20 @@ fn normalise(raw: &str) -> String {
 /// silent invented value ADR-0569 refuses for a configuration knob — visible
 /// nowhere, and wrong the one time somebody meant `http`. So it is refused
 /// exactly like `http://` is, not upgraded.
+///
+/// **THE CLASSIFICATION IS SHARED with [`crate::config`]'s copy of this
+/// check; only the error is not.** [`crate::scheme::scheme_of`] holds the
+/// one rule both call sites need agree on; this function's whole job is to
+/// turn that classification into the wording that fits a person mid-prompt,
+/// which is a different wording from a file `serve` loaded unattended.
 fn require_https(gateway: &str) -> Result<(), LoginError> {
-    match gateway.split_once("://") {
-        Some((scheme, _)) if scheme.eq_ignore_ascii_case("https") => Ok(()),
-        Some((scheme, _)) => Err(LoginError::InsecureScheme {
+    match crate::scheme::scheme_of(gateway) {
+        crate::scheme::Scheme::Https => Ok(()),
+        crate::scheme::Scheme::Other(scheme) => Err(LoginError::InsecureScheme {
             url: gateway.to_string(),
             scheme: scheme.to_string(),
         }),
-        None => Err(LoginError::NoScheme(gateway.to_string())),
+        crate::scheme::Scheme::Absent => Err(LoginError::NoScheme(gateway.to_string())),
     }
 }
 

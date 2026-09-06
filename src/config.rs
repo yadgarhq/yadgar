@@ -92,6 +92,62 @@ pub enum ConfigError {
     Malformed(PathBuf, serde_json::Error),
     #[error("cannot write {0}: {1}")]
     Unwritable(PathBuf, std::io::Error),
+    /// A stored gateway that names no scheme at all.
+    ///
+    /// ADR-0569, the same rule `login` and `enrol` already apply before a
+    /// config is ever written: a default is a value nobody chose, used as if
+    /// somebody had. Applied again HERE, at load time, because a hand-edited
+    /// `config.json` did not pass through either command.
+    #[error(
+        "{gateway} in {path} names no scheme. Run `yaadgaar login` (or `enrol`)          again, or edit the file to add `https://`."
+    )]
+    NoScheme { gateway: String, path: PathBuf },
+    /// Every scheme but `https` is refused, checked again at load time.
+    ///
+    /// **THIS IS THE OTHER HALF OF LEDGER 717.** `login` and `enrol` refuse a
+    /// cleartext address before it is ever written, but that check runs once,
+    /// at adoption time — it says nothing about a `config.json` a PRE-FIX
+    /// BINARY wrote, or one somebody hand-edited afterwards. `serve` has no
+    /// prompt in front of it and dials `gateway_url()` unattended, so without
+    /// this the front door closes and the back door — a stale or edited file
+    /// — stays open, sending a bearer token in cleartext on every start. The
+    /// message names the file and the fix rather than assuming a person is
+    /// watching a terminal they just typed into, because for this arm nobody
+    /// necessarily is.
+    #[error(
+        "{gateway} in {path} uses the `{scheme}` scheme; the gateway must be          reached over https. Run `yaadgaar login` (or `enrol`) again, or edit          the file."
+    )]
+    InsecureScheme {
+        gateway: String,
+        scheme: String,
+        path: PathBuf,
+    },
+}
+
+/// Refuse a stored gateway that does not use `https` (ledger 717).
+///
+/// PURE given the two things it needs, for the reason [`crate::login`]'s own
+/// copy of this check is pure: a security rule is worth nothing if a test can
+/// only ever exercise it through a real file on disk. Kept SEPARATE from
+/// `login`'s `require_https` rather than shared, because the two want
+/// different wording — one is said to a person mid-prompt about an address
+/// they just typed, the other is said about a file whose owner may not be
+/// watching a terminal at all, and "one function cannot hold two opposite
+/// correct answers behind one shape" (`login::reconcile` gives the same
+/// ruling for the CA fallback).
+fn require_https(gateway: &str, path: &Path) -> Result<(), ConfigError> {
+    match gateway.split_once("://") {
+        Some((scheme, _)) if scheme.eq_ignore_ascii_case("https") => Ok(()),
+        Some((scheme, _)) => Err(ConfigError::InsecureScheme {
+            gateway: gateway.to_string(),
+            scheme: scheme.to_string(),
+            path: path.to_path_buf(),
+        }),
+        None => Err(ConfigError::NoScheme {
+            gateway: gateway.to_string(),
+            path: path.to_path_buf(),
+        }),
+    }
 }
 
 /// The config directory, overridable so tests never touch a real one.
@@ -117,7 +173,8 @@ impl Config {
         let text =
             std::fs::read_to_string(&path).map_err(|e| ConfigError::Unreadable(path.clone(), e))?;
         let mut config: Self =
-            serde_json::from_str(&text).map_err(|e| ConfigError::Malformed(path, e))?;
+            serde_json::from_str(&text).map_err(|e| ConfigError::Malformed(path.clone(), e))?;
+        require_https(&config.gateway, &path)?;
         config.dir = dir.to_path_buf();
         Ok(config)
     }

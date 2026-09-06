@@ -206,12 +206,26 @@ mod tests {
         // The other half, and the reason the check compares directory names
         // rather than searching anywhere in the string for the two words.
         //
+        // `Program Files\yaadgaar\yaadgaar.exe` contains neither marker word
+        // at all, so it cannot tell a component check apart from a substring
+        // check — both say "not ephemeral" regardless of which is running.
+        // `.claudeconfig` and `myworktrees` are near-misses instead: each
+        // CONTAINS one marker word as a substring while being neither marker
+        // as a whole path component, so a substring-based `is_inside_agent_worktree`
+        // (verified by mutation: replacing the component-pair check with
+        // `s.contains(".claude") && s.contains("worktrees")` leaves this
+        // exact scenario a false positive) would wrongly refuse this path,
+        // while the real, component-based check does not.
+        //
         // It also pins that the answer does not depend on the CURRENT
         // DIRECTORY. This path is relative on Unix, and the linked-worktree
         // probe used to resolve `.git` against wherever the test binary ran, so
         // this assertion held in a normal checkout and failed in a linked
         // worktree while testing nothing about Windows either time.
-        assert!(ephemeral_reason(Path::new(r"C:\Program Files\yaadgaar\yaadgaar.exe")).is_none());
+        assert!(ephemeral_reason(Path::new(
+            r"C:\Program Files\.claudeconfig\myworktrees\yaadgaar.exe"
+        ))
+        .is_none());
     }
 
     #[test]

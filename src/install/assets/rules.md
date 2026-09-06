@@ -19,3 +19,9 @@ file cannot tell you.
 **Write what the next session will need.** A decision, a constraint, or a fact
 that cost you effort to establish is worth recording. A restatement of the code
 is not.
+
+**Track work in the task list, not only in your head.** List open tasks with
+`task_list`. Read one task in full with `task_get`. File a task by calling
+`task_write` with no `id`; update its status by calling `task_write` again
+with that `id`. A task nobody files or advances is invisible to the next
+session.

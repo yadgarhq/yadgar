@@ -438,11 +438,14 @@ fn the_name_is_mirrored_when_the_envelope_names_a_thing() {
 #[test]
 fn a_refusal_that_came_with_a_reason_does_not_also_guess() {
     // The other half of `a_rejected_credential_is_not_papered_over_by_the_cache`,
-    // which pins the no-detail arm. `run yaadgaar login again` is a guess, and
-    // the 401 the live gateway actually returns on `tools/call` is
-    // "request is missing the X-Yadgar-User header, which identifies the
-    // caller" — true, and logging in again fixes none of it. Two answers, and
-    // the wrong one phrased as the action.
+    // which pins the no-detail arm. `run yaadgaar login again` is a guess. The
+    // literal below is `gateway::attest::AttestError::MissingIdentity`'s
+    // message, returned only under `Attestation::TrustedHeaders`; the shipped
+    // default, `Attestation::Iam`, draws
+    // "request carries no `Authorization: Bearer <token>` header" instead for
+    // a missing credential (`gateway::attest::AttestError::MissingCredential`).
+    // Either way, logging in again fixes none of it. Two answers, and the
+    // wrong one phrased as the action.
     let out = rejected_error(
         &json!(1),
         reqwest::StatusCode::UNAUTHORIZED,

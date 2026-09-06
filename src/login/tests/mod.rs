@@ -5,6 +5,7 @@
 //! the obvious one and the one `proxy` and `install` already use: the module
 //! keeps the behaviour, the file beside it keeps the assertions about it.
 
+use super::label::{hostname_from, label_from};
 use super::*;
 
 /// What a re-login keeps, and what it must not carry across deployments.
@@ -29,6 +30,40 @@ fn a_port_survives_normalisation() {
         normalise("https://gateway.yadgar.internal:18443"),
         "https://gateway.yadgar.internal:18443/"
     );
+}
+
+#[test]
+fn a_cleartext_gateway_is_refused() {
+    // Ledger 717: `normalise` did no scheme check at all, so a password and
+    // a bearer token would go out over `http://` with nothing reporting it.
+    // A sentinel host, not a real gateway name, so this could not pass by
+    // accident against a fixture the implementation happens to contain.
+    let err = require_https("http://gw.sentinel.invalid/").expect_err("cleartext must be refused");
+    assert!(
+        matches!(&err, LoginError::InsecureScheme { scheme, .. } if scheme == "http"),
+        "got {err:?}"
+    );
+    let said = err.to_string();
+    assert!(said.contains("http://gw.sentinel.invalid/"), "{said}");
+    assert!(said.contains("http"), "{said}");
+}
+
+#[test]
+fn an_https_gateway_is_accepted() {
+    assert!(require_https("https://gw.sentinel.invalid/").is_ok());
+    // The scheme name is compared case-insensitively; the rest of the URL is
+    // not touched by this check at all.
+    assert!(require_https("HTTPS://gw.sentinel.invalid/").is_ok());
+}
+
+#[test]
+fn a_scheme_less_gateway_is_refused_rather_than_defaulted_to_https() {
+    // ADR-0569: a default chosen silently is a value nobody chose, used as
+    // if somebody had. "gw.sentinel.invalid/" names no scheme, so it is
+    // refused rather than completed to `https` on the person's behalf.
+    let err = require_https("gw.sentinel.invalid/").expect_err("a bare host must be refused");
+    assert!(matches!(err, LoginError::NoScheme(_)), "got {err:?}");
+    assert!(err.to_string().contains("gw.sentinel.invalid/"), "{err}");
 }
 
 #[test]

@@ -14,6 +14,7 @@ mod install;
 mod login;
 mod project;
 mod proxy;
+mod scheme;
 mod trust;
 
 #[cfg(test)]

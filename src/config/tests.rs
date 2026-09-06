@@ -207,6 +207,48 @@ fn malformed_config_is_distinguishable_from_absent() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn a_stored_cleartext_gateway_is_refused_at_load_time() {
+    // Ledger 717's second half: `login` and `enrol` refuse `http://` before a
+    // config is ever written, but that check runs once, at adoption. This is
+    // the file a PRE-FIX BINARY wrote, or one hand-edited afterwards — `serve`
+    // has no prompt in front of it, so the file must be refused on its own,
+    // not trusted because it is already on disk. A sentinel host, not this
+    // repository's real gateway, so this could not pass by accident against a
+    // fixture the implementation happens to contain.
+    let dir = tempdir();
+    std::fs::write(
+        dir.join(FILE),
+        r#"{"gateway":"http://gw.sentinel.invalid/","token":"tok-abc"}"#,
+    )
+    .unwrap();
+    let err = Config::load_from(&dir).expect_err("a cleartext gateway must be refused");
+    assert!(
+        matches!(&err, ConfigError::InsecureScheme { scheme, .. } if scheme == "http"),
+        "got {err:?}"
+    );
+    let said = err.to_string();
+    assert!(said.contains("gw.sentinel.invalid"), "{said}");
+    assert!(said.contains("yaadgaar login"), "{said}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_stored_gateway_with_no_scheme_is_refused_rather_than_defaulted() {
+    // ADR-0569: a default chosen silently is a value nobody chose, used as if
+    // somebody had. A bare host in a stored config is refused exactly like
+    // `http://` is, not completed to `https` on the owner's behalf.
+    let dir = tempdir();
+    std::fs::write(
+        dir.join(FILE),
+        r#"{"gateway":"gw.sentinel.invalid/","token":"tok-abc"}"#,
+    )
+    .unwrap();
+    let err = Config::load_from(&dir).expect_err("a schemeless gateway must be refused");
+    assert!(matches!(err, ConfigError::NoScheme { .. }), "got {err:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[cfg(unix)]
 #[test]
 fn the_config_is_not_world_readable() {

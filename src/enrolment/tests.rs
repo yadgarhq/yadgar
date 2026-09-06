@@ -115,19 +115,23 @@ fn a_blob_that_is_not_a_token_says_so_rather_than_decoding_to_noise() {
 #[test]
 fn a_field_a_newer_iam_added_is_skipped_rather_than_refused() {
     // Additive contract changes must not need a client release on every laptop.
-    // Field 9, a varint, appended to the token above: it decodes exactly as
-    // before, and nothing about the added field reaches the result.
-    let with_future_field = {
-        let mut bytes = base64::engine::general_purpose::STANDARD
-            .decode(WITHOUT_CA)
-            .unwrap();
-        bytes.extend_from_slice(&[0x48, 0x2a]); // field 9, varint, 42
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    };
-    assert_eq!(
-        decode(&with_future_field).expect("a newer token still enrols"),
-        decode(WITHOUT_CA).unwrap()
-    );
+    // Field 9, a varint: it decodes exactly as before, and nothing about the
+    // added field reaches the result.
+    //
+    // PLACED BEFORE THE KNOWN FIELDS, and the position is half the assertion —
+    // see `before_the_known_fields`. Appended, this went green against a decoder
+    // that stops dead at the first unknown field number, which is the one thing
+    // it exists to refuse.
+    //
+    // AND THE RESULT IS PINNED AGAINST THE SENTINELS, not against
+    // `decode(WITHOUT_CA)`. The implementation was on both sides of that
+    // equality, so any decoder that failed the two calls in the same way agreed
+    // with itself and passed.
+    let e = decode(&before_the_known_fields(0x48, &[0x2a])).expect("a newer token still enrols");
+    assert_eq!(e.secret, SENTINEL_SECRET);
+    assert_eq!(e.gateway, SENTINEL_GATEWAY);
+    assert_eq!(e.ca_pem, None);
+    assert_eq!(e.expires_at, Some(915_148_800));
 }
 
 #[test]
@@ -153,6 +157,26 @@ fn a_ca_that_is_present_and_blank_is_refused_like_an_empty_one() {
             "a blank ca_pem was accepted: {blank:?}"
         );
     }
+}
+
+/// Put one raw field BEFORE the known ones and re-encode.
+///
+/// APPENDING PROVES LESS THAN IT LOOKS, which is why this exists alongside
+/// `with_field`. An appended field is the LAST thing on the wire, so a decoder
+/// that STOPS at the first field number it does not recognise has already read
+/// secret, gateway and expires_at before it gets there and answers exactly what
+/// the unmodified token answers. The skip-unknown rule is then untested by the
+/// assertions written to test it. Placed first, that same decoder returns
+/// `Empty("secret")` and the assertion fails.
+fn before_the_known_fields(tag: u8, payload: &[u8]) -> String {
+    let mut b = vec![tag];
+    b.extend_from_slice(payload);
+    b.extend_from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(WITHOUT_CA)
+            .unwrap(),
+    );
+    base64::engine::general_purpose::STANDARD.encode(b)
 }
 
 /// Append one raw field to a known-good token and re-encode it.
@@ -197,8 +221,21 @@ fn a_known_field_with_the_wrong_wire_type_is_refused_rather_than_read_as_absent(
         Err(EnrolmentError::WrongType("expires_at"))
     );
     // An UNKNOWN number with any wire type is STILL skipped — that is the rule
-    // this must not have broken on its way past.
-    assert_eq!(decode(&with_field(0x48, &[0x2a])), decode(WITHOUT_CA));
+    // this must not have broken on its way past. Both wire types, and each one
+    // placed BEFORE the known fields rather than after them, for the reason
+    // `before_the_known_fields` states; the fields are then read back against
+    // the sentinels rather than against a second run of the decoder.
+    for (tag, payload) in [
+        (0x48u8, &[0x2a][..]),           // field 9, varint
+        (0x4a, &[0x02, 0x2a, 0x2a][..]), // field 9, length-delimited
+    ] {
+        let e = decode(&before_the_known_fields(tag, payload))
+            .unwrap_or_else(|e| panic!("an unknown field {tag:#x} was not skipped: {e:?}"));
+        assert_eq!(e.secret, SENTINEL_SECRET);
+        assert_eq!(e.gateway, SENTINEL_GATEWAY);
+        assert_eq!(e.ca_pem, None);
+        assert_eq!(e.expires_at, Some(915_148_800));
+    }
 }
 
 #[test]

@@ -10,6 +10,14 @@ fn denies(command: &str) -> bool {
     matches!(pre_tool_guard(&bash_call(command)), Decision::Deny(_))
 }
 
+/// The reason a call was refused under, for the tests that assert WHICH rule.
+fn reason_for(call: &Value) -> String {
+    match pre_tool_guard(call) {
+        Decision::Deny(reason) => reason,
+        Decision::Allow => panic!("the call was allowed rather than refused: {call}"),
+    }
+}
+
 /// Refused today, and each one is something a person is entitled to do.
 ///
 /// Keyed on the command, not on which rule over-matched: the substring
@@ -245,5 +253,60 @@ fn a_refusal_says_what_to_do_instead() {
     // reason names either the remedy or the reason the rule exists.
     for reason in [HOOK_BYPASS, TERRAFORM, DIGGER, EXCEPTIONS] {
         assert!(reason.len() > 60, "a one-line refusal explains nothing");
+    }
+}
+
+#[test]
+fn a_refusal_names_the_rule_the_call_actually_broke() {
+    // WHICH REASON, and the test above cannot ask it. That one iterates the
+    // four constants the implementation already holds and asserts each is long,
+    // so no input is tied to the reason it produced: exchanging the TERRAFORM
+    // and HOOK_BYPASS arms in `bash` leaves the whole suite green while an agent
+    // stopped from running terraform is handed the remedy for hook-skipping —
+    // which sends it to fix a commit flag that was never the problem.
+    //
+    // EACH SUBSTRING BELOW IS IN EXACTLY ONE OF THE FOUR CONSTANTS, and that is
+    // the property this rests on. `MIGRATION_NOTES.md` is deliberately not used:
+    // TERRAFORM and DIGGER both name it, because both rules end in the same
+    // remedy, so it separates nothing.
+    for (call, only_in_that_reason) in [
+        (bash_call("cd infra && terraform apply"), "tofu and tfp"),
+        (bash_call("git commit --no-verify -m x"), "skips hooks"),
+        (
+            bash_call(r#"gh pr comment 12 --body "digger apply""#),
+            "orchestrator",
+        ),
+        (
+            bash_call("tee ~/.claude/yadgar-hook-exceptions.json"),
+            "conceal",
+        ),
+        (
+            json!({
+                "tool_name": "Edit",
+                "tool_input": {
+                    "file_path": "/home/x/.claude/yadgar-hook-exceptions.json",
+                    "new_string": "{}"
+                }
+            }),
+            "conceal",
+        ),
+    ] {
+        let reason = reason_for(&call);
+        assert!(
+            reason.contains(only_in_that_reason),
+            "refused under the wrong rule: {call} got {reason:?}"
+        );
+    }
+
+    // AND THE SEPARATION IS ASSERTED RATHER THAN ASSUMED. If two constants ever
+    // come to share one of the substrings above, the loop stops discriminating
+    // and goes green on a swap again — silently, which is the failure it exists
+    // to catch.
+    for needle in ["tofu and tfp", "skips hooks", "orchestrator", "conceal"] {
+        let carriers = [HOOK_BYPASS, TERRAFORM, DIGGER, EXCEPTIONS]
+            .iter()
+            .filter(|r| r.contains(needle))
+            .count();
+        assert_eq!(carriers, 1, "{needle:?} no longer names one rule only");
     }
 }

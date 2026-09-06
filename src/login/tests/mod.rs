@@ -5,6 +5,7 @@
 //! the obvious one and the one `proxy` and `install` already use: the module
 //! keeps the behaviour, the file beside it keeps the assertions about it.
 
+use super::label::{hostname_from, label_from};
 use super::*;
 
 /// What a re-login keeps, and what it must not carry across deployments.

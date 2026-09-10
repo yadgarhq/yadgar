@@ -24,6 +24,7 @@ name: ci
 # the pull request just passed, on code already merged, with nobody watching.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 

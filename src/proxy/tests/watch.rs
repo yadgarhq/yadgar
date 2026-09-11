@@ -258,6 +258,11 @@ async fn a_host_that_has_gone_ends_the_watch() {
         0,
         "the gateway was asked on behalf of a host that had gone"
     );
+    // THE CALL COUNT IS THE ONLY THING PINNING THE EARLY CHECK. Deleting the
+    // `upgrade()` at the top of `tick_once` still returns `false` here, by way of
+    // the send that fails at the bottom — so the assertion above, and not the one
+    // before it, is what reddens for a watch that asks the gateway first and
+    // notices afterwards.
 }
 
 #[tokio::test(start_paused = true)]

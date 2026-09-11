@@ -14,6 +14,13 @@
 //! while the gateway was reachable and correct. So the live fetch stays live, the
 //! fallback stays a fallback, and change detection lives here instead — on a
 //! fingerprint this module keeps in memory for the life of one host connection.
+//!
+//! A poll does not WRITE that cache either, and that is a choice rather than an
+//! omission. The cache exists so the next start has a list, and the host fetches
+//! `tools/list` itself at every start — which is the write path, through
+//! [`super::respond`], on a request somebody actually made. Writing it from here
+//! too would put a second writer on a file whose whole value is that it holds the
+//! last answer a host was given.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;

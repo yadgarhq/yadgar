@@ -305,6 +305,20 @@ where
         // READ EVERY TIME ROUND, not captured once: the gateway may name an
         // interval in any reply, and a value read once would pin the first
         // answer's number for the life of the session.
+        // **THE FIRST WAIT IS THIS CLIENT'S OWN, EVEN WHEN THE GATEWAY NAMES ONE,
+        // and that is worth stating because the log line below makes it visible.**
+        // The watch arms at `initialize`, and at that instant no `tools/list` has
+        // been answered, so there is no named interval to have read — a fallback is
+        // by definition what happens in the absence of an answer. The host's own
+        // `tools/list` lands moments later and every wait after the first is the
+        // gateway's.
+        //
+        // Measured on the VM against gateway v0.9.38: the first line of a real
+        // session reads `named_by_the_gateway=false` and the next reads `true`.
+        // NOT A DEFECT WORTH THE FIX IT WOULD TAKE — interrupting a sleep already in
+        // flight — but absolutely worth writing down, because `false` on the first
+        // line is what a spelling mismatch between the two ends looks like too, and
+        // telling those apart is the entire reason this field exists.
         let wait = catalogue.wait();
         // BOTH THE LENGTH AND THE SOURCE. The deployed gateway names 600 seconds
         // and this client falls back to 600 seconds, so the length alone cannot

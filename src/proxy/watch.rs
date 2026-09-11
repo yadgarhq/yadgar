@@ -218,9 +218,16 @@ where
     let Some(body) = fetch().await else {
         // Unreachable or refused. Nothing is known to have changed, so nothing is
         // said — and the next tick asks again.
+        tracing::debug!("the gateway did not answer the tool list; nothing to tell the host");
         return true;
     };
     if !catalogue.record(&body) {
+        // LOGGED, though nothing happened, and that is the point. A watch doing
+        // its job correctly is INVISIBLE: it says nothing to the host and nothing
+        // to the log, so "the catalogue has not changed" and "the watch is not
+        // running" look identical from outside — including to whoever is asked
+        // why a new tool never appeared. One debug line is the difference.
+        tracing::debug!("the gateway's tool list is unchanged");
         return true;
     }
     tracing::info!("the gateway's tool list changed; telling the host");
@@ -244,7 +251,13 @@ where
         // READ EVERY TIME ROUND, not captured once: the gateway may name an
         // interval in any reply, and a value read once would pin the first
         // answer's number for the life of the session.
-        tokio::time::sleep(catalogue.interval()).await;
+        let interval = catalogue.interval();
+        // The interval is the one thing here nobody can read off the wire: it is
+        // the gateway's when the gateway named one and this client's otherwise, and
+        // from outside the process those are indistinguishable until a poll
+        // happens. Saying which was used is what makes the choice checkable.
+        tracing::debug!(?interval, "waiting before asking for the tool list again");
+        tokio::time::sleep(interval).await;
         if !tick_once(&catalogue, &fetch, &out).await {
             return;
         }

@@ -6,6 +6,12 @@ use serde_json::json;
 /// The identity and context headers, asserted on the wire (ADR-0511).
 mod identity;
 
+/// What terminates at this client rather than at the gateway.
+mod session;
+
+/// Telling the host when the gateway's catalogue moved.
+mod watch;
+
 #[test]
 fn a_cached_reply_is_retargeted_at_the_new_request() {
     // The failure this prevents: replaying a response carrying the OLD id
@@ -47,6 +53,30 @@ fn malformed_input_answers_with_a_null_id() {
     assert_eq!(v["error"]["code"], -32700);
 }
 
+/// `handle` as [`super::session::Session::message`] calls it, for the tests that
+/// were written before a session layer existed.
+///
+/// It parses the line the same way the loop does and declares no host
+/// capabilities, which is the state before any `initialize` has arrived.
+async fn forwarded(
+    client: &reqwest::Client,
+    config: &Config,
+    context: &Context,
+    line: &str,
+) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(line).expect("a fixture parses");
+    handle(
+        client,
+        config,
+        context,
+        line,
+        &parsed,
+        &json!({}),
+        &super::watch::Catalogue::default(),
+    )
+    .await
+}
+
 /// The tool list as the gateway returns it: a result, and no error.
 fn a_tool_list() -> String {
     json!({"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"recall"}]}}).to_string()
@@ -57,12 +87,17 @@ fn a_notification_is_not_replied_to() {
     // No id means no reply, on EVERY path. A response to a notification is a
     // reply to a request nobody made, and the agent has nothing to match it
     // against.
+    //
+    // THE METHOD NAMED HERE IS ONE THAT STILL REACHES THIS FUNCTION.
+    // `notifications/initialized` used to be the fixture and no longer arrives:
+    // it terminates in `session` and never reaches a gateway, so a test about
+    // forwarding it would be asserting over a case that cannot occur.
     for outcome in [
         Outcome::Answered(a_tool_list()),
         Outcome::Rejected(reqwest::StatusCode::BAD_GATEWAY, None),
         Outcome::Unreachable("connection refused".into()),
     ] {
-        let answer = respond("notifications/initialized", None, outcome, None, None);
+        let answer = respond("notifications/progress", None, outcome, None, None);
         assert_eq!(answer.reply, None, "a notification was answered");
         assert_eq!(answer.cache, None);
     }
@@ -504,4 +539,100 @@ fn only_the_tool_list_is_cacheable() {
     // never do.
     assert_eq!(CACHEABLE, "tools/list");
     assert_ne!(CACHEABLE, "tools/call");
+}
+
+/// A [`session::Watch`] for the tests that are not about watching.
+struct Unwatched;
+
+impl super::session::Watch for Unwatched {
+    fn host_connected(&mut self, _capabilities: serde_json::Value) {}
+}
+
+#[tokio::test]
+async fn a_host_that_sends_no_meta_still_sends_the_gateway_what_it_requires() {
+    // THE GATE, IN MINIATURE. Claude Code over stdio sends no `params._meta`. The
+    // gateway requires two keys in it and refuses on the BODY, before it reads any
+    // header — measured on the Debian test VM against gateway 0.9.37, 2026-09-11:
+    //
+    //   params._meta["io.modelcontextprotocol/protocolVersion"] is required
+    //   params._meta["io.modelcontextprotocol/clientCapabilities"] is required
+    //
+    // So a header default alone fixes nothing, and this reads the whole request —
+    // head AND body — off a socket to prove both halves leave the process.
+    let (addr, served) = crate::testserver::answer_once(
+        "200 OK",
+        r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#,
+    )
+    .await;
+    let dir = crate::testserver::scratch_dir("proxy-filled-meta");
+    let config = Config::new(&dir, format!("http://{addr}/"), "tok".into());
+
+    let mut session = super::session::Session::new(Unwatched, super::watch::Catalogue::default());
+    let reply = session
+        .message(
+            &reqwest::Client::new(),
+            &config,
+            &Context::default(),
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#,
+        )
+        .await;
+
+    let request = served.await.unwrap().to_lowercase();
+    // Taken from the handshake rather than written out, so this test cannot pass
+    // by agreeing with a literal that the handshake has since stopped using.
+    let declared: serde_json::Value =
+        serde_json::from_str(&super::session::initialize_reply(&json!(1))).unwrap();
+    let version = declared["result"]["protocolVersion"]
+        .as_str()
+        .unwrap()
+        .to_lowercase();
+    assert!(
+        request.contains(&format!("mcp-protocol-version: {version}")),
+        "no protocol header left the process for an envelope that declared none:\n{request}"
+    );
+    assert!(
+        request.contains("io.modelcontextprotocol/protocolversion"),
+        "the body still carries no version, so the gateway refuses it:\n{request}"
+    );
+    assert!(
+        request.contains("io.modelcontextprotocol/clientcapabilities"),
+        "the second required key is still absent, so the gateway refuses it:\n{request}"
+    );
+    assert!(reply.is_some_and(|r| r.contains("result")));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn the_handshake_acknowledgement_reaches_no_socket() {
+    // A NOTIFICATION TAKES NO REPLY, so there is nothing in a return value that
+    // could tell a swallowed one from a forwarded one — the only observable
+    // difference is whether anything arrived at the gateway. Hence a real socket
+    // that nothing must connect to.
+    //
+    // 300 ms IS NOT A GUESS ABOUT SPEED, it is orders of magnitude above a
+    // loopback connect, which is what this is waiting for. A forwarded
+    // notification arrives in about a millisecond; this budget being generous is
+    // what makes the test's failure mean "nothing was sent" rather than "the
+    // machine was busy".
+    let (addr, served) = crate::testserver::answer_once("200 OK", "{}").await;
+    let dir = crate::testserver::scratch_dir("proxy-session-notification");
+    let config = Config::new(&dir, format!("http://{addr}/"), "tok".into());
+
+    let mut session = super::session::Session::new(Unwatched, super::watch::Catalogue::default());
+    let reply = session
+        .message(
+            &reqwest::Client::new(),
+            &config,
+            &Context::default(),
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        )
+        .await;
+    assert_eq!(reply, None, "a notification was answered");
+
+    let arrived = tokio::time::timeout(std::time::Duration::from_millis(300), served).await;
+    assert!(
+        arrived.is_err(),
+        "the gateway was sent a handshake acknowledgement for a handshake it never saw: {arrived:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
 }

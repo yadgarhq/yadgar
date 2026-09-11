@@ -304,7 +304,7 @@ async fn a_refusal_says_why_this_client_sent_no_project() {
         "the fixture resolved a project, so this test asserts nothing"
     );
 
-    let reply = handle(&reqwest::Client::new(), &config, &context, a_tool_call())
+    let reply = super::forwarded(&reqwest::Client::new(), &config, &context, a_tool_call())
         .await
         .expect("a request with an id is answered");
 
@@ -356,7 +356,7 @@ async fn a_refusal_does_not_blame_a_project_this_client_did_send() {
     let dir = crate::testserver::scratch_dir("refusal-with-project");
     let config = Config::new(&dir, format!("http://{addr}/"), "tok".into());
 
-    let reply = handle(
+    let reply = super::forwarded(
         &reqwest::Client::new(),
         &config,
         &a_context_no_derivation_could_produce(),

@@ -107,6 +107,17 @@ tokio = { version = "1", features = [
   "io-std",
   "io-util",
   "process",
+  # `time` IS NOT IMPLIED BY ANY OF THE ABOVE — neither `macros` nor
+  # `rt-multi-thread` enables it, and `tokio::time::sleep` does not exist
+  # without it. The tool-list watch sleeps between polls, so the feature is
+  # load-bearing rather than convenient.
+  "time",
+  # ONE WRITER OWNS STDOUT. Under `serve`, stdout IS the MCP transport, and
+  # there are now two producers of lines on it: the request loop and the watch
+  # that emits `notifications/tools/list_changed`. Two tasks writing a shared
+  # descriptor interleave two JSON lines into one unparseable frame, so both
+  # send into a channel and a single task writes. `sync` is that channel.
+  "sync",
 ] }
 
 serde = { version = "1", features = ["derive"] }
@@ -160,4 +171,17 @@ all = { level = "deny", priority = -1 }
 #
 # `net` is here rather than in the runtime dependency above because nothing in
 # the client ever binds or listens; only the tests do.
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "io-util"] }
+#
+# `test-util` IS WHAT MAKES THE WATCH TESTABLE AT ALL. Its poll interval is
+# minutes, and a test that waits one is a test nobody runs — so the watch tests
+# take a PAUSED clock (`#[tokio::test(start_paused = true)]`) and advance virtual
+# time, which turns "did it wait the interval the gateway named" into a
+# sub-second assertion. Without the feature that attribute silently has no
+# effect and the same test sleeps for real, in CI.
+tokio = { version = "1", features = [
+  "net",
+  "rt-multi-thread",
+  "macros",
+  "io-util",
+  "test-util",
+] }

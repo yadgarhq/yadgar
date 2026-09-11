@@ -2,7 +2,16 @@
 //!
 //! **This module knows no tools.** There is no tool list here, no match arm per
 //! tool, no feature flag — `tools/list` is forwarded and its answer returned
-//! verbatim, and so is everything else (D75).
+//! verbatim (D75).
+//!
+//! **THE SESSION LAYER IS THE EXCEPTION, and "and so is everything else" was
+//! true here until [`session`] existed.** `initialize` and the notification
+//! acknowledging it terminate in this process, because they ask about THIS MCP
+//! server rather than about tools: the gateway is stateless, holds no session, and
+//! answered a forwarded `initialize` with `-32601 unknown method: initialize`.
+//! Every MCP host sends `initialize` first and stops when it fails, so no host
+//! could complete a handshake at all. The catalogue is untouched by that — nothing
+//! in [`session`] answers `tools/list` and nothing there decides what a tool is.
 //!
 //! That is not laziness, it is the boundary. A client-side list is something the
 //! client asserts; forwarding makes the gateway's answer the only answer. The
@@ -27,13 +36,23 @@
 //! list: what this module asserts about the protocol is nothing, and the gateway
 //! stays the only authority. Pinning would also couple every spec revision to a
 //! client release, on laptops, which is exactly what forwarding avoids.
+//!
+//! **ECHOING HAS NOTHING TO ECHO WHEN THE HOST SENDS NO `_meta`, and that is what
+//! made this proxy unusable.** Claude Code over stdio sends no `params._meta`; the
+//! gateway requires two keys in it and refuses the request on the BODY, before it
+//! reads a single header — so every forwarded call earned 400 and the header rule
+//! above could not save it. [`session::fill_meta`] fills in only the fields the
+//! envelope left absent, and they are facts about THIS CLIENT: which revision it
+//! speaks, and the capabilities the host itself declared at `initialize`. A
+//! version somebody else declared is still echoed and never overwritten, so the
+//! rule above holds wherever there is anything to hold it about.
 
 mod context;
 mod replies;
+mod session;
+mod watch;
 
-use std::io::{self, Write as _};
-
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt as _, BufReader};
 
 use crate::config::Config;
 
@@ -92,6 +111,44 @@ pub async fn serve(mut config: Config) -> anyhow::Result<()> {
     // process stays there for the session.
     let context = Context::discover(&config, &std::env::current_dir()?);
 
+    // ONE WRITER OWNS STDOUT, because there are now two producers of lines on it:
+    // this loop's replies and the watch's `notifications/tools/list_changed`. Two
+    // tasks writing the same descriptor interleave two JSON documents into one
+    // frame the host cannot parse, and the failure looks like a broken protocol.
+    // Both send here instead, and the order a line is sent in is the order it is
+    // written in.
+    let (out, mut outbound) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let writer = tokio::spawn(async move {
+        let mut stdout = tokio::io::stdout();
+        while let Some(body) = outbound.recv().await {
+            if stdout
+                .write_all(format!("{body}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            // Flushed per message. Without it the agent waits on a buffer that
+            // fills only when the next request arrives, which reads as the
+            // server hanging.
+            if stdout.flush().await.is_err() {
+                return;
+            }
+        }
+    });
+
+    let catalogue = watch::Catalogue::default();
+    let mut session = session::Session::new(
+        session::Spawn {
+            client: client.clone(),
+            config: config.clone(),
+            context: context.clone(),
+            catalogue: catalogue.clone(),
+            out: out.downgrade(),
+        },
+        catalogue,
+    );
+
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
 
@@ -106,37 +163,37 @@ pub async fn serve(mut config: Config) -> anyhow::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let response = handle(&client, &config, &context, &line).await;
-        if let Some(body) = response {
-            let mut out = io::stdout().lock();
-            writeln!(out, "{body}")?;
-            // Flushed per message. Without it the agent waits on a buffer that
-            // fills only when the next request arrives, which reads as the
-            // server hanging.
-            out.flush()?;
+        if let Some(body) = session.message(&client, &config, &context, &line).await {
+            // A closed channel means the writer is gone, which means stdout is
+            // gone: there is nobody left to answer.
+            if out.send(body).is_err() {
+                break;
+            }
         }
     }
+    // DROPPED EXPLICITLY, and the watch's exit depends on it. Closing the last
+    // sender is what ends the writer task, and a watch whose send then fails
+    // stops polling a gateway on behalf of a host that has gone.
+    drop(out);
+    drop(session);
+    let _ = writer.await;
     Ok(())
 }
 
 /// Forward one message. Returns `None` for a notification, which takes no reply.
+///
+/// Reached only for the messages [`session::terminates`] says are the gateway's,
+/// which is everything about tools and everything this client has no business
+/// answering.
 async fn handle(
     client: &reqwest::Client,
     config: &Config,
     context: &Context,
     line: &str,
+    parsed: &serde_json::Value,
+    capabilities: &serde_json::Value,
+    catalogue: &watch::Catalogue,
 ) -> Option<String> {
-    // Parsed only far enough to answer two questions: does this need a reply,
-    // and is it cacheable. The BODY is forwarded as received — reserialising it
-    // would silently normalise a client's JSON and could change a field order or
-    // a number's representation the gateway is entitled to see unchanged.
-    let parsed: serde_json::Value = match serde_json::from_str(line) {
-        Ok(v) => v,
-        Err(_) => {
-            // Malformed JSON is the agent's problem to see, not ours to swallow.
-            return Some(parse_error());
-        }
-    };
     let id = parsed.get("id").cloned();
     let method = parsed
         .get("method")
@@ -144,7 +201,12 @@ async fn handle(
         .unwrap_or_default()
         .to_string();
 
-    let outcome = forward(client, config, context, line).await;
+    // THE ONLY PLACE THE BODY IS EVER REWRITTEN, and it is rewritten only when
+    // something was missing from it. `None` here means the line goes out byte for
+    // byte, as every message did before the gateway's two required `_meta` keys
+    // met a host that sends neither.
+    let filled = session::fill_meta(parsed, capabilities);
+    let outcome = forward(client, config, context, filled.as_deref().unwrap_or(line)).await;
 
     // The cache is read HERE rather than inside [`respond`], and only when it
     // could possibly be used. That is what keeps `respond` a pure function, and
@@ -155,6 +217,17 @@ async fn handle(
         _ if method == CACHEABLE => config.read_tool_cache(),
         _ => None,
     };
+
+    // THE BASELINE THE WATCH COMPARES AGAINST IS WHAT THE HOST WAS LAST SHOWN, so
+    // a list the host fetched itself is recorded here. Its return value is
+    // DELIBERATELY IGNORED: the host is reading this very answer, so there is
+    // nothing to tell it, and emitting `list_changed` beside a reply the host
+    // asked for would make it fetch the same list again.
+    if method == CACHEABLE {
+        if let Outcome::Answered(body) = &outcome {
+            catalogue.record(body);
+        }
+    }
 
     // Computed HERE and handed in, so `respond` stays pure and the rule can be
     // exercised without a socket. It is the client's own knowledge of what it

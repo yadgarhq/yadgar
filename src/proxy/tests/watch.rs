@@ -27,9 +27,14 @@ fn a_list(names: &[&str]) -> String {
 /// rename of the constant does not silently rename what this test checks.
 /// [`the_gateway_names_the_interval_under_a_key_of_its_own`] is what ties the
 /// literal and the constant together.
-fn a_list_naming_an_interval(ms: u64, names: &[&str]) -> String {
+///
+/// **437 SECONDS IS THE SENTINEL EVERYWHERE BELOW, AND 600 IS FORBIDDEN AS ONE.**
+/// The deployed gateway names 600 and this client falls back to 600, so a fixture
+/// naming 600 would pass against a client that ignored the reply entirely. 437 is
+/// a value neither end could hold.
+fn a_list_naming_an_interval(seconds: u64, names: &[&str]) -> String {
     let mut value: Value = serde_json::from_str(&a_list(names)).unwrap();
-    value["result"]["_meta"] = json!({ "com.github.yadgarhq/toolListPollMs": ms });
+    value["result"]["_meta"] = json!({ "io.yadgarhq/toolsPollIntervalSeconds": seconds });
     value.to_string()
 }
 
@@ -121,22 +126,55 @@ fn an_answer_that_is_not_a_tool_list_destroys_no_baseline() {
 fn the_interval_the_gateway_named_is_the_one_this_client_holds() {
     // ONE SOURCE FOR THE NUMBER (ADR-0569). The gateway is the end that knows how
     // often its catalogue moves, and it can change that without a client release.
-    // 1234 ms is a value no implementation would carry, so this cannot pass for a
-    // client that ignored the reply and used its own.
+    // 437 seconds is a value neither end carries, so this cannot pass for a client
+    // that ignored the reply and used its own.
     let catalogue = Catalogue::default();
-    catalogue.record(&a_list_naming_an_interval(1234, &["recall"]));
-    assert_eq!(catalogue.interval(), Duration::from_millis(1234));
+    catalogue.record(&a_list_naming_an_interval(437, &["recall"]));
+    assert_eq!(
+        catalogue.wait(),
+        Wait {
+            how_long: Duration::from_secs(437),
+            named_by_the_gateway: true,
+        }
+    );
+}
+
+#[test]
+fn the_source_of_the_interval_is_carried_beside_its_length() {
+    // THE COINCIDENCE THIS EXISTS FOR. The deployed gateway names 600 seconds and
+    // this client falls back to 600 seconds, so a length of 600 is consistent with
+    // BOTH "a reply was read" and "the key is spelled differently at the two ends
+    // and no reply was ever understood". The second is the silent failure, and
+    // only the source tells them apart — in this test and in the log line the
+    // field feeds.
+    let read_a_reply = Catalogue::default();
+    read_a_reply.record(&a_list_naming_an_interval(600, &["recall"]));
+    let understood_nothing = Catalogue::default();
+    understood_nothing.record(&a_list(&["recall"]));
+
+    assert_eq!(
+        read_a_reply.wait().how_long,
+        understood_nothing.wait().how_long,
+        "the fixture no longer reproduces the collision it exists for"
+    );
+    assert!(read_a_reply.wait().named_by_the_gateway);
+    assert!(
+        !understood_nothing.wait().named_by_the_gateway,
+        "a client that understood no reply claimed the gateway had named its interval"
+    );
 }
 
 #[test]
 fn an_interval_nobody_named_is_not_a_number_from_a_reply() {
     // The client's own answer to "the gateway named none" is a DIFFERENT FACT
     // from the poll interval, and the two are never compared. What is asserted
-    // here is only that an unnamed interval is not some other reply's, and that
-    // it is long enough to be a wait rather than a loop.
+    // here is only that an unnamed interval is not some other reply's, that it is
+    // long enough to be a wait rather than a loop, and that it does not claim to
+    // be the gateway's.
     let unnamed = Catalogue::default();
-    assert_ne!(unnamed.interval(), Duration::from_millis(1234));
-    assert!(unnamed.interval() >= Duration::from_secs(60));
+    assert_ne!(unnamed.wait().how_long, Duration::from_secs(437));
+    assert!(unnamed.wait().how_long >= Duration::from_secs(60));
+    assert!(!unnamed.wait().named_by_the_gateway);
 }
 
 #[test]
@@ -146,19 +184,33 @@ fn an_interval_of_zero_is_refused() {
     let catalogue = Catalogue::default();
     let bare = Catalogue::default();
     catalogue.record(&a_list_naming_an_interval(0, &["recall"]));
-    assert_eq!(catalogue.interval(), bare.interval());
+    assert_eq!(catalogue.wait(), bare.wait());
+    assert!(
+        !catalogue.wait().named_by_the_gateway,
+        "a refused number was still reported as the gateway's choice"
+    );
 }
 
 #[test]
 fn the_gateway_names_the_interval_under_a_key_of_its_own() {
-    // Pins the fixture above to the constant, so renaming the constant reddens a
-    // test rather than silently making every gateway-named interval invisible.
+    // THE SPELLING IS THE DEPLOYED GATEWAY'S, not this client's preference: read
+    // off the live wire against v0.9.38, which shipped first. This client's first
+    // guess was `com.github.yadgarhq/toolListPollMs`, and two spellings for one
+    // fact is the failure that ships silent — a reader finding neither key uses its
+    // own default forever with nothing to report.
     //
     // NOT UNDER `io.modelcontextprotocol/`: a key invented inside the spec's
     // namespace is indistinguishable from one the spec defines, which is the
     // near-miss failure this estate has already met on `_meta` keys.
-    assert_eq!(POLL_INTERVAL_KEY, "com.github.yadgarhq/toolListPollMs");
+    assert_eq!(POLL_INTERVAL_KEY, "io.yadgarhq/toolsPollIntervalSeconds");
     assert!(!POLL_INTERVAL_KEY.starts_with("io.modelcontextprotocol/"));
+    // THE UNIT IS PART OF THE CONTRACT. The key says seconds and the reader must
+    // read seconds; reading the same number as milliseconds would poll a thousand
+    // times too often while looking like a working feature.
+    assert!(
+        POLL_INTERVAL_KEY.ends_with("Seconds"),
+        "the key stopped naming its own unit, which is the only thing making it unambiguous"
+    );
 }
 
 #[test]
@@ -268,11 +320,12 @@ async fn a_host_that_has_gone_ends_the_watch() {
 #[tokio::test(start_paused = true)]
 async fn the_gateway_s_interval_is_what_is_actually_waited() {
     // THE MUTATION THIS CATCHES: reading the interval once, or ignoring it and
-    // waiting the client's own. 1234 ms is not a value this client could hold, and
-    // five seconds is far short of what an unnamed interval waits — so a client
-    // that ignored the reply polls zero times here.
+    // waiting the client's own. 437 seconds is not a value either end could hold,
+    // and the window below fits four of them — so a client that ignored the reply
+    // and waited its own ten minutes polls three times at most, and one that read
+    // the number as milliseconds polls thousands of times.
     let catalogue = Catalogue::default();
-    let body = a_list_naming_an_interval(1234, &["recall"]);
+    let body = a_list_naming_an_interval(437, &["recall"]);
     catalogue.record(&body);
 
     let when = Arc::new(Mutex::new(Vec::<Duration>::new()));
@@ -285,39 +338,45 @@ async fn the_gateway_s_interval_is_what_is_actually_waited() {
 
     let (out, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let weak = out.downgrade();
-    let _ = tokio::time::timeout(Duration::from_secs(5), poll(catalogue, fetch, weak)).await;
+    // VIRTUAL SECONDS. The clock is paused, so a window of half an hour costs
+    // microseconds and the assertions below are exact rather than tolerant.
+    let _ = tokio::time::timeout(Duration::from_secs(1800), poll(catalogue, fetch, weak)).await;
 
     let seen = when.lock().unwrap().clone();
     assert!(
         !seen.is_empty(),
-        "nothing was polled in five seconds; the interval the gateway named was ignored"
+        "nothing was polled at all; the interval the gateway named was ignored"
     );
     assert_eq!(
         seen[0],
-        Duration::from_millis(1234),
-        "the first poll did not wait the interval the gateway named"
+        Duration::from_secs(437),
+        "the first poll did not wait the interval the gateway named, in seconds"
     );
-    assert!(
-        seen.len() > 3,
-        "the interval was read once rather than every time round: {seen:?}"
+    assert_eq!(
+        seen.len(),
+        4,
+        "1800s holds exactly four 437s waits; a different count means the number \
+         was read once, ignored, or read in the wrong unit: {seen:?}"
     );
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_gateway_that_names_no_interval_is_not_polled_on_a_sentinel_one() {
-    // The other half of the pair above, so neither can be deleted alone. With
-    // nothing named, five seconds must pass with the gateway untouched.
+    // The other half of the pair above, so neither can be deleted alone. The window
+    // is 500 virtual seconds, which is LONGER than the sentinel the gateway names
+    // in that test and SHORTER than what this client waits unaided — so a client
+    // that borrowed some other reply's number polls here and a correct one does not.
     let (fetch, calls) = scripted(vec![Some(a_list(&["recall"]))]);
     let (out, _rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let weak = out.downgrade();
     let _ = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(500),
         poll(Catalogue::default(), fetch, weak),
     )
     .await;
     assert_eq!(
         *calls.lock().unwrap(),
         0,
-        "a gateway that named no interval was polled within five seconds"
+        "a gateway that named no interval was polled sooner than this client waits"
     );
 }

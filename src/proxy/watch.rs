@@ -31,22 +31,38 @@ use tokio::sync::mpsc::WeakUnboundedSender;
 /// What the host is told, and the exact string is the protocol's.
 const LIST_CHANGED: &str = "notifications/tools/list_changed";
 
-/// Where the gateway may name how often to ask.
+/// Where the gateway names how often to ask.
 ///
-/// **THE GATEWAY'S NUMBER, WHEREVER IT OFFERS ONE.** It is the end that knows how
-/// often its catalogue moves, it can change that without a client release, and a
-/// client-side figure would be a second source for one fact (ADR-0569).
+/// **THE GATEWAY'S NUMBER, AND THIS IS ITS SPELLING RATHER THAN A PROPOSAL.** It is
+/// the end that knows how often its catalogue moves, it can change that without a
+/// client release, and a client-side figure would be a second source for one fact
+/// (ADR-0569). Read off the live wire from `/root/work` against gateway v0.9.38
+/// (digest `sha256:beec1a24…`), which shipped the writing half BEFORE this reading
+/// half existed:
+///
+/// ```text
+/// result._meta: { "io.yadgarhq/toolsPollIntervalSeconds": 600 }
+/// ```
 ///
 /// NOT UNDER `io.modelcontextprotocol/`. That namespace is the spec's, and a key
 /// invented inside it is indistinguishable from one the spec defines — the
-/// near-miss failure the gateway's own `_meta` comment warns about. `com.github`
-/// plus the organisation is a label this project verifiably controls without
-/// claiming a domain it does not own.
+/// near-miss failure the gateway's own `_meta` comment warns about.
 ///
-/// MILLISECONDS, following the estate's own precedent rather than inventing
-/// units: `server/discover` already answers `ttlMs: 3600000`, measured on the VM
-/// against gateway 0.9.37.
-pub(super) const POLL_INTERVAL_KEY: &str = "com.github.yadgarhq/toolListPollMs";
+/// **SECONDS, AND THE ESTATE IS NOW INCONSISTENT ABOUT UNITS ON PURPOSE.**
+/// `server/discover` answers `ttlMs: 3600000`, so milliseconds are the estate's own
+/// precedent and this key departs from it. Recorded as a residual rather than
+/// fixed: the writing half is a DEPLOYED service, and realigning it would cost a
+/// second release for a difference the `Seconds` suffix already makes unambiguous.
+/// What matters is that this constant and that suffix agree, which is the thing a
+/// reader of one end can check.
+///
+/// **ONE SPELLING, READ IN ONE PLACE, AND NO TOLERANT FALLBACK.** This client wrote
+/// `com.github.yadgarhq/toolListPollMs` first and the gateway wrote the key above:
+/// two spellings for one fact, which is the failure that ships SILENT, because a
+/// reader that finds neither key simply uses its own default forever with nothing
+/// to report. A reader accepting both spellings would hide the next such
+/// divergence the same way, so there is exactly one.
+pub(super) const POLL_INTERVAL_KEY: &str = "io.yadgarhq/toolsPollIntervalSeconds";
 
 /// How long this client waits when the GATEWAY NAMES NOTHING.
 ///
@@ -60,6 +76,14 @@ pub(super) const POLL_INTERVAL_KEY: &str = "com.github.yadgarhq/toolListPollMs";
 /// idle laptop makes six requests an hour, and a tool added at the gateway
 /// reaches a host inside a coffee break. It is also why the watch runs only while
 /// a host is connected — an install nobody is using makes no requests at all.
+///
+/// **THE DEPLOYED GATEWAY HAPPENS TO NAME THE SAME NUMBER — 600 — AND THAT
+/// COINCIDENCE HIDES THE DIFFERENCE BETWEEN THE TWO FACTS.** Measured on the live
+/// wire against v0.9.38. So neither a log line nor a test that reads only the
+/// LENGTH can tell "the gateway named 600" from "the gateway named nothing and
+/// this client fell back to 600" — which is exactly the state a silent key
+/// mismatch leaves behind. [`Wait`] therefore carries WHO SAID SO beside the
+/// number, and nothing anywhere asserts on 600 alone.
 const UNNAMED_INTERVAL: Duration = Duration::from_secs(600);
 
 /// What the host was last shown, and how often to look.
@@ -69,6 +93,20 @@ struct State {
     tools: Option<String>,
     /// The interval the gateway named, if it has named one.
     interval: Option<Duration>,
+}
+
+/// How long to wait, and WHETHER THE GATEWAY IS WHAT SAID SO.
+///
+/// **THE SOURCE IS CARRIED BECAUSE THE LENGTH DOES NOT DISTINGUISH IT.** The
+/// deployed gateway names 600 seconds and [`UNNAMED_INTERVAL`] is 600 seconds, so
+/// the one observation that proves the two halves of this feature actually meet —
+/// that a real reply was read — is invisible in the number. It is the difference
+/// between a working feature and a silently inert one, so it is a field rather
+/// than a comment.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Wait {
+    pub(super) how_long: Duration,
+    pub(super) named_by_the_gateway: bool,
 }
 
 /// The catalogue as this process last saw it, shared by the two things that see
@@ -110,9 +148,22 @@ impl Catalogue {
         changed
     }
 
-    /// How long to wait before asking again.
-    pub(super) fn interval(&self) -> Duration {
-        self.lock().interval.unwrap_or(UNNAMED_INTERVAL)
+    /// How long to wait before asking again, and who decided.
+    ///
+    /// ONE LOCK FOR BOTH HALVES. Asking "how long" and "who said so" separately
+    /// could straddle a poll that changed the answer, and a log line pairing a
+    /// length with the wrong source is worse than one with no source at all.
+    pub(super) fn wait(&self) -> Wait {
+        match self.lock().interval {
+            Some(how_long) => Wait {
+                how_long,
+                named_by_the_gateway: true,
+            },
+            None => Wait {
+                how_long: UNNAMED_INTERVAL,
+                named_by_the_gateway: false,
+            },
+        }
     }
 
     /// A poisoned lock is recovered rather than propagated: the state behind it is
@@ -166,12 +217,15 @@ fn canonical(value: &Value) -> String {
 /// interval is a loop with no sleep in it, which would hammer the gateway from
 /// every laptop that had a host attached.
 fn named_interval(parsed: &Value) -> Option<Duration> {
-    let ms = parsed
+    let seconds = parsed
         .get("result")?
         .get("_meta")?
         .get(POLL_INTERVAL_KEY)?
         .as_u64()?;
-    (ms > 0).then(|| Duration::from_millis(ms))
+    // SECONDS, because the key says `Seconds` and the writing half is deployed.
+    // Reading a seconds value as milliseconds would poll a thousand times too
+    // often and would look like a working feature while doing it.
+    (seconds > 0).then(|| Duration::from_secs(seconds))
 }
 
 /// The notification, exactly as the protocol words it: no id, because a
@@ -251,13 +305,18 @@ where
         // READ EVERY TIME ROUND, not captured once: the gateway may name an
         // interval in any reply, and a value read once would pin the first
         // answer's number for the life of the session.
-        let interval = catalogue.interval();
-        // The interval is the one thing here nobody can read off the wire: it is
-        // the gateway's when the gateway named one and this client's otherwise, and
-        // from outside the process those are indistinguishable until a poll
-        // happens. Saying which was used is what makes the choice checkable.
-        tracing::debug!(?interval, "waiting before asking for the tool list again");
-        tokio::time::sleep(interval).await;
+        let wait = catalogue.wait();
+        // BOTH THE LENGTH AND THE SOURCE. The deployed gateway names 600 seconds
+        // and this client falls back to 600 seconds, so the length alone cannot
+        // say whether a reply was ever read — and "the key is spelled differently
+        // at the two ends" looks exactly like "the gateway named ten minutes".
+        // This line is the only place that difference is observable in the field.
+        tracing::debug!(
+            interval = ?wait.how_long,
+            named_by_the_gateway = wait.named_by_the_gateway,
+            "waiting before asking for the tool list again"
+        );
+        tokio::time::sleep(wait.how_long).await;
         if !tick_once(&catalogue, &fetch, &out).await {
             return;
         }

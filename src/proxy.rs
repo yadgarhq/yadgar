@@ -156,7 +156,17 @@ async fn handle(
         _ => None,
     };
 
-    let answer = respond(&method, id.as_ref(), outcome, cached);
+    // Computed HERE and handed in, so `respond` stays pure and the rule can be
+    // exercised without a socket. It is the client's own knowledge of what it
+    // sent, never a reading of what the gateway said.
+    let unsent_project = context.unsent_project();
+    let answer = respond(
+        &method,
+        id.as_ref(),
+        outcome,
+        cached,
+        unsent_project.as_deref(),
+    );
     if let Some(body) = &answer.cache {
         // Best effort: a cache that cannot be written must not fail the request
         // that produced it.
@@ -207,6 +217,7 @@ fn respond(
     id: Option<&serde_json::Value>,
     outcome: Outcome,
     cached: Option<String>,
+    unsent_project: Option<&str>,
 ) -> Answer {
     match outcome {
         Outcome::Answered(body) => Answer {
@@ -243,7 +254,7 @@ fn respond(
                             );
                             retarget(&cached, id)
                         }
-                        None => rejected_error(id, status, detail.as_deref()),
+                        None => rejected_error(id, status, detail.as_deref(), unsent_project),
                     }
                 }
                 Outcome::Unreachable(e) => match cached.filter(|_| method == CACHEABLE) {

@@ -62,7 +62,7 @@ fn a_notification_is_not_replied_to() {
         Outcome::Rejected(reqwest::StatusCode::BAD_GATEWAY, None),
         Outcome::Unreachable("connection refused".into()),
     ] {
-        let answer = respond("notifications/initialized", None, outcome, None);
+        let answer = respond("notifications/initialized", None, outcome, None, None);
         assert_eq!(answer.reply, None, "a notification was answered");
         assert_eq!(answer.cache, None);
     }
@@ -75,6 +75,7 @@ fn a_successful_tool_list_is_kept_for_the_next_offline_start() {
         Some(&json!(1)),
         Outcome::Answered(a_tool_list()),
         None,
+        None,
     );
     assert_eq!(answer.cache.as_deref(), Some(a_tool_list().as_str()));
     assert_eq!(answer.reply.as_deref(), Some(a_tool_list().as_str()));
@@ -85,7 +86,13 @@ fn nothing_but_the_tool_list_is_ever_kept() {
     // Caching a `tools/call` answer would mean replaying a fabricated
     // result, which is the one thing a proxy must never produce.
     let body = json!({"jsonrpc":"2.0","id":1,"result":{"content":[]}}).to_string();
-    let answer = respond("tools/call", Some(&json!(1)), Outcome::Answered(body), None);
+    let answer = respond(
+        "tools/call",
+        Some(&json!(1)),
+        Outcome::Answered(body),
+        None,
+        None,
+    );
     assert_eq!(answer.cache, None);
 }
 
@@ -99,6 +106,7 @@ fn a_gateway_that_answered_with_a_status_is_not_an_answer() {
         "tools/list",
         Some(&json!(1)),
         Outcome::Rejected(reqwest::StatusCode::BAD_GATEWAY, None),
+        None,
         None,
     );
     assert_eq!(answer.cache, None, "an error status was cached");
@@ -117,6 +125,7 @@ fn a_json_rpc_error_is_not_kept_either() {
         Some(&json!(1)),
         Outcome::Answered(body.clone()),
         None,
+        None,
     );
     assert_eq!(
         answer.cache, None,
@@ -134,6 +143,7 @@ fn a_page_that_is_not_json_at_all_is_not_kept() {
         Some(&json!(1)),
         Outcome::Answered("<html><body>502 Bad Gateway</body></html>".into()),
         None,
+        None,
     );
     assert_eq!(answer.cache, None);
 }
@@ -148,6 +158,7 @@ fn an_unreachable_gateway_serves_the_cached_tool_list() {
         Some(&json!(42)),
         Outcome::Unreachable("connection refused".into()),
         Some(a_tool_list()),
+        None,
     );
     let v: serde_json::Value = serde_json::from_str(answer.reply.as_deref().unwrap()).unwrap();
     assert_eq!(v["id"], 42, "the cached reply was not retargeted");
@@ -165,6 +176,7 @@ fn an_offline_tool_call_is_never_answered_from_the_cache() {
         Some(&json!(1)),
         Outcome::Unreachable("connection refused".into()),
         Some(a_tool_list()),
+        None,
     );
     let v: serde_json::Value = serde_json::from_str(answer.reply.as_deref().unwrap()).unwrap();
     assert_eq!(v["error"]["code"], -32603);
@@ -184,6 +196,7 @@ fn a_rejected_credential_is_not_papered_over_by_the_cache() {
         Some(&json!(1)),
         Outcome::Rejected(reqwest::StatusCode::UNAUTHORIZED, None),
         Some(a_tool_list()),
+        None,
     );
     let v: serde_json::Value = serde_json::from_str(answer.reply.as_deref().unwrap()).unwrap();
     assert!(v["result"].is_null());
@@ -202,6 +215,7 @@ fn a_gateway_outage_still_serves_the_cache() {
         Some(&json!(1)),
         Outcome::Rejected(reqwest::StatusCode::SERVICE_UNAVAILABLE, None),
         Some(a_tool_list()),
+        None,
     );
     let v: serde_json::Value = serde_json::from_str(answer.reply.as_deref().unwrap()).unwrap();
     assert_eq!(v["result"]["tools"][0]["name"], "recall");
@@ -330,7 +344,7 @@ async fn a_refusal_carries_the_gateway_s_own_message() {
     .await;
     let _ = served.await;
 
-    let answer = respond("resources/read", Some(&json!(1)), outcome, None);
+    let answer = respond("resources/read", Some(&json!(1)), outcome, None, None);
     let v: serde_json::Value = serde_json::from_str(answer.reply.as_deref().unwrap()).unwrap();
     let message = v["error"]["message"].as_str().unwrap();
     assert!(
@@ -450,6 +464,7 @@ fn a_refusal_that_came_with_a_reason_does_not_also_guess() {
         &json!(1),
         reqwest::StatusCode::UNAUTHORIZED,
         Some("request is missing the X-Yadgar-User header, which identifies the caller"),
+        None,
     );
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
     let message = v["error"]["message"].as_str().unwrap();

@@ -20,7 +20,7 @@ repos:
   # at first install and never re-resolves it, so a moving tag would silently
   # freeze each machine at whatever it meant the day it first ran.
   - repo: https://github.com/yadgarhq/actions
-    rev: v1.18.2
+    rev: v1.20.0
     hooks:
       - id: gitleaks
       - id: prettier
@@ -60,6 +60,15 @@ repos:
       # and this repository measures 0. It is a tripwire for a block someone
       # writes later, not a fix for anything present now.
       - id: run-block-size
+      # LEDGER 837, and worth being plain about what it actually catches: a
+      # skip marker, an unsatisfiable `cfg`, an environment-probe guard as a
+      # test's first statement, a narrowed `cargo test`/pytest invocation, or
+      # a captured run whose exit code is thrown away. ADR-0577 again — a
+      # published hook nobody references gates nothing, and this is the
+      # reference that makes it gate this repository. The same rev bump also
+      # carries v1.19.0's `observe-coverage` tightening, which this
+      # repository's own hook run shows refuses nothing here.
+      - id: no-test-skips
 
   # NOT `hadolint` and NOT `helm-lint`, and their absence is a fact about this
   # repository rather than a relaxation: the first matches `types: [dockerfile]`

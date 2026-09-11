@@ -194,9 +194,20 @@ where
     // CHECKED BEFORE THE REQUEST, not only before the send. A host that has gone
     // is not worth asking the gateway on behalf of, and checking here is what
     // bounds the watch's life at one interval past the host's.
-    let Some(sender) = out.upgrade() else {
+    //
+    // **UPGRADED TWICE RATHER THAN ONCE, AND THE HANDLE IS NEVER HELD ACROSS THE
+    // FETCH.** An upgraded handle is a STRONG sender, so one kept for the length of
+    // a request would hold the write channel open for as long as that request
+    // took — up to `REQUEST_TIMEOUT` — and `serve` waits on that channel closing
+    // before it returns. A clean exit is the entire reason the handle is weak, and
+    // holding an upgrade across the await gives half of it back: the process would
+    // linger for up to thirty seconds after the host disconnected, in the one case
+    // where a poll was in flight. So liveness is a question asked and answered, and
+    // the sender that does the sending is a second, short-lived upgrade.
+    let host_is_still_there = out.upgrade().is_some();
+    if !host_is_still_there {
         return false;
-    };
+    }
     let Some(body) = fetch().await else {
         // Unreachable or refused. Nothing is known to have changed, so nothing is
         // said — and the next tick asks again.
@@ -206,7 +217,10 @@ where
         return true;
     }
     tracing::info!("the gateway's tool list changed; telling the host");
-    sender.send(list_changed()).is_ok()
+    // The host may have gone WHILE the request was in flight, which is what makes
+    // this a second check rather than a formality.
+    out.upgrade()
+        .is_some_and(|sender| sender.send(list_changed()).is_ok())
 }
 
 /// Poll while a host is connected.

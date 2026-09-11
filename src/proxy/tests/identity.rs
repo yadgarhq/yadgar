@@ -289,7 +289,7 @@ async fn a_refusal_says_why_this_client_sent_no_project() {
     // Driven through `handle` rather than `forward`, because the reason has to
     // survive the whole path — derivation, request, refusal, and the pure
     // `respond` between them — to reach the line the agent reads.
-    let (addr, _served) =
+    let (addr, served) =
         crate::testserver::answer_once("400 Bad Request", the_gateways_refusal()).await;
 
     // A DIRECTORY THAT NAMES NOTHING, for the real reason: no
@@ -307,6 +307,19 @@ async fn a_refusal_says_why_this_client_sent_no_project() {
     let reply = handle(&reqwest::Client::new(), &config, &context, a_tool_call())
         .await
         .expect("a request with an id is answered");
+
+    // THE ABSENT DIRECTION, JOINED ON THE WIRE rather than inferred. The
+    // precondition above asserts the derivation produced nothing, and
+    // `a_context_that_resolved_to_nothing_sends_no_header_at_all` asserts that a
+    // `None` sends no header — but those are two halves with nothing between
+    // them, which is the seam this file already documents. Only a real directory
+    // through the real derivation onto a real socket closes it.
+    let sent = served.await.unwrap().to_lowercase();
+    assert!(
+        !sent.contains("x-yadgar-project"),
+        "a directory that named no workspace still claimed one; the request was:\n{sent}"
+    );
+
     let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
     let message = v["error"]["message"].as_str().unwrap();
 

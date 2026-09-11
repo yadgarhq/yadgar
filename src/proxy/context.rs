@@ -99,9 +99,18 @@ impl Context {
     /// **IT SAYS "USABLE" RATHER THAN "NONE FOUND", and the word is load-bearing.**
     /// A project is absent here for two different reasons: nothing named one, or
     /// something named one that [`sendable`] refused. Both end as `None`, and a
-    /// reason claiming "nothing named one" would be false for the second. Which
-    /// of the two it was is on stderr; what to DO about it is the same either
-    /// way, and that is what this carries.
+    /// reason claiming "nothing named one" would be false for the second.
+    ///
+    /// **THE SECOND CAUSE IS A KNOWN GAP, not a case this handles well.** The
+    /// remedy this offers — write the key into `.yadgar/project-id` — is the
+    /// right one for the measured cause and the wrong one for an unsendable
+    /// value, where the person has already written the file and the thing to fix
+    /// is a line break inside it. What distinguishes them is [`sendable`]'s own
+    /// warning, on the stderr this whole function exists because nobody reads.
+    /// Closing it properly means carrying the cause rather than only the
+    /// absence, and it is deliberately not done here: the case is rare, the
+    /// wording stays true for both, and a half-guessed cause in the message
+    /// would be worse than a general one.
     pub(super) fn unsent_project(&self) -> Option<String> {
         if self.project.is_some() {
             return None;

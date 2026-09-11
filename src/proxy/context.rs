@@ -4,7 +4,7 @@
 //! that was already there: everything else in that module is about forwarding a
 //! message, and this is about WHERE the person forwarding it is sitting.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 
@@ -35,6 +35,14 @@ pub struct Context {
     pub project: Option<String>,
     /// This install's UUID, minted at `install` and stored in `config.json`.
     pub instance: Option<String>,
+    /// The directory the project was derived FROM, kept only to say so.
+    ///
+    /// **IT IS THE ONE FACT NOBODY OUTSIDE THIS PROCESS CAN RECOVER.** `serve`
+    /// is spawned by the agent, so the person reading a refusal cannot run `pwd`
+    /// to find out where it is sitting — and when the derivation produced
+    /// nothing, where it was sitting is the whole of the answer. `None` for a
+    /// `Context` that was not discovered, which is only ever a test's.
+    pub directory: Option<PathBuf>,
 }
 
 impl Context {
@@ -59,16 +67,61 @@ impl Context {
     pub fn discover(config: &Config, cwd: &Path) -> Self {
         let project = sendable(HEADER_PROJECT, crate::project::derive(cwd));
         if project.is_none() {
+            // NAMED, rather than "this directory". The warning is read out of a
+            // log that may hold several servers' lines, and a message saying
+            // "this directory" in a file that cannot show which one is a message
+            // nobody can act on.
             tracing::warn!(
-                "no project identity for this directory: no .yadgar/project-id was found \
-                 walking up from it, and `git config remote.origin.url` produced nothing. \
-                 Calls needing a project will be scoped without one."
+                "no project identity for {}: no .yadgar/project-id was found walking up \
+                 from it, and `git config remote.origin.url` produced nothing. Calls \
+                 needing a project will be scoped without one.",
+                cwd.display()
             );
         }
         Self {
             project,
             instance: sendable(HEADER_INSTANCE, config.instance().map(str::to_string)),
+            directory: Some(cwd.to_path_buf()),
         }
+    }
+
+    /// Why this client sent no project, when it sent none — otherwise `None`.
+    ///
+    /// **THE STDERR WARNING IS NOT A CHANNEL TO THE PERSON.** `serve` is a stdio
+    /// MCP server the agent spawns, and an MCP host discards its stderr. So the
+    /// reason above is written where nobody reads it, while the agent is handed
+    /// the gateway's refusal alone — "request is missing the X-Yadgar-Project
+    /// header" — which is an instruction it cannot follow, because an agent
+    /// talking to a proxy sets no headers. Ledger 872 is what that costs: the
+    /// refusal was read as the client sending no identity headers at all, which
+    /// it does send, and a settled design was reopened on the strength of it.
+    ///
+    /// **IT SAYS "USABLE" RATHER THAN "NONE FOUND", and the word is load-bearing.**
+    /// A project is absent here for two different reasons: nothing named one, or
+    /// something named one that [`sendable`] refused. Both end as `None`, and a
+    /// reason claiming "nothing named one" would be false for the second. Which
+    /// of the two it was is on stderr; what to DO about it is the same either
+    /// way, and that is what this carries.
+    pub(super) fn unsent_project(&self) -> Option<String> {
+        if self.project.is_some() {
+            return None;
+        }
+        Some(match &self.directory {
+            Some(dir) => format!(
+                "this client sent no project header: nothing named a usable workspace for \
+                 `{dir}`. Write the project key into `{dir}/.yadgar/project-id`, or start \
+                 the agent in a checkout whose `origin` remote names the project.",
+                dir = dir.display()
+            ),
+            // Unreachable from `serve`, which always discovers. Worded so it is
+            // still followable rather than truncated, because a message that
+            // exists only in a test is one nobody proofreads.
+            None => "this client sent no project header: nothing named a usable workspace \
+                     for the directory this server was started in. Write the project key \
+                     into its `.yadgar/project-id`, or start the agent in a checkout whose \
+                     `origin` remote names the project."
+                .to_string(),
+        })
     }
 }
 

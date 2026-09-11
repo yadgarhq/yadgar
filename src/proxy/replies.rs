@@ -66,10 +66,24 @@ pub(super) fn gateway_message(body: &str) -> Option<String> {
 /// reason and that instruction together hands the person two answers that
 /// contradict each other, and the wrong one is the one phrased as an action. So
 /// a refusal that came with a reason shows the reason alone.
+/// **`unsent_project` IS APPENDED ON A 4xx AND NOWHERE ELSE, and both halves of
+/// that are deliberate.** A 5xx is the gateway's own failure, so naming the
+/// caller's workspace there sends somebody to edit a file over an outage; and a
+/// 401 or 403 already carries the one instruction this function is careful not
+/// to double, so a second answer beside it is the exact failure the paragraph
+/// above exists to prevent. A 4xx that is neither is a request the gateway found
+/// wrong, which is the only case where what this client did or did not send is
+/// worth saying.
+///
+/// It is gated on the CLIENT'S OWN KNOWLEDGE — whether it sent a project —
+/// never on reading the gateway's prose. Matching on the refusal text would tie
+/// this client to wording the gateway is free to change, and would go silent on
+/// the next rephrasing without any test noticing.
 pub(super) fn rejected_error(
     id: &Value,
     status: reqwest::StatusCode,
     detail: Option<&str>,
+    unsent_project: Option<&str>,
 ) -> String {
     let credential_was_refused = matches!(
         status,
@@ -85,6 +99,11 @@ pub(super) fn rejected_error(
         (false, Some(detail)) => format!("yadgar gateway answered {status}: {detail}"),
         (false, None) => format!("yadgar gateway answered {status}"),
     };
+    let message =
+        match unsent_project.filter(|_| !credential_was_refused && status.is_client_error()) {
+            Some(reason) => format!("{message} — {reason}"),
+            None => message,
+        };
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id,

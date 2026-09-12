@@ -194,3 +194,208 @@ fn a_directory_with_no_file_and_no_remote_names_itself_nothing() {
     assert_eq!(derive(&dir), None);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ---------------------------------------------------------------------------
+// The canonical-form matrix (`docs/plans/project-validation.md`, stage 0)
+// ---------------------------------------------------------------------------
+
+/// The canonical form for a git address, one row per shape.
+///
+/// **THE SPEC IS THE PLAN'S, NOT THIS TABLE'S.**
+/// `plans/project-validation.md` in `yadgarhq/docs` states the derivation in six
+/// steps — `insteadOf` to a fixed point, strip the transport, strip ONE trailing
+/// `.git`, fold to lowercase, host EXCLUDED and nested namespaces NOT collapsed,
+/// and a monorepo subpath never derived from a remote. This table asserts that
+/// spec against literal inputs. It does not restate it: a spec written twice is
+/// a spec that drifts, and the plan is the copy that governs.
+///
+/// **EVERY EXPECTATION IS A LITERAL.** Not one is computed by the code under
+/// test, and not one compares two calls of `normalise_remote` against each
+/// other. A matrix whose expected column is produced by the derivation passes
+/// for every derivation, including a broken one — the estate's most repeated
+/// defect, and the reason the plan names fixture discipline in the same
+/// paragraph as the table.
+///
+/// **WHY THIS MATTERS AT ALL**: `git@github.com:yadgarhq/docs.git`,
+/// `https://github.com/yadgarhq/docs` and the trailing-`.git` variant are three
+/// strings for one repository. Without a pinned form one repository silently
+/// becomes three projects, each with its own `task_counter` sequence, and D52
+/// says no later pass can merge them back.
+///
+/// **PYTHON PARITY IS NOT PROVED HERE AND STAYS INFERRED, which the plan asks
+/// for explicitly.** Stage 0 says the matrix runs "in BOTH clients (Rust
+/// `yadgar-client`, Python in `yadgarhq/yadgar`)", and that sentence cannot be
+/// satisfied as written: the directory `yadgar-client` IS the repository
+/// `yadgarhq/yadgar`, and this repository holds no Python source at all.
+/// `pyproject.toml` says so in as many words — "There is no Python source in
+/// this repository and there is no importable module" (D75) — and the Python
+/// client stays on PyPI under the name `yadgar` only "for the transition"
+/// (ADR-0505). The twenty repositories of `yadgarhq` hold no other client.
+/// So this table asserts the SPEC, and the module header's claim to be a
+/// transcription of `mint_project_id` remains a transcription rather than a
+/// measurement. Anyone who can reach that Python source should run this same
+/// table against it; until then the parity leg of stage 0 is open.
+///
+/// **THE FIRST NINE ROWS ARE THE PLAN'S OWN MINIMUM**, in its order. The rest
+/// are the forge shapes it asks for — github, gitlab, bitbucket, codeberg,
+/// azure; ssh and https; with and without `.git` — plus three shapes that pin a
+/// boundary rather than a forge, each annotated where it sits.
+const CANONICAL_FORM_MATRIX: &[(&str, &str)] = &[
+    // The plan's table, rows 1-9.
+    ("git@github.com:yadgarhq/docs.git", "yadgarhq/docs"),
+    ("https://github.com/yadgarhq/docs", "yadgarhq/docs"),
+    ("https://github.com/yadgarhq/docs.git", "yadgarhq/docs"),
+    // A PORT IN AN `ssh://` URL. The host is dropped up to the first `/`, so the
+    // `:22` goes with it; a parser splitting on the colon instead would keep
+    // `22/yadgarhq/docs` and key the repository under a port number.
+    ("ssh://git@github.com:22/yadgarhq/docs.git", "yadgarhq/docs"),
+    ("https://gitlab.com/group/sub/repo.git", "group/sub/repo"),
+    ("codeberg-agent:owner/repo", "owner/repo"),
+    ("git@github.com:YadgarHQ/Docs.git", "yadgarhq/docs"),
+    (
+        "https://github.com/yadgarhq/yadgar.io",
+        "yadgarhq/yadgar.io",
+    ),
+    (
+        "https://dev.azure.com/org/project/_git/repo",
+        "org/project/_git/repo",
+    ),
+    // Forge shapes, ssh and https, with and without `.git`.
+    ("git@gitlab.com:group/sub/repo.git", "group/sub/repo"),
+    ("ssh://git@gitlab.com/group/sub/repo", "group/sub/repo"),
+    ("git@github.com:yadgarhq/docs", "yadgarhq/docs"),
+    ("git@bitbucket.org:owner/repo.git", "owner/repo"),
+    ("git@codeberg.org:owner/repo", "owner/repo"),
+    ("git://github.com/yadgarhq/docs.git", "yadgarhq/docs"),
+    // USERINFO AND A PORT IN AN `https://` URL, which the plan's step 2 names
+    // explicitly: both belong to the transport and neither reaches the id.
+    ("https://user@github.com/yadgarhq/docs.git", "yadgarhq/docs"),
+    ("https://github.com:443/yadgarhq/docs.git", "yadgarhq/docs"),
+    // Azure's ssh form, kept because the plan's Azure row is deliberately ugly
+    // and deliberately in: the spec has NO forge-specific carve-outs, because
+    // each carve-out is a divergence two clients must then keep in step for
+    // ever. `v3` is part of the id, and an installation on Azure registers what
+    // the derivation yields or places marker files.
+    (
+        "git@ssh.dev.azure.com:v3/org/project/repo",
+        "v3/org/project/repo",
+    ),
+    // ONE TRAILING `.git`, NEVER TWO. A repository really named `docs.git` keeps
+    // the name; a loop stripping the suffix until it stops matching renames it.
+    (
+        "https://github.com/yadgarhq/docs.git.git",
+        "yadgarhq/docs.git",
+    ),
+    // OUTSIDE THE SEGMENT ALPHABET, PASSED THROUGH RATHER THAN COERCED. The plan
+    // says a remote path with characters outside `[A-Za-z0-9._-]` does not
+    // canonicalise: the client sends what it derives and `project-db`'s
+    // `validate` refuses it at registration, which is the correct loud failure.
+    // A client that folded such a path into something registrable would be
+    // minting an id nobody wrote.
+    ("https://forge.example/Ünïcode/Repo", "ünïcode/repo"),
+    // A TRAILING SLASH IS KEPT, AND THAT IS A GAP IN THE SPEC RATHER THAN A
+    // PROPERTY WORTH HAVING. The plan's six steps say nothing about an empty
+    // final segment, so this is what the shipped derivation does and the row
+    // states it rather than hiding it. The consequence is the one the whole spec
+    // exists to prevent, one character wide: `git remote set-url origin
+    // https://github.com/yadgarhq/docs/` keys the same repository under a second
+    // id. `project-db`'s `validate` refuses an empty segment, so the failure is
+    // loud at registration rather than silent — but a caller CLAIMING this id at
+    // the gateway is refused with no remediation that names the cause. Closing
+    // it is a change to the spec in `yadgarhq/docs`, which stage 0 does not make.
+    ("https://github.com/yadgarhq/docs/", "yadgarhq/docs/"),
+];
+
+/// Every row of [`CANONICAL_FORM_MATRIX`], asserted one at a time.
+///
+/// **THE LENGTH IS ASSERTED FIRST, and that is not ceremony.** A loop over a
+/// table is a check that cannot fail when the table is empty, and a row deleted
+/// by a careless edit is a shape nothing checks any more with no test turning
+/// red. The estate has met the empty-collection form of this four times in a
+/// week — a glob matching nothing, a shallow-clone guard, an `&&`-chained hook —
+/// so a table-driven test states its own size.
+#[test]
+fn the_canonical_form_matrix_holds_row_by_row() {
+    assert_eq!(
+        CANONICAL_FORM_MATRIX.len(),
+        21,
+        "the table is the test: a row lost to an edit is a shape nobody checks any more"
+    );
+    for (input, expected) in CANONICAL_FORM_MATRIX {
+        assert_eq!(
+            normalise_remote(input),
+            *expected,
+            "canonical form of {input:?}"
+        );
+    }
+}
+
+/// A MONOREPO SUBPATH IS NEVER DERIVED FROM THE REMOTE — it enters only through
+/// a `.yadgar/project-id` marker, whose trimmed contents win outright (D53, and
+/// step 6 of the spec).
+///
+/// This is the row of the matrix that cannot be a string pair, because the claim
+/// is about PRECEDENCE between two sources rather than about one input. So the
+/// fixture is a real repository with a real `origin`, and the two values are
+/// both asserted: the marker's, which `derive` answers, and the remote's, which
+/// it does not.
+///
+/// **THE REMOTE'S HOST IS A SENTINEL nothing on any machine rewrites.** `derive`
+/// consults the machine's own `insteadOf` table on the remote path, so a
+/// fixture naming a real forge would assert a different value on a machine
+/// carrying a rewrite for it. `sentinel-forge` matches no rule anywhere, and the
+/// marker short-circuits ahead of the remote in any case — belt and braces,
+/// because the braces are what make the test hermetic and the belt is what makes
+/// it true.
+///
+/// Correcting the brief that commissioned the plan, and worth keeping asserted:
+/// the fallback is the origin of the repository ROOT, so the cwd's own subpath
+/// never enters remote derivation. `yadgarhq/docs/plans` reaches the wire ONLY
+/// the way it does here.
+#[test]
+fn a_monorepo_subpath_comes_from_the_marker_file_and_never_from_the_remote() {
+    let root = crate::testserver::scratch_dir("project-monorepo-subpath");
+    let deep = root.join("plans").join("drafts");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::create_dir_all(root.join(".yadgar")).unwrap();
+    std::fs::write(
+        root.join(".yadgar").join("project-id"),
+        "yadgarhq/docs/plans\n",
+    )
+    .unwrap();
+
+    let remote = "git@sentinel-forge:yadgarhq/docs.git";
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "fixture@example.invalid"],
+        &["config", "user.name", "fixture"],
+        &["remote", "add", "origin", remote],
+    ] {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    // THE REMOTE IS REACHABLE AND SAYS SOMETHING ELSE. Without this the test
+    // would pass against a fixture with no remote at all, which is the
+    // single-source case another test already covers.
+    assert_eq!(
+        origin_remote(&repository_root(&deep)).as_deref(),
+        Some(remote),
+        "the fixture's own origin"
+    );
+    assert_eq!(
+        normalise_remote(remote),
+        "yadgarhq/docs",
+        "the remote alone yields the repository, never the subpath"
+    );
+
+    // And the marker wins, from two levels below it.
+    assert_eq!(derive(&deep).as_deref(), Some("yadgarhq/docs/plans"));
+
+    std::fs::remove_dir_all(&root).ok();
+}

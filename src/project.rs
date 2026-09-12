@@ -120,10 +120,31 @@ fn normalise_remote(url: &str) -> String {
         s = rest.to_string();
     }
 
+    // EVERY TRAILING SLASH IS STRIPPED, ALL OF THEM — not one, unlike the
+    // `.git` strip below. An empty final path segment carries no content: no
+    // repository is legitimately named `""`, so `docs`, `docs/` and `docs//`
+    // all name the same repository and all three must canonicalise to the
+    // same id (ledger 881). `.git` gets the opposite treatment because it CAN
+    // be content — a repository literally named `docs.git` exists — so only
+    // ONE strip there is safe; a trailing slash has no such case to protect.
+    // Stripped here, BEFORE the `.git` check, so a slash outside the suffix
+    // (`docs.git/`) does not block `strip_suffix(".git")` from matching.
+    s = s.trim_end_matches('/').to_string();
+
     // A TRAILING `.git` ONLY, never mid-path.
     if let Some(stripped) = s.strip_suffix(".git") {
         s = stripped.to_string();
     }
+
+    // Stripped AGAIN, AFTER the `.git` check: a slash INSIDE the suffix
+    // (`docs/.git`) is invisible to `strip_suffix(".git")` above — it strips
+    // the literal `.git`, exposing a slash the first pass never saw — so one
+    // trim pass alone would leave `docs/` behind. Reachable, not hypothetical:
+    // pre-fix, `normalise_remote("…/docs/.git")` already produced
+    // `"…/docs/"` through this exact path (see `CANONICAL_FORM_MATRIX` in
+    // `project::tests`).
+    s = s.trim_end_matches('/').to_string();
+
     s.to_lowercase()
 }
 

@@ -202,12 +202,14 @@ fn a_directory_with_no_file_and_no_remote_names_itself_nothing() {
 /// The canonical form for a git address, one row per shape.
 ///
 /// **THE SPEC IS THE PLAN'S, NOT THIS TABLE'S.**
-/// `plans/project-validation.md` in `yadgarhq/docs` states the derivation in six
-/// steps — `insteadOf` to a fixed point, strip the transport, strip ONE trailing
-/// `.git`, fold to lowercase, host EXCLUDED and nested namespaces NOT collapsed,
-/// and a monorepo subpath never derived from a remote. This table asserts that
-/// spec against literal inputs. It does not restate it: a spec written twice is
-/// a spec that drifts, and the plan is the copy that governs.
+/// `plans/project-validation.md` in `yadgarhq/docs` states the derivation in
+/// steps — `insteadOf` to a fixed point, strip the transport, strip ALL
+/// trailing slashes, strip ONE trailing `.git`, strip trailing slashes again,
+/// fold to lowercase, host EXCLUDED and nested namespaces NOT collapsed, and a
+/// monorepo subpath never derived from a remote (ledger 881 adds the two
+/// slash-stripping steps; see below). This table asserts that spec against
+/// literal inputs. It does not restate it: a spec written twice is a spec that
+/// drifts, and the plan is the copy that governs.
 ///
 /// **EVERY EXPECTATION IS A LITERAL.** Not one is computed by the code under
 /// test, and not one compares two calls of `normalise_remote` against each
@@ -293,17 +295,34 @@ const CANONICAL_FORM_MATRIX: &[(&str, &str)] = &[
     // A client that folded such a path into something registrable would be
     // minting an id nobody wrote.
     ("https://forge.example/Ünïcode/Repo", "ünïcode/repo"),
-    // A TRAILING SLASH IS KEPT, AND THAT IS A GAP IN THE SPEC RATHER THAN A
-    // PROPERTY WORTH HAVING. The plan's six steps say nothing about an empty
-    // final segment, so this is what the shipped derivation does and the row
-    // states it rather than hiding it. The consequence is the one the whole spec
-    // exists to prevent, one character wide: `git remote set-url origin
-    // https://github.com/yadgarhq/docs/` keys the same repository under a second
-    // id. `project-db`'s `validate` refuses an empty segment, so the failure is
-    // loud at registration rather than silent — but a caller CLAIMING this id at
-    // the gateway is refused with no remediation that names the cause. Closing
-    // it is a change to the spec in `yadgarhq/docs`, which stage 0 does not make.
-    ("https://github.com/yadgarhq/docs/", "yadgarhq/docs/"),
+    // A TRAILING SLASH IS STRIPPED — ALL OF THEM, not one. Without this,
+    // `git remote set-url origin https://github.com/yadgarhq/docs/` keys the
+    // same repository under a second id: the exact "one repo becomes N
+    // projects" failure the whole spec exists to prevent, one character wide.
+    // Ledger 881 closes the gap the previous version of this row stated rather
+    // than hid; the plan's six steps now carry a seventh.
+    ("https://github.com/yadgarhq/docs/", "yadgarhq/docs"),
+    // MULTIPLE TRAILING SLASHES, all stripped. Unlike a trailing `.git` — where
+    // a repository can legitimately be named `docs.git`, so only ONE strip is
+    // safe — an empty path segment never carries content. `docs`, `docs/` and
+    // `docs//` name the same repository, so every one of them collapses.
+    ("https://github.com/yadgarhq/docs//", "yadgarhq/docs"),
+    // TRAILING SLASH OUTSIDE `.git`. The slash must be stripped BEFORE the
+    // `.git` suffix is checked, or `docs.git/` never matches `strip_suffix(
+    // ".git")` at all and keeps both the suffix and the slash.
+    ("https://github.com/yadgarhq/docs.git/", "yadgarhq/docs"),
+    // TRAILING SLASH INSIDE `.git` — REACHABLE, not hypothetical: pre-fix,
+    // `normalise_remote` already turns this into `yadgarhq/docs/` (the `.git`
+    // suffix strips clean, exposing the slash the `.git`-strip does not know to
+    // remove), so this shape hit the pre-fix bug through a second path. Closing
+    // it requires trimming trailing slashes AFTER the `.git` strip too, not only
+    // before.
+    ("https://github.com/yadgarhq/docs/.git", "yadgarhq/docs"),
+    // A BARE-SLASH-ONLY REMOTE. The grammar permits it: an `insteadOf` alias
+    // with nothing after the colon (`after_ssh_host`) yields exactly `"/"`.
+    // Stripped to `""`, which `project-db`'s `validate` refuses at registration
+    // — the correct loud failure, same shape as the out-of-alphabet row above.
+    ("codeberg-agent:/", ""),
 ];
 
 /// Every row of [`CANONICAL_FORM_MATRIX`], asserted one at a time.
@@ -318,7 +337,7 @@ const CANONICAL_FORM_MATRIX: &[(&str, &str)] = &[
 fn the_canonical_form_matrix_holds_row_by_row() {
     assert_eq!(
         CANONICAL_FORM_MATRIX.len(),
-        21,
+        25,
         "the table is the test: a row lost to an edit is a shape nobody checks any more"
     );
     for (input, expected) in CANONICAL_FORM_MATRIX {

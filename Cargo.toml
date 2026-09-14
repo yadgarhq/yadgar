@@ -147,7 +147,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # The config directory, per platform. `~/.config/yadgar` on Linux is not the
 # answer on macOS or Windows, and hardcoding it is how a client works on the
 # machine it was written on.
-dirs = "6"
+dirs = "7"
 
 # The password prompt at login, which must not echo and must not land in shell
 # history — the two ways a credential leaks from an interactive CLI.

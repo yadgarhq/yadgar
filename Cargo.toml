@@ -89,7 +89,7 @@ clap = { version = "4", features = ["derive"] }
 # holds: no tonic, no prost, no generated code. One message with four scalar
 # fields is read by hand in `src/enrolment.rs`, which needs no build script and
 # keeps no second copy of a `.proto` in this tree to drift from.
-base64 = { version = "0.22", default-features = false, features = ["std"] }
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 
 # ONE UUID PER INSTALL (ADR-0511), and nothing else is wanted from this crate.
 # `v4` is the only feature: a random id survives a directory move, leaks no

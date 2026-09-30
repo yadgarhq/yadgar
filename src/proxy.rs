@@ -49,6 +49,7 @@
 
 mod context;
 mod replies;
+mod revision;
 mod session;
 mod watch;
 

@@ -19,28 +19,7 @@ use serde_json::{json, Value};
 
 use super::{Outcome, META_PROTOCOL_VERSION};
 
-/// The MCP revision this client speaks.
-///
-/// **PINNED, and it is the one thing here the envelope does not decide.** The
-/// module comment on [`super`] says the proxy asserts nothing about the protocol
-/// and echoes every version out of the message it forwards. That rule still holds
-/// for a version somebody else declared; it cannot hold for a version NOBODY
-/// declared, which is the case that made the client unusable: Claude Code over
-/// stdio sends no `params._meta`, the gateway requires two keys in it, and a
-/// proxy with nothing to mirror sent nothing and earned 400 on every request.
-///
-/// A version is not a fact about the caller that this client would be forging by
-/// stating it — it is a fact about this client, which genuinely does speak one
-/// revision. The alternative was the gateway trusting the bare HTTP header, and
-/// that was rejected because it moves a trust boundary: the body is what the
-/// gateway validates and cross-checks, and a header believed on its own is a
-/// header a proxy can rewrite without the body disagreeing.
-///
-/// NOT A CONFIGURATION KNOB, so ADR-0569 does not reach it. It is a contract
-/// bound: the two ends must agree on one revision, and an installation varying
-/// it would make callers get different answers about what a field means — the
-/// exact case that ADR's own consequences carve out.
-pub(super) const PROTOCOL_VERSION: &str = "2026-07-28";
+use super::revision::{mirrored_capabilities, negotiate, shape_for, GATEWAY_REVISION};
 
 /// The second `_meta` key the gateway requires, beside the version.
 ///
@@ -69,11 +48,13 @@ const INITIALIZE: &str = "initialize";
 /// loss. Defaulting to FORWARD costs at most a refusal nobody sees, and that is
 /// the cheaper direction to be wrong in.
 ///
-/// `ping`, `notifications/cancelled` and `notifications/progress` are therefore
-/// still forwarded, deliberately. A local answer to `ping` would be this client
-/// attesting the gateway's liveness from its own, which is a different claim
-/// from the one the host asked for.
+/// `notifications/cancelled` and `notifications/progress` are therefore still
+/// forwarded, deliberately. `ping` is forwarded too, EXCEPT in a session
+/// negotiated at a legacy revision — see [`Terminates::Pong`].
 const TERMINATED_HERE: [&str; 1] = ["notifications/initialized"];
+
+/// The liveness request of the legacy lifecycle.
+const PING: &str = "ping";
 
 /// What this client does with one message before any socket is involved.
 #[derive(Debug, PartialEq, Eq)]
@@ -82,6 +63,18 @@ pub(super) enum Terminates {
     Here,
     /// A session notification: nothing is sent and nothing is answered.
     Silently,
+    /// `ping` in a session negotiated at a legacy revision: answered `{}` here.
+    ///
+    /// **THE REVISION DECIDES WHO THE COUNTERPART IS.** In 2025-06-18 and
+    /// 2025-11-25 `ping` is part of the lifecycle and the receiver MUST answer it
+    /// promptly with an empty result — and the receiver is the process the host
+    /// spawned, which is this one. 2026-07-28 removed `ping`, so the gateway
+    /// answers a forwarded one `-32601 unknown method: ping` (measured on the VM,
+    /// 2026-09-30), which a legacy host may read as a dead server. Answering it
+    /// here claims only this process's liveness, which is what a legacy `ping`
+    /// asks about. In a session at the gateway's own revision `ping` does not
+    /// exist and is forwarded, so the gateway still names it.
+    Pong,
     /// The gateway's, as everything about tools always is.
     No,
 }
@@ -89,9 +82,15 @@ pub(super) enum Terminates {
 /// Decide where one message ends. Pure, so the rule is exercised without a
 /// socket — which is the only way to tell "answered locally" from "forwarded to
 /// a gateway that happened to answer the same way".
-pub(super) fn terminates(method: &str, id: Option<&Value>) -> Terminates {
+///
+/// *negotiated* is the revision the host was answered with, `None` before any
+/// handshake.
+pub(super) fn terminates(method: &str, id: Option<&Value>, negotiated: Option<&str>) -> Terminates {
     if method == INITIALIZE {
         return Terminates::Here;
+    }
+    if method == PING && id.is_some() && negotiated.is_some_and(|n| n != GATEWAY_REVISION) {
+        return Terminates::Pong;
     }
     // A NOTIFICATION CARRIES NO ID. One of these names arriving WITH an id is
     // not the notification it looks like — it is a request the host expects an
@@ -111,16 +110,19 @@ pub(super) fn terminates(method: &str, id: Option<&Value>) -> Terminates {
 /// is worse than not declaring it at all. [`super::watch`] is the half that keeps
 /// this honest.
 ///
-/// The version reported is this client's own [`PROTOCOL_VERSION`], not the one
-/// the host asked for. A host that cannot speak it will say so; answering with
-/// the host's own number would be agreeing to a revision this client does not
-/// implement, which fails later and somewhere less obvious.
-pub(super) fn initialize_reply(id: &Value) -> String {
+/// The version reported is *negotiated*, from [`negotiate`] — the host's own
+/// when this client can serve it (ADR-0821, superseding ADR-0661). ADR-0661
+/// answered with the gateway's revision unconditionally, reasoning that echoing
+/// the host's number would claim a revision this client does not implement; its
+/// revisit trigger fired on a real host (Claude Code 2.1.282 refuses
+/// `2026-07-28`), and the claim is now true for every revision in
+/// [`super::revision::HOST_REVISIONS`] because [`shape_for`] makes it so.
+pub(super) fn initialize_reply(id: &Value, negotiated: &str) -> String {
     json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": negotiated,
             "capabilities": { "tools": { "listChanged": true } },
             "serverInfo": {
                 "name": env!("CARGO_PKG_NAME"),
@@ -179,7 +181,7 @@ pub(super) fn fill_meta(parsed: &Value, capabilities: &Value) -> Option<String> 
         .or_insert_with(|| json!({}))
         .as_object_mut()?;
     if !has_version {
-        meta.insert(META_PROTOCOL_VERSION.into(), json!(PROTOCOL_VERSION));
+        meta.insert(META_PROTOCOL_VERSION.into(), json!(GATEWAY_REVISION));
     }
     if !has_capabilities {
         meta.insert(META_CLIENT_CAPABILITIES.into(), capabilities.clone());
@@ -199,7 +201,7 @@ pub(super) fn poll_request(capabilities: &Value) -> String {
         "method": super::CACHEABLE,
         "params": {
             "_meta": {
-                META_PROTOCOL_VERSION: PROTOCOL_VERSION,
+                META_PROTOCOL_VERSION: GATEWAY_REVISION,
                 META_CLIENT_CAPABILITIES: capabilities.clone(),
             },
         },
@@ -229,6 +231,9 @@ pub(super) struct Session<W: Watch> {
     /// against it.
     catalogue: super::watch::Catalogue,
     connected: bool,
+    /// The revision the host was answered with at its last `initialize`, and so
+    /// the shape every reply to it must take. `None` until a host says hello.
+    negotiated: Option<&'static str>,
     /// What the host declared at `initialize`, mirrored into every synthesised
     /// `_meta` — so `clientCapabilities` is something a host actually said
     /// rather than a value this client made up. `{}` until a host says
@@ -242,6 +247,7 @@ impl<W: Watch> Session<W> {
             watch,
             catalogue,
             connected: false,
+            negotiated: None,
             capabilities: json!({}),
         }
     }
@@ -266,12 +272,20 @@ impl<W: Watch> Session<W> {
             .and_then(Value::as_str)
             .unwrap_or_default();
 
-        match terminates(method, id.as_ref()) {
+        match terminates(method, id.as_ref(), self.negotiated) {
             Terminates::Here => {
-                self.capabilities = parsed
-                    .pointer("/params/capabilities")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                // RE-NEGOTIATED ON EVERY HANDSHAKE, like the capabilities below:
+                // a host re-sending `initialize` is re-introducing itself, and may
+                // do so at a different revision.
+                let negotiated = negotiate(parsed.pointer("/params/protocolVersion"));
+                self.negotiated = Some(negotiated);
+                self.capabilities = mirrored_capabilities(
+                    negotiated,
+                    parsed
+                        .pointer("/params/capabilities")
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                );
                 // ONCE PER PROCESS. A host re-sending `initialize` is
                 // re-introducing itself, not arriving a second time, and a
                 // second watch would double the gateway's poll traffic per
@@ -280,11 +294,14 @@ impl<W: Watch> Session<W> {
                     self.connected = true;
                     self.watch.host_connected(self.capabilities.clone());
                 }
-                id.as_ref().map(initialize_reply)
+                id.as_ref().map(|id| initialize_reply(id, negotiated))
             }
             Terminates::Silently => None,
+            Terminates::Pong => id
+                .as_ref()
+                .map(|id| json!({"jsonrpc": "2.0", "id": id, "result": {}}).to_string()),
             Terminates::No => {
-                super::handle(
+                let reply = super::handle(
                     client,
                     config,
                     context,
@@ -293,7 +310,14 @@ impl<W: Watch> Session<W> {
                     &self.capabilities,
                     &self.catalogue,
                 )
-                .await
+                .await?;
+                // SHAPED AFTER EVERY PATH — a live answer, a cached list served
+                // offline, and a refusal alike — because the host reads them all
+                // at the revision it negotiated.
+                match self.negotiated {
+                    Some(negotiated) => Some(shape_for(negotiated, &reply).unwrap_or(reply)),
+                    None => Some(reply),
+                }
             }
         }
     }

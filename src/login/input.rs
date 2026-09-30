@@ -17,12 +17,14 @@ use super::LoginError;
 ///
 /// **REFUSED, and deliberately unlike `docker login`.** Docker reads a
 /// password typed at a real terminal through this same flag without
-/// complaint. `rpassword` is used everywhere else in this file so a password
-/// is never echoed and never reaches scrollback; a plain `read_line` off an
-/// interactive terminal does neither of those — every keystroke lands on the
-/// screen in plain sight, which is the exact leak `--password-stdin` exists to
-/// route around. A pipe and a redirected file both report `false` here, and
-/// both are the ordinary case for automation.
+/// complaint (`verifyLoginOptions` in `cli/command/registry/login.go` runs
+/// `io.ReadAll` on stdin with no terminal check at all). `rpassword` is used
+/// in `login.rs` so a password is never echoed and never reaches scrollback;
+/// a plain `read_line` off an interactive terminal does neither of those —
+/// every keystroke lands on the screen in plain sight, which is the exact
+/// leak `--password-stdin` exists to route around. A pipe and a redirected
+/// file both report `false` here, and both are the ordinary case for
+/// automation.
 pub(super) fn stdin_password_allowed(is_terminal: bool) -> Result<(), LoginError> {
     if is_terminal {
         Err(LoginError::StdinIsTerminal)

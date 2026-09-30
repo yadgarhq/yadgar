@@ -112,41 +112,292 @@ async fn initialize_is_answered_here_and_never_forwarded() {
     );
 }
 
-#[tokio::test]
-async fn the_version_this_client_declares_is_the_one_it_sends() {
-    // TWO SURFACES, ONE FACT, and this is why neither is asserted as a literal
-    // here. The revision named in the handshake and the revision filled into a
-    // synthesised `_meta` are the same claim made to two audiences; if they
-    // diverge, the host is told one thing and the gateway another, and the
-    // gateway's cross-check is what would eventually report it.
+/// Drive one `initialize` at *requested* through a session and return the
+/// revision it was answered with. `None` sends a handshake with no version.
+async fn answered_with(requested: Option<Value>) -> String {
     let mut session = Session::new(Counted::default(), Catalogue::default());
+    let mut hello: Value = serde_json::from_str(&initialize("placeholder", json!({}))).unwrap();
+    match requested {
+        Some(v) => hello["params"]["protocolVersion"] = v,
+        None => {
+            hello["params"]
+                .as_object_mut()
+                .unwrap()
+                .remove("protocolVersion");
+        }
+    }
     let reply = session
         .message(
             &reqwest::Client::new(),
             &nowhere(),
             &Context::default(),
-            &initialize("1999-01-01", json!({})),
+            &hello.to_string(),
         )
         .await
         .unwrap();
-    let declared = serde_json::from_str::<Value>(&reply).unwrap()["result"]["protocolVersion"]
+    serde_json::from_str::<Value>(&reply).unwrap()["result"]["protocolVersion"]
         .as_str()
-        .unwrap()
-        .to_string();
+        .expect("the handshake named no revision")
+        .to_string()
+}
 
+/// The revision a synthesised upstream `_meta` carries — read off `fill_meta`
+/// rather than written out, so no test below agrees with a literal.
+fn upstream_revision() -> Value {
     let bare = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}});
-    let filled: Value =
-        serde_json::from_str(&fill_meta(&bare, &json!({})).expect("a bare envelope is filled in"))
+    let filled: Value = serde_json::from_str(&fill_meta(&bare, &json!({})).unwrap()).unwrap();
+    filled["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"].clone()
+}
+
+#[tokio::test]
+async fn a_legacy_revision_this_client_can_serve_is_echoed() {
+    // THE DEFECT THIS EXISTS FOR, measured 2026-09-30: Claude Code 2.1.282 sends
+    // `protocolVersion: "2025-11-25"`, was answered `2026-07-28`, and refused the
+    // server with "Server's protocol version is not supported". The lifecycle
+    // rule is that a server supporting the requested version answers with THAT
+    // version. Both legacy revisions are asserted, so a hardcoded `2025-11-25`
+    // — the one value a real host happens to send today — is red.
+    for requested in ["2025-11-25", "2025-06-18"] {
+        assert_eq!(
+            answered_with(Some(json!(requested))).await,
+            requested,
+            "a host asking for a revision this client serves was answered with another"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_revision_this_client_cannot_serve_is_answered_with_its_newest() {
+    // Values no implementation plausibly contains: one older than MCP, one from
+    // the future, one absent and one of the wrong type. The spec: answer with a
+    // version this server supports, SHOULD be its latest — and the host decides.
+    // Asserted RELATIONALLY: the answer is the revision this client speaks
+    // upstream, whatever that is, and never the host's own number.
+    let newest = upstream_revision();
+    for requested in [
+        Some(json!("1999-01-01")),
+        Some(json!("2099-01-01")),
+        Some(json!(7)),
+        None,
+    ] {
+        let answered = answered_with(requested.clone()).await;
+        assert_eq!(
+            json!(answered),
+            newest,
+            "an unservable request ({requested:?}) was not answered with the newest revision"
+        );
+        assert_ne!(
+            Some(json!(answered)),
+            requested,
+            "an unknown revision was echoed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_repeated_handshake_negotiates_again() {
+    // A host re-sending `initialize` is re-introducing itself, possibly at a
+    // different revision, and the capabilities are already re-read on it.
+    let mut session = Session::new(Counted::default(), Catalogue::default());
+    let (client, config, context) = (reqwest::Client::new(), nowhere(), Context::default());
+    for requested in ["2025-06-18", "2025-11-25"] {
+        let reply = session
+            .message(
+                &client,
+                &config,
+                &context,
+                &initialize(requested, json!({})),
+            )
+            .await
             .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&reply).unwrap()["result"]["protocolVersion"],
+            json!(requested)
+        );
+    }
+    // THE SESSION REMEMBERS THE LATEST, not only the reply: re-introduced at a
+    // revision this client cannot serve, the session is at the gateway's own, so
+    // a `ping` is forwarded (and, with nothing listening, is unreachable) rather
+    // than answered as the legacy session it was a moment ago.
+    session
+        .message(
+            &client,
+            &config,
+            &context,
+            &initialize("2099-01-01", json!({})),
+        )
+        .await;
+    let ping = session
+        .message(
+            &client,
+            &config,
+            &context,
+            r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#,
+        )
+        .await
+        .unwrap();
+    assert!(
+        ping.contains("unreachable"),
+        "the session kept its first revision after a second handshake: {ping}"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_ping_is_answered_here_and_a_current_one_is_not() {
+    // Relational: the same `ping` line, two sessions differing ONLY in the
+    // negotiated revision. The gateway address points at nothing, so a forwarded
+    // ping comes back `unreachable` — which is what the current-revision session
+    // must produce, and what the legacy one must not.
+    let ping = r#"{"jsonrpc":"2.0","id":42,"method":"ping"}"#;
+    let (client, config, context) = (reqwest::Client::new(), nowhere(), Context::default());
+
+    let mut legacy = Session::new(Counted::default(), Catalogue::default());
+    legacy
+        .message(
+            &client,
+            &config,
+            &context,
+            &initialize("2025-11-25", json!({})),
+        )
+        .await;
+    let pong: Value = serde_json::from_str(
+        &legacy
+            .message(&client, &config, &context, ping)
+            .await
+            .expect("a ping is a request and is answered"),
+    )
+    .unwrap();
+    assert_eq!(pong["id"], json!(42));
     assert_eq!(
-        filled["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
-        json!(declared),
-        "the host and the gateway were told different revisions"
+        pong["result"],
+        json!({}),
+        "a legacy ping was not answered here: {pong}"
     );
-    assert_ne!(
-        declared, "1999-01-01",
-        "the host's own number was echoed back as this client's"
+
+    let mut current = Session::new(Counted::default(), Catalogue::default());
+    current
+        .message(
+            &client,
+            &config,
+            &context,
+            &initialize("2099-01-01", json!({})),
+        )
+        .await;
+    let forwarded = current
+        .message(&client, &config, &context, ping)
+        .await
+        .unwrap();
+    assert!(
+        forwarded.contains("unreachable"),
+        "a ping in the gateway's own revision was answered locally: {forwarded}"
     );
+}
+
+/// The `tools/call` result the gateway actually returned, measured on the VM
+/// 2026-09-30 — the fields 2026-07-28 added included.
+const MEASURED_CALL: &str = r#"{"id":2,"jsonrpc":"2.0","result":{"content":[{"text":"{}","type":"text"}],"resultType":"complete","structuredContent":{"next_page_token":"","tasks":[]}}}"#;
+
+#[test]
+fn nothing_is_rewritten_at_the_gateway_s_own_revision() {
+    // Byte for byte, even for bodies a legacy revision could not hold.
+    for body in [MEASURED_CALL, INPUT_REQUIRED, SCALAR_STRUCTURED] {
+        assert_eq!(shape_for(GATEWAY_REVISION, body), None, "{body}");
+    }
+}
+
+#[test]
+fn fields_a_legacy_result_tolerates_are_left_alone() {
+    // A legacy `Result` is an OPEN object (`[key: string]: unknown` in both
+    // schemas), so `resultType`, `ttlMs`, `cacheScope` and namespaced `_meta`
+    // keys are extra fields, not a shape a legacy host rejects. Stripping them
+    // would rewrite every body for nothing.
+    let list = r#"{"id":1,"jsonrpc":"2.0","result":{"_meta":{"io.yadgarhq/toolsPollIntervalSeconds":600},"cacheScope":"public","resultType":"complete","tools":[],"ttlMs":600000}}"#;
+    for legacy in &HOST_REVISIONS[1..] {
+        assert_eq!(shape_for(legacy, MEASURED_CALL), None, "{legacy}");
+        assert_eq!(shape_for(legacy, list), None, "{legacy}");
+    }
+}
+
+/// An MRTR interim result: 2026-07-28 only. No legacy revision can carry it.
+const INPUT_REQUIRED: &str = r#"{"id":7,"jsonrpc":"2.0","result":{"resultType":"input_required","inputRequests":{"sentinel-of-the-body":{"method":"elicitation/create"}}}}"#;
+
+/// `structuredContent` as a scalar: legal since 2026-07-28 (SEP-2106), an object
+/// in both legacy schemas.
+const SCALAR_STRUCTURED: &str = r#"{"id":8,"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"sentinel-of-the-body"}],"resultType":"complete","structuredContent":"sentinel-of-the-body"}}"#;
+
+#[test]
+fn an_interim_result_becomes_an_error_a_legacy_host_can_read() {
+    // A legacy host reads an `input_required` result as a `CallToolResult`
+    // missing its required `content` — a schema failure, or worse an empty
+    // success. An explicit JSON-RPC error with the same id is the honest shape.
+    for legacy in &HOST_REVISIONS[1..] {
+        let shaped: Value =
+            serde_json::from_str(&shape_for(legacy, INPUT_REQUIRED).expect("rewritten")).unwrap();
+        assert_eq!(shaped["id"], json!(7));
+        assert!(shaped["result"].is_null(), "{shaped}");
+        assert!(shaped["error"]["code"].is_i64(), "{shaped}");
+        assert!(
+            shaped["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(legacy)),
+            "the error does not say which revision could not carry it: {shaped}"
+        );
+    }
+}
+
+#[test]
+fn a_scalar_structured_result_keeps_its_text_and_loses_what_a_legacy_host_rejects() {
+    for legacy in &HOST_REVISIONS[1..] {
+        let shaped: Value =
+            serde_json::from_str(&shape_for(legacy, SCALAR_STRUCTURED).expect("rewritten"))
+                .unwrap();
+        assert!(
+            shaped["result"].get("structuredContent").is_none(),
+            "a scalar the legacy schema types as an object reached the host: {shaped}"
+        );
+        assert_eq!(
+            shaped["result"]["content"][0]["text"],
+            json!("sentinel-of-the-body")
+        );
+        assert_eq!(shaped["id"], json!(8));
+    }
+}
+
+#[tokio::test]
+async fn a_cached_list_served_offline_is_shaped_too() {
+    // THE OFFLINE PATH, which bypasses the gateway entirely: what a legacy host
+    // reads must be shaped however it was produced. The cache is contrived to
+    // hold something only 2026-07-28 can carry, so shaping is observable.
+    let dir = crate::testserver::scratch_dir("session-shaped-cache");
+    let config = Config::new(&dir, "http://127.0.0.1:1/".into(), "tok".into());
+    config.write_tool_cache(INPUT_REQUIRED).unwrap();
+    let (client, context) = (reqwest::Client::new(), Context::default());
+
+    let mut legacy = Session::new(Counted::default(), Catalogue::default());
+    legacy
+        .message(
+            &client,
+            &config,
+            &context,
+            &initialize("2025-06-18", json!({})),
+        )
+        .await;
+    let reply = legacy
+        .message(
+            &client,
+            &config,
+            &context,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}"#,
+        )
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_str(&reply).unwrap();
+    assert!(
+        v["error"].is_object(),
+        "the cached body reached a legacy host unshaped: {reply}"
+    );
+    assert_eq!(v["id"], json!(3));
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -277,20 +528,48 @@ fn the_handshake_acknowledgement_dies_here_and_nothing_else_does() {
     // part of. Everything else forwards, INCLUDING notifications invented after
     // this line was written — a prefix match would swallow those silently,
     // because a notification takes no reply and nothing would ever report it.
-    assert_eq!(terminates("initialize", Some(&json!(1))), Terminates::Here);
     assert_eq!(
-        terminates("notifications/initialized", None),
+        terminates("initialize", Some(&json!(1)), None),
+        Terminates::Here
+    );
+    assert_eq!(
+        terminates("notifications/initialized", None, None),
         Terminates::Silently
     );
-    assert_eq!(terminates("notifications/progress", None), Terminates::No);
-    assert_eq!(terminates("notifications/cancelled", None), Terminates::No);
-    assert_eq!(terminates("ping", Some(&json!(1))), Terminates::No);
-    assert_eq!(terminates("tools/list", Some(&json!(1))), Terminates::No);
-    assert_eq!(terminates("tools/call", Some(&json!(1))), Terminates::No);
+    assert_eq!(
+        terminates("notifications/progress", None, None),
+        Terminates::No
+    );
+    assert_eq!(
+        terminates("notifications/cancelled", None, None),
+        Terminates::No
+    );
+    assert_eq!(terminates("ping", Some(&json!(1)), None), Terminates::No);
+    assert_eq!(
+        terminates("tools/list", Some(&json!(1)), None),
+        Terminates::No
+    );
+    assert_eq!(
+        terminates("tools/call", Some(&json!(1)), None),
+        Terminates::No
+    );
+    // `ping` IS THE GATEWAY'S IN ITS OWN REVISION, which removed it, and this
+    // process's in a legacy one, where it is part of the lifecycle.
+    assert_eq!(
+        terminates("ping", Some(&json!(1)), Some(GATEWAY_REVISION)),
+        Terminates::No
+    );
+    for legacy in &HOST_REVISIONS[1..] {
+        assert_eq!(
+            terminates("ping", Some(&json!(1)), Some(legacy)),
+            Terminates::Pong,
+            "a legacy host's ping was forwarded to a gateway that removed it ({legacy})"
+        );
+    }
     // AN ID CHANGES WHAT IT IS. A request by this name expects an answer, and
     // swallowing it leaves the host waiting for one forever.
     assert_eq!(
-        terminates("notifications/initialized", Some(&json!(9))),
+        terminates("notifications/initialized", Some(&json!(9)), None),
         Terminates::No
     );
 }

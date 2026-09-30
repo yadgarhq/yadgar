@@ -578,14 +578,9 @@ async fn a_host_that_sends_no_meta_still_sends_the_gateway_what_it_requires() {
         .await;
 
     let request = served.await.unwrap().to_lowercase();
-    // Taken from the handshake rather than written out, so this test cannot pass
-    // by agreeing with a literal that the handshake has since stopped using.
-    let declared: serde_json::Value =
-        serde_json::from_str(&super::session::initialize_reply(&json!(1))).unwrap();
-    let version = declared["result"]["protocolVersion"]
-        .as_str()
-        .unwrap()
-        .to_lowercase();
+    // Taken from the constant rather than written out, so this test cannot pass
+    // by agreeing with a literal the client has since stopped sending.
+    let version = super::session::GATEWAY_REVISION.to_lowercase();
     assert!(
         request.contains(&format!("mcp-protocol-version: {version}")),
         "no protocol header left the process for an envelope that declared none:\n{request}"
@@ -633,6 +628,64 @@ async fn the_handshake_acknowledgement_reaches_no_socket() {
     assert!(
         arrived.is_err(),
         "the gateway was sent a handshake acknowledgement for a handshake it never saw: {arrived:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn the_negotiated_revision_never_leaves_for_the_gateway() {
+    // TWO BOUNDARIES, TWO REVISIONS. The host is answered at the revision it
+    // asked for; the gateway accepts exactly one and refuses any other with
+    // `-32022`. The obvious "fix" of sending the negotiated one upstream is what
+    // this stops — read off the wire, head and body both.
+    let (addr, served) = crate::testserver::answer_once(
+        "200 OK",
+        r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#,
+    )
+    .await;
+    let dir = crate::testserver::scratch_dir("proxy-negotiated-stays-home");
+    let config = Config::new(&dir, format!("http://{addr}/"), "tok".into());
+    let mut session = super::session::Session::new(Unwatched, super::watch::Catalogue::default());
+    let hello = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18", "capabilities": {},
+                    "clientInfo": { "name": "legacy-host", "version": "0" } },
+    })
+    .to_string();
+    let answered = session
+        .message(
+            &reqwest::Client::new(),
+            &config,
+            &Context::default(),
+            &hello,
+        )
+        .await
+        .unwrap();
+    assert!(answered.contains("2025-06-18"), "precondition: {answered}");
+
+    session
+        .message(
+            &reqwest::Client::new(),
+            &config,
+            &Context::default(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        )
+        .await;
+    let request = served.await.unwrap().to_lowercase();
+    assert!(
+        !request.contains("2025-06-18"),
+        "the host's revision was sent to the gateway:\n{request}"
+    );
+    let upstream = super::session::GATEWAY_REVISION.to_lowercase();
+    assert!(
+        request.contains(&format!("mcp-protocol-version: {upstream}")),
+        "{request}"
+    );
+    assert!(
+        request.contains(&format!(
+            "\"io.modelcontextprotocol/protocolversion\":\"{upstream}\""
+        )),
+        "{request}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

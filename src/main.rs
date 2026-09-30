@@ -22,6 +22,7 @@ mod testserver;
 
 use std::io::Write as _;
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -89,6 +90,11 @@ enum Command {
         /// expires in 24 hours — but it does reach the shell history, so
         /// `enrol` reads it from stdin when neither this nor `--token-file` is
         /// given.
+        ///
+        /// CONFLICTS WITH `--token-file`: two sources for the same blob is a
+        /// contradiction the caller must resolve, not a precedence for this
+        /// binary to silently pick one side of.
+        #[arg(conflicts_with = "token_file")]
         token: Option<String>,
 
         /// Read the blob from this file instead of the argument or stdin.
@@ -209,7 +215,9 @@ async fn main() -> anyhow::Result<()> {
             let dir = config::base_dir();
             let blob = match blob_source(token, token_file, password_stdin)? {
                 BlobSource::Argument(blob) => blob,
-                BlobSource::File(path) => std::fs::read_to_string(&path)?,
+                BlobSource::File(path) => std::fs::read_to_string(&path).with_context(|| {
+                    format!("could not read the enrolment token from {}", path.display())
+                })?,
                 BlobSource::StdinPrompt => {
                     // Read from stdin so the blob need not reach shell history.
                     print!("Paste the enrolment token: ");
@@ -241,10 +249,13 @@ async fn main() -> anyhow::Result<()> {
 /// (ledger 638) — no file is read and no stdin is touched.
 ///
 /// PURE, for the reason every other CLI-argument rule in this binary is: the
-/// PRECEDENCE — the positional argument wins over `--token-file`, and neither
-/// is available once `--password-stdin` claims stdin for the password instead
-/// of the interactive "paste the token" fallback — is exercisable without a
-/// file, a pipe, or a terminal.
+/// decision is exercisable without a file, a pipe, or a terminal.
+///
+/// **THE ARGUMENT AND `--token-file` NEVER ARRIVE TOGETHER.** Clap's own
+/// `conflicts_with` on `token` refuses that combination with a usage error
+/// before this function is ever called, so choosing between them is not this
+/// function's problem to solve — unlike `--password-stdin`, which is a
+/// boolean with nothing to conflict with and has to be checked here.
 #[derive(Debug)]
 enum BlobSource {
     Argument(String),
@@ -262,8 +273,12 @@ fn blob_source(
     password_stdin: bool,
 ) -> anyhow::Result<BlobSource> {
     match (token, token_file) {
-        (Some(token), _) => Ok(BlobSource::Argument(token)),
+        (Some(token), None) => Ok(BlobSource::Argument(token)),
         (None, Some(file)) => Ok(BlobSource::File(file)),
+        // Unreachable through the CLI (clap's `conflicts_with` refuses it
+        // first), kept so this function stays total for whatever calls it
+        // directly, e.g. its own tests.
+        (Some(token), Some(_)) => Ok(BlobSource::Argument(token)),
         (None, None) if password_stdin => anyhow::bail!(
             "--password-stdin needs the enrolment token as an argument or via \
              --token-file; stdin is reserved for the password"

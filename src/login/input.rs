@@ -5,9 +5,17 @@
 //! so the DECISIONS underneath it — is stdin usable, was a real password
 //! read — stay exercisable without one.
 
-use std::io::{self, BufRead as _, IsTerminal as _};
+use std::io::{self, BufRead, IsTerminal as _, Read as _};
 
 use super::LoginError;
+
+/// The most `--password-stdin` will ever hold as a password, in bytes.
+///
+/// Generous for anything a person or a secret manager would produce, and
+/// small enough that pointing `--password-stdin` at the wrong stream — a log
+/// file, a binary, an unbounded pipe — cannot make this allocate without
+/// limit.
+pub(super) const PASSWORD_STDIN_LIMIT: usize = 4096;
 
 /// Whether `--password-stdin` may proceed, decided from a caller-supplied
 /// terminal flag rather than a live stdin.
@@ -68,14 +76,35 @@ pub(super) fn ensure_stdin_pipeable() -> Result<(), LoginError> {
 }
 
 /// Read the password `--password-stdin` promises: the first line of stdin,
-/// its line ending stripped, refused if empty.
+/// its line ending stripped, refused if empty or longer than
+/// [`PASSWORD_STDIN_LIMIT`].
 ///
 /// **THE FIRST LINE ONLY**, read with one `read_line` rather than draining
 /// stdin to EOF — a caller piping the password from a file is not obliged to
 /// end the stream there, and nothing else in this binary assumes stdin closes
 /// after one value either.
+///
+/// **BOUNDED BEFORE IT IS EVER READ, not checked after.** `.take(..)` caps
+/// how much `read_line` can pull off stdin in the first place, so pointing
+/// this at an unbounded pipe or the wrong file entirely cannot make this
+/// allocate without limit — the length check below is what turns "read
+/// stopped early" into the right error, not what does the bounding.
 pub(super) fn read_password_stdin() -> Result<String, LoginError> {
+    // ONE BYTE MORE THAN THE LIMIT, so a password of EXACTLY the limit's
+    // length, plus its own newline, still reads back whole — the extra byte
+    // is what tells "the line fit" apart from "the line kept going".
+    let mut reader = io::BufReader::new(io::stdin().lock().take(PASSWORD_STDIN_LIMIT as u64 + 1));
+    read_password_line(&mut reader)
+}
+
+/// The bounded read itself, taking the reader so the bound is exercisable
+/// without a real stdin.
+pub(super) fn read_password_line(reader: &mut impl BufRead) -> Result<String, LoginError> {
     let mut line = String::new();
-    io::stdin().lock().read_line(&mut line)?;
-    stdin_password(&line)
+    reader.read_line(&mut line)?;
+    let password = stdin_password(&line)?;
+    if password.len() > PASSWORD_STDIN_LIMIT {
+        return Err(LoginError::PasswordStdinTooLong);
+    }
+    Ok(password)
 }

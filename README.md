@@ -66,15 +66,21 @@ they stand. Both take flags that remove every prompt:
 A fully unattended login:
 
 ```bash
-echo "$PASSWORD" | yaadgaar login --gateway https://gateway.yadgar.internal:18443 \
+printf '%s\n' "$PASSWORD" | yaadgaar login --gateway https://gateway.yadgar.internal:18443 \
   --username someone --password-stdin
 ```
 
 A fully unattended enrolment:
 
 ```bash
-echo "$NEW_PASSWORD" | yaadgaar enrol --token-file /path/to/token --password-stdin
+printf '%s\n' "$NEW_PASSWORD" | yaadgaar enrol --token-file /path/to/token --password-stdin
 ```
+
+**`printf '%s\n'`, not `echo`.** Under `dash` (Debian/Ubuntu's `/bin/sh`) and
+some other shells, a bare `echo` interprets backslash escapes in its
+argument by default — a password containing `\n`, `\t`, or similar is
+silently truncated or rewritten before it ever reaches this client.
+`printf '%s\n'` never interprets its argument at all.
 
 **`--password-stdin` requires `--gateway` and `--username` on `login`.**
 Without them, the prompts those two flags remove would still read stdin

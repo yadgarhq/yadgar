@@ -464,7 +464,17 @@ fn run_detached(
     use std::io::{Read as _, Write as _};
 
     let mut cmd = Command::new("setsid");
-    cmd.arg(env!("CARGO_BIN_EXE_yaadgaar"))
+    // `-w`/`--wait`: without it, `setsid` FORKS the target and exits
+    // immediately once the fork succeeds (the underlying `setsid()` syscall
+    // refuses a process that is already a session leader, which is why the
+    // tool forks in the first place). That would make our immediate child
+    // the wrapper rather than the binary under test — its exit status is the
+    // fork's, not the real one, and reading `stdout`/`stderr` after IT exits
+    // races the detached grandchild that is still writing to the same pipes.
+    // `-w` keeps `setsid` attached until the real process exits and adopts
+    // its exit code, so `child.wait()` below reflects the binary under test.
+    cmd.arg("-w")
+        .arg(env!("CARGO_BIN_EXE_yaadgaar"))
         .args(args)
         .env("HOME", home)
         .stdin(Stdio::piped())
@@ -688,6 +698,142 @@ fn enrol_with_password_stdin_reaches_a_real_gateway_with_no_terminal_and_prompts
     assert!(
         written.contains("tok-enrol-e2e"),
         "the token the fake gateway issued was never written: {written}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+// ============================================================================
+// Argument-shape guards (review follow-up) — each of these pins one clap
+// declaration or one runtime check by driving the binary through the exact
+// mistake that declaration exists to catch, so deleting the declaration turns
+// the test red rather than leaving it silently unexercised.
+
+#[test]
+fn a_missing_token_file_is_reported_with_its_own_path() {
+    // `std::fs::read_to_string(&path)?` alone reports only the OS error
+    // ("No such file or directory") with nothing naming which of possibly
+    // several paths in play was the one that failed to open.
+    let home = scratch("enrol-token-file-missing");
+    let missing = home.join("no-such-token-file");
+    let output = Command::new(env!("CARGO_BIN_EXE_yaadgaar"))
+        .args(["enrol", "--token-file"])
+        .arg(&missing)
+        .env("HOME", &home)
+        .env("YADGAR_CONFIG_DIR", home.join("config"))
+        .output()
+        .expect("the binary under test did not run");
+
+    assert!(!output.status.success(), "a missing token file enrolled");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        said.contains(&missing.display().to_string()),
+        "the read failure did not name the path that failed: {said}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn enrol_refuses_a_token_argument_together_with_token_file() {
+    // Two sources for the same blob is a contradiction for the CALLER to
+    // resolve, not a precedence for this binary to pick silently — pinned as
+    // a clap usage error (`conflicts_with`), not a runtime one.
+    let home = scratch("enrol-token-and-token-file-conflict");
+    let output = Command::new(env!("CARGO_BIN_EXE_yaadgaar"))
+        .args([
+            "enrol",
+            "this-is-not-a-token",
+            "--token-file",
+            "/does/not/matter",
+        ])
+        .env("HOME", &home)
+        .env("YADGAR_CONFIG_DIR", home.join("config"))
+        .output()
+        .expect("the binary under test did not run");
+
+    assert!(
+        !output.status.success(),
+        "both a token argument and --token-file were accepted together"
+    );
+    let said = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    assert!(
+        said.contains("cannot be used with") || said.contains("conflict"),
+        "the refusal did not read as a clap usage error: {said}"
+    );
+    assert!(
+        !home.join("config").join("config.json").exists(),
+        "a refused enrolment wrote a config"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn login_password_stdin_without_gateway_and_username_is_a_usage_error() {
+    // GUARDS `requires_all = ["gateway", "username"]` on `Login`'s
+    // `password_stdin` field. Without it, this would fall through to the
+    // interactive prompts for gateway and username, which would then read
+    // stdin themselves — consuming the very lines meant for the password —
+    // rather than failing before either prompt runs at all.
+    let home = scratch("login-password-stdin-needs-gateway-and-username");
+    let output = Command::new(env!("CARGO_BIN_EXE_yaadgaar"))
+        .args(["login", "--password-stdin"])
+        .env("HOME", &home)
+        .output()
+        .expect("the binary under test did not run");
+
+    assert!(
+        !output.status.success(),
+        "--password-stdin ran with neither --gateway nor --username"
+    );
+    // Exit status 2 is clap's own usage-error code — the process never
+    // reached `login::login` at all, so no prompt text can have printed.
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let said = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    assert!(
+        said.contains("required") || said.contains("requires"),
+        "the refusal did not read as a clap usage error: {said}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).is_empty(),
+        "a prompt printed before the usage error was reported"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn password_stdin_is_refused_on_a_real_pty_not_only_a_process_with_no_terminal_at_all() {
+    // THE OTHER HALF of the red/green pair earlier in this file. Every test
+    // above removes the controlling terminal entirely (`setsid`), which
+    // proves `--password-stdin` does not HANG without one — it says nothing
+    // about whether `ensure_stdin_pipeable` would notice a terminal that IS
+    // there. `script` allocates a real pseudo-terminal and connects the
+    // child's stdin (and stdout, and stderr — one pty, one fd on the far
+    // side) to it, which is the one condition `IsTerminal::is_terminal`
+    // actually inspects.
+    //
+    // `script` COPIES THE PTY SESSION TO ITS OWN STDOUT, measured: with the
+    // child's stdout and stderr both landing on the pty side, there is only
+    // one stream for `script` to forward, and it forwards it as stdout, not
+    // stderr, on this system's util-linux `script`.
+    let home = scratch("password-stdin-real-pty");
+    let bin = env!("CARGO_BIN_EXE_yaadgaar");
+    let inner = format!(
+        "{bin} login --gateway https://pty.sentinel.invalid/ --username someone --password-stdin"
+    );
+    let output = Command::new("script")
+        .args(["-qec", &inner, "/dev/null"])
+        .env("HOME", &home)
+        .output()
+        .expect("`script` is not on PATH");
+
+    assert!(
+        !output.status.success(),
+        "a real terminal was accepted by --password-stdin: {output:?}"
+    );
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        said.contains("not a terminal"),
+        "the terminal refusal did not print: {said:?}"
     );
     let _ = std::fs::remove_dir_all(&home);
 }

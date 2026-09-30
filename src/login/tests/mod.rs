@@ -71,6 +71,23 @@ fn a_scheme_less_gateway_is_refused_rather_than_defaulted_to_https() {
 }
 
 #[test]
+fn a_username_with_surrounding_whitespace_is_trimmed_like_the_prompt_trims_it() {
+    assert_eq!(require_username("  someone  ").unwrap(), "someone");
+}
+
+#[test]
+fn a_username_that_is_only_whitespace_is_refused_as_empty() {
+    let err = require_username("   ").expect_err("blank is not a username");
+    assert!(matches!(err, LoginError::EmptyUsername), "got {err:?}");
+}
+
+#[test]
+fn an_empty_username_is_refused() {
+    let err = require_username("").expect_err("empty is not a username");
+    assert!(matches!(err, LoginError::EmptyUsername), "got {err:?}");
+}
+
+#[test]
 fn the_login_url_is_pinned_as_a_whole_string() {
     // Both halves are already tested and the JOIN is what is not. A leading
     // slash on LOGIN_PATH gives "https://gw//auth/login": every test of

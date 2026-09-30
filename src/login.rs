@@ -130,6 +130,15 @@ pub enum LoginError {
     /// the one line it gave, once its line ending was stripped, was empty.
     #[error("--password-stdin: no password was read from stdin")]
     EmptyPasswordStdin,
+    /// `--password-stdin`'s line was longer than this binary will read for
+    /// one password — a bound against the wrong stream entirely (a log file,
+    /// a binary, an unbounded pipe), not against a real password.
+    #[error("--password-stdin: the line read from stdin was too long to be a password")]
+    PasswordStdinTooLong,
+    /// `--username` was given, but was empty once trimmed the same way
+    /// [`prompt`] already trims every interactive answer.
+    #[error("--username must not be empty")]
+    EmptyUsername,
 }
 
 /// Prompt, exchange, store.
@@ -181,7 +190,7 @@ pub async fn login(
     require_https(&gateway)?;
 
     let username = match username {
-        Some(username) => username,
+        Some(username) => require_username(&username)?,
         None => prompt("Username: ")?,
     };
     let password = if password_stdin {
@@ -427,6 +436,21 @@ fn prompt(question: &str) -> Result<String, io::Error> {
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
     Ok(line.trim().to_string())
+}
+
+/// Trim `--username` the same way [`prompt`] already trims an interactive
+/// answer, and refuse an empty result.
+///
+/// PURE, for the reason [`require_https`] is: a flag that skips the prompt
+/// must go through the same shape of check a unit test can exercise without
+/// a terminal, rather than an ad hoc inline comparison at the call site.
+fn require_username(raw: &str) -> Result<String, LoginError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        Err(LoginError::EmptyUsername)
+    } else {
+        Ok(trimmed.to_string())
+    }
 }
 
 #[cfg(test)]

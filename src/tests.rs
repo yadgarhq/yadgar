@@ -9,19 +9,6 @@
 use super::*;
 
 #[test]
-fn a_token_argument_wins_over_token_file() {
-    assert!(matches!(
-        blob_source(
-            Some("the-argument".to_string()),
-            Some(std::path::PathBuf::from("/ignored")),
-            false
-        )
-        .unwrap(),
-        BlobSource::Argument(t) if t == "the-argument"
-    ));
-}
-
-#[test]
 fn token_file_is_used_when_no_argument_is_given() {
     let path = std::path::PathBuf::from("/some/token/file");
     assert!(matches!(

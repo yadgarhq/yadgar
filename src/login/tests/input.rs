@@ -3,7 +3,11 @@
 //! Split out the same way `reconcile.rs` was: the seam is the module beside
 //! it, and this file is only about the pure decisions in `login::input`.
 
-use super::super::input::{stdin_password, stdin_password_allowed};
+use std::io::{BufReader, Cursor, Read as _};
+
+use super::super::input::{
+    read_password_line, stdin_password, stdin_password_allowed, PASSWORD_STDIN_LIMIT,
+};
 use super::super::LoginError;
 
 #[test]
@@ -65,4 +69,32 @@ fn a_lone_carriage_return_is_not_mistaken_for_an_empty_line() {
     // A bare `\r` with no `\n` is one character of password on a platform
     // that never sent a line ending at all, not a blank line.
     assert_eq!(stdin_password("\r").unwrap(), "\r");
+}
+
+/// The same `BufReader<Take<R>>` shape `read_password_stdin` builds over real
+/// stdin, over a `Cursor` instead — so the bound is exercised exactly as
+/// composed, without a pipe.
+fn bounded_reader(bytes: Vec<u8>) -> BufReader<std::io::Take<Cursor<Vec<u8>>>> {
+    BufReader::new(Cursor::new(bytes).take(PASSWORD_STDIN_LIMIT as u64 + 1))
+}
+
+#[test]
+fn a_password_exactly_at_the_limit_still_reads_back_whole() {
+    let exact = "a".repeat(PASSWORD_STDIN_LIMIT);
+    let mut reader = bounded_reader(format!("{exact}\n").into_bytes());
+    assert_eq!(read_password_line(&mut reader).unwrap(), exact);
+}
+
+#[test]
+fn a_line_far_longer_than_the_limit_is_refused_rather_than_read_without_end() {
+    // TEN TIMES THE LIMIT, so this is unambiguously "too long" rather than an
+    // off-by-one — `PASSWORD_STDIN_LIMIT` itself is only ever tested for the
+    // one bound that value actually is.
+    let huge = "a".repeat(10 * PASSWORD_STDIN_LIMIT);
+    let mut reader = bounded_reader(format!("{huge}\n").into_bytes());
+    let err = read_password_line(&mut reader).expect_err("far exceeds the limit");
+    assert!(
+        matches!(err, LoginError::PasswordStdinTooLong),
+        "got {err:?}"
+    );
 }

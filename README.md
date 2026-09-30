@@ -48,6 +48,56 @@ lose memory and tasks with nothing to report.
 `project_id` is derived from the working directory at call time (D53), so one
 registration serves every repository and a fresh checkout works immediately.
 
+### Unattended provisioning
+
+`login` and `enrol` are interactive by default: three prompts each, and
+`rpassword` reads the password straight off the controlling terminal rather
+than stdin. A machine with no terminal to answer those prompts — a VM image,
+a container build, a config-management run — cannot use either command as
+they stand. Both take flags that remove every prompt:
+
+| Flag                  | Commands         | What it replaces                                                                                                        |
+| --------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `--gateway <addr>`    | `login`          | The "Gateway address" prompt.                                                                                           |
+| `--username <name>`   | `login`          | The "Username" prompt.                                                                                                  |
+| `--password-stdin`    | `login`, `enrol` | The concealed password prompt (`enrol`'s repeat prompt too — there is nothing to compare a single stdin value against). |
+| `--token-file <path>` | `enrol`          | The positional token argument or the "paste the enrolment token" prompt.                                                |
+
+A fully unattended login:
+
+```bash
+echo "$PASSWORD" | yaadgaar login --gateway https://gateway.yadgar.internal:18443 \
+  --username someone --password-stdin
+```
+
+A fully unattended enrolment:
+
+```bash
+echo "$NEW_PASSWORD" | yaadgaar enrol --token-file /path/to/token --password-stdin
+```
+
+**`--password-stdin` requires `--gateway` and `--username` on `login`.**
+Without them, the prompts those two flags remove would still read stdin
+themselves — consuming the very lines meant for the password. `enrol`
+similarly requires the token as the positional argument or via
+`--token-file` when `--password-stdin` is given: the interactive "paste the
+enrolment token" fallback also reads stdin, and `--password-stdin` has
+already claimed it for the password.
+
+**The password is read as exactly one line: the first, with its trailing
+line ending stripped.** It is never `trim`med — a password can legitimately
+start, end, or consist of whitespace — and an empty result is refused.
+
+**`--password-stdin` refuses a terminal**, unlike `docker login`, which
+accepts one. `rpassword` is used everywhere else in this client precisely so
+a password is never echoed and never reaches scrollback; reading one off a
+real terminal through this flag would type it in plain sight instead of
+concealing it, which is the exact leak this flag exists to close. Redirect
+input from a file or a pipe.
+
+Nothing about the interactive path changes when none of these flags are
+given.
+
 ## Installing
 
 ```bash

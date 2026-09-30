@@ -160,6 +160,30 @@ unsafe_code = "forbid"
 all = { level = "deny", priority = -1 }
 
 [dev-dependencies]
+# A REAL TLS SERVER, for the integration test that drives the built binary
+# end to end (ledger 638). `require_https` (ADR-0569, ledger 717) has no
+# exemption for a test double, on purpose — so the only way to prove
+# `--password-stdin` actually reaches the gateway is a socket that speaks
+# real TLS, not a bypass in the shipped binary.
+#
+# `aws_lc_rs` RATHER THAN THE DEFAULT `ring` BACKEND: `reqwest`'s own rustls
+# feature already resolves to `aws_lc_rs` (see the `reqwest` entry above), and
+# a crypto provider is a process-global install — two providers compiled into
+# the same test binary is how `rustls::crypto::CryptoProvider::install_default`
+# panics. The test server and the client dependency agree on one backend so
+# neither ever needs to.
+#
+# `pem` IS REQUIRED to hand the CA certificate to the client as the PEM string
+# an enrolment token carries — `Certificate::pem()` and
+# `KeyPair::serialize_pem()` are both behind it.
+rcgen = { version = "0.13", default-features = false, features = [
+  "aws_lc_rs",
+  "pem",
+] }
+# THE SERVER SIDE OF THAT SAME TLS CONNECTION. Default features already
+# resolve to `aws_lc_rs` and `std` — the same backend `rcgen` above was
+# pinned to, and nothing here needs `ring` at all.
+rustls = "0.23"
 # ONE REAL SOCKET, for the two properties no unit test can reach.
 #
 # The credential is attached inside the request builder, so the only way to

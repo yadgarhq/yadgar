@@ -6,10 +6,14 @@
 //! keeps the behaviour, the file beside it keeps the assertions about it.
 
 use super::label::{hostname_from, label_from};
+use super::wire::{enrol_url, exchange, login_url, redeem, verdict, Verdict};
 use super::*;
 
 /// What a re-login keeps, and what it must not carry across deployments.
 mod reconcile;
+
+/// What `--password-stdin` decides before a single byte is read.
+mod input;
 
 #[test]
 fn an_address_gets_exactly_one_trailing_slash() {
@@ -301,7 +305,7 @@ async fn enrolment_refuses_a_token_it_cannot_read_before_asking_for_a_password()
     // THEN tell them the blob was unusable. This returns without reading
     // stdin at all, which is why the test can run with no terminal.
     let dir = crate::testserver::scratch_dir("enrol-refusal");
-    let err = enrol(&dir, "not a token at all!")
+    let err = enrol(&dir, "not a token at all!", false)
         .await
         .expect_err("that is not a token");
     assert!(

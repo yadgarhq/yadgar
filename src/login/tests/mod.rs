@@ -6,10 +6,14 @@
 //! keeps the behaviour, the file beside it keeps the assertions about it.
 
 use super::label::{hostname_from, label_from};
+use super::wire::{enrol_url, exchange, login_url, redeem, verdict, Verdict};
 use super::*;
 
 /// What a re-login keeps, and what it must not carry across deployments.
 mod reconcile;
+
+/// What `--password-stdin` decides before a single byte is read.
+mod input;
 
 #[test]
 fn an_address_gets_exactly_one_trailing_slash() {
@@ -64,6 +68,23 @@ fn a_scheme_less_gateway_is_refused_rather_than_defaulted_to_https() {
     let err = require_https("gw.sentinel.invalid/").expect_err("a bare host must be refused");
     assert!(matches!(err, LoginError::NoScheme(_)), "got {err:?}");
     assert!(err.to_string().contains("gw.sentinel.invalid/"), "{err}");
+}
+
+#[test]
+fn a_username_with_surrounding_whitespace_is_trimmed_like_the_prompt_trims_it() {
+    assert_eq!(require_username("  someone  ").unwrap(), "someone");
+}
+
+#[test]
+fn a_username_that_is_only_whitespace_is_refused_as_empty() {
+    let err = require_username("   ").expect_err("blank is not a username");
+    assert!(matches!(err, LoginError::EmptyUsername), "got {err:?}");
+}
+
+#[test]
+fn an_empty_username_is_refused() {
+    let err = require_username("").expect_err("empty is not a username");
+    assert!(matches!(err, LoginError::EmptyUsername), "got {err:?}");
 }
 
 #[test]
@@ -301,7 +322,7 @@ async fn enrolment_refuses_a_token_it_cannot_read_before_asking_for_a_password()
     // THEN tell them the blob was unusable. This returns without reading
     // stdin at all, which is why the test can run with no terminal.
     let dir = crate::testserver::scratch_dir("enrol-refusal");
-    let err = enrol(&dir, "not a token at all!")
+    let err = enrol(&dir, "not a token at all!", false)
         .await
         .expect_err("that is not a token");
     assert!(

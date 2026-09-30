@@ -22,6 +22,7 @@ mod testserver;
 
 use std::io::Write as _;
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -47,7 +48,30 @@ enum Command {
     /// It does NOT register the MCP entry: `install` owns every file the agent
     /// client reads, so there is one command to undo and one to check. Claiming
     /// otherwise here would be a promise this arm does not keep.
-    Login,
+    Login {
+        /// The gateway address, so this is not asked for at a prompt.
+        #[arg(long)]
+        gateway: Option<String>,
+
+        /// The username, so this is not asked for at a prompt.
+        #[arg(long)]
+        username: Option<String>,
+
+        /// Read the password from stdin instead of a concealed prompt
+        /// (ledger 638), for a machine with no terminal to answer one.
+        ///
+        /// Requires `--gateway` and `--username` as well: without them, the
+        /// two prompts this flag does not remove would read stdin themselves
+        /// — the gateway address and the username would consume the very
+        /// lines meant for the password.
+        ///
+        /// Refused when stdin is a terminal rather than a pipe or a file —
+        /// unlike `docker login`, which accepts one. This client hides a
+        /// typed password everywhere else; a real terminal read through this
+        /// flag would echo it in plain sight instead.
+        #[arg(long = "password-stdin", requires_all = ["gateway", "username"])]
+        password_stdin: bool,
+    },
 
     /// Redeem the enrolment token an admin gave you: set a password, learn your
     /// username, and store the gateway address the token already names.
@@ -64,8 +88,30 @@ enum Command {
         ///
         /// It is not a secret in the credential sense — it is single-use and
         /// expires in 24 hours — but it does reach the shell history, so
-        /// `enrol` reads it from stdin when the argument is omitted.
+        /// `enrol` reads it from stdin when neither this nor `--token-file` is
+        /// given.
+        ///
+        /// CONFLICTS WITH `--token-file`: two sources for the same blob is a
+        /// contradiction the caller must resolve, not a precedence for this
+        /// binary to silently pick one side of.
+        #[arg(conflicts_with = "token_file")]
         token: Option<String>,
+
+        /// Read the blob from this file instead of the argument or stdin.
+        #[arg(long = "token-file")]
+        token_file: Option<std::path::PathBuf>,
+
+        /// Read the new password from stdin instead of a concealed prompt
+        /// (ledger 638); there is no repeat prompt to compare it against.
+        ///
+        /// Requires the token as an argument or via `--token-file`: the
+        /// interactive "paste the enrolment token" fallback also reads
+        /// stdin, and this flag has already claimed stdin for the password.
+        ///
+        /// Refused when stdin is a terminal — see `login --password-stdin`
+        /// for why.
+        #[arg(long = "password-stdin")]
+        password_stdin: bool,
     },
 
     /// Run as a local stdio MCP server, forwarding to the gateway.
@@ -145,9 +191,13 @@ async fn main() -> anyhow::Result<()> {
         // exits non-zero without anyone remembering to check a return value.
         Command::Verify => install::verify(&home()?),
 
-        Command::Login => {
+        Command::Login {
+            gateway,
+            username,
+            password_stdin,
+        } => {
             let dir = config::base_dir();
-            let config = login::login(&dir).await?;
+            let config = login::login(&dir, gateway, username, password_stdin).await?;
             println!(
                 "logged in to {} — the credential is stored in {}",
                 config.gateway_url(),
@@ -157,11 +207,18 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Command::Enrol { token } => {
+        Command::Enrol {
+            token,
+            token_file,
+            password_stdin,
+        } => {
             let dir = config::base_dir();
-            let blob = match token {
-                Some(blob) => blob,
-                None => {
+            let blob = match blob_source(token, token_file, password_stdin)? {
+                BlobSource::Argument(blob) => blob,
+                BlobSource::File(path) => std::fs::read_to_string(&path).with_context(|| {
+                    format!("could not read the enrolment token from {}", path.display())
+                })?,
+                BlobSource::StdinPrompt => {
                     // Read from stdin so the blob need not reach shell history.
                     print!("Paste the enrolment token: ");
                     std::io::stdout().flush()?;
@@ -170,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
                     line
                 }
             };
-            let config = login::enrol(&dir, &blob).await?;
+            let config = login::enrol(&dir, &blob, password_stdin).await?;
             // THE USERNAME IS SAID HERE AND NOWHERE ELSE. `auth/enrol` is the
             // only place the deployment ever tells a person what they are
             // called, and they need it to log in on any other machine.
@@ -185,6 +242,48 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::Hook { name } => dispatch_hook(&name),
+    }
+}
+
+/// Where `enrol`'s blob comes from, decided from the CLI's own arguments alone
+/// (ledger 638) — no file is read and no stdin is touched.
+///
+/// PURE, for the reason every other CLI-argument rule in this binary is: the
+/// decision is exercisable without a file, a pipe, or a terminal.
+///
+/// **THE ARGUMENT AND `--token-file` NEVER ARRIVE TOGETHER.** Clap's own
+/// `conflicts_with` on `token` refuses that combination with a usage error
+/// before this function is ever called, so choosing between them is not this
+/// function's problem to solve — unlike `--password-stdin`, which is a
+/// boolean with nothing to conflict with and has to be checked here.
+#[derive(Debug)]
+enum BlobSource {
+    Argument(String),
+    File(std::path::PathBuf),
+    /// The pre-existing fallback: print a prompt, then read one line of stdin.
+    ///
+    /// NEVER CHOSEN when `password_stdin` is set — stdin has exactly one
+    /// reader, and `--password-stdin` is already that reader.
+    StdinPrompt,
+}
+
+fn blob_source(
+    token: Option<String>,
+    token_file: Option<std::path::PathBuf>,
+    password_stdin: bool,
+) -> anyhow::Result<BlobSource> {
+    match (token, token_file) {
+        (Some(token), None) => Ok(BlobSource::Argument(token)),
+        (None, Some(file)) => Ok(BlobSource::File(file)),
+        // Unreachable through the CLI (clap's `conflicts_with` refuses it
+        // first), kept so this function stays total for whatever calls it
+        // directly, e.g. its own tests.
+        (Some(token), Some(_)) => Ok(BlobSource::Argument(token)),
+        (None, None) if password_stdin => anyhow::bail!(
+            "--password-stdin needs the enrolment token as an argument or via \
+             --token-file; stdin is reserved for the password"
+        ),
+        (None, None) => Ok(BlobSource::StdinPrompt),
     }
 }
 
@@ -295,83 +394,4 @@ fn report_lines(verb: &str, nothing: &str, s: &install::Summary) -> Vec<String> 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Sets exactly one of the four "this file changed" flags.
-    type RaiseOneFlag = fn(&mut install::Summary);
-
-    /// A summary with every flag off, and paths that name themselves.
-    fn summary() -> install::Summary {
-        install::Summary {
-            hooks: 12,
-            settings: std::path::PathBuf::from("/home/x/.claude/settings.json"),
-            mcp_config: std::path::PathBuf::from("/home/x/.claude.json"),
-            rules: std::path::PathBuf::from("/home/x/.claude/yadgar-rules.md"),
-            settings_changed: false,
-            mcp_changed: false,
-            rules_changed: false,
-            claude_md_changed: false,
-        }
-    }
-
-    #[test]
-    fn a_run_that_changed_nothing_says_so_and_nothing_else() {
-        // Two failures at once. A command that prints NOTHING AT ALL reads as a
-        // command that did not run, and deleting that block was invisible. A
-        // gate deleted so its line always prints makes a no-op claim work
-        // nobody did, which is the whole of what this report is for.
-        let lines = report_lines("installed", "nothing to do", &summary());
-        assert_eq!(lines, vec!["nothing to do".to_string()]);
-    }
-
-    #[test]
-    fn every_line_is_gated_on_its_own_file_having_changed() {
-        // ONE FLAG AT A TIME, so no gate can be deleted, inverted, or wired to
-        // another flag without a failure. Inverting all four together was
-        // measured and left the suite green: the fix this PR exists for, fully
-        // reversed and undetected, because nothing read the report.
-        let cases: [(RaiseOneFlag, &str); 4] = [
-            (|s| s.settings_changed = true, "12 hook(s)"),
-            (|s| s.mcp_changed = true, "the MCP entry"),
-            (|s| s.rules_changed = true, "the rules file"),
-            (|s| s.claude_md_changed = true, "the reference line"),
-        ];
-        for (set, expected) in cases {
-            let mut s = summary();
-            set(&mut s);
-            let lines = report_lines("removed", "nothing to do", &s);
-            assert_eq!(lines.len(), 1, "{expected}: {lines:#?}");
-            assert!(lines[0].contains(expected), "{lines:#?}");
-            assert!(lines[0].starts_with("removed "), "{lines:#?}");
-        }
-    }
-
-    #[test]
-    fn a_run_that_changed_everything_names_every_file_by_path() {
-        // The point of the report is that somebody can go and look, so the
-        // paths are the payload — "3 hooks installed" says nothing about where.
-        // And the "nothing to do" line must not appear beside them.
-        let mut s = summary();
-        s.settings_changed = true;
-        s.mcp_changed = true;
-        s.rules_changed = true;
-        s.claude_md_changed = true;
-        let lines = report_lines("installed", "nothing to do", &s);
-        assert_eq!(lines.len(), 4, "{lines:#?}");
-        assert!(
-            lines[0].contains("/home/x/.claude/settings.json"),
-            "{lines:#?}"
-        );
-        assert!(lines[1].contains("/home/x/.claude.json"), "{lines:#?}");
-        assert!(
-            lines[2].contains("/home/x/.claude/yadgar-rules.md"),
-            "{lines:#?}"
-        );
-        assert!(lines[3].contains("CLAUDE.md"), "{lines:#?}");
-        assert!(
-            !lines.iter().any(|l| l.contains("nothing to do")),
-            "{lines:#?}"
-        );
-    }
-}
+mod tests;

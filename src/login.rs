@@ -39,39 +39,14 @@
 use std::io::{self, Write as _};
 use std::path::Path;
 
-use serde::Deserialize;
-
 use crate::config::Config;
 use crate::enrolment::{self, EnrolmentError};
 
+mod input;
 mod label;
+mod wire;
 
-/// Where the gateway serves login.
-///
-/// NOT an MCP method. Authentication and administration live on a separate path
-/// from the tool surface (D73), so they never appear in `tools/list` and cannot
-/// be reached by anything that can influence an agent's context.
-const LOGIN_PATH: &str = "auth/login";
-
-/// Where the gateway serves enrolment — the unauthenticated half of D73.
-const ENROL_PATH: &str = "auth/enrol";
-
-#[derive(Debug, Deserialize)]
-struct LoginResponse {
-    token: String,
-}
-
-/// What `auth/enrol` answers with.
-///
-/// THE USERNAME IS THE HALF THAT ONLY EXISTS HERE. The token is a credential
-/// like any other, but the username is minted by the deployment and said once:
-/// a person enrolling on their first machine has no other way to learn what
-/// they are called, and cannot complete a `login` anywhere else without it.
-#[derive(Debug, Deserialize)]
-struct EnrolResponse {
-    token: String,
-    username: String,
-}
+use wire::{exchange, redeem};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoginError {
@@ -139,6 +114,31 @@ pub enum LoginError {
     /// proxy, not a safety valve reserved for a developer.
     #[error("{url} uses the `{scheme}` scheme; the gateway must be reached over https")]
     InsecureScheme { url: String, scheme: String },
+    /// `--password-stdin` was given, but stdin is a terminal (ledger 638).
+    ///
+    /// **REFUSED, and deliberately unlike `docker login`.** `rpassword` is
+    /// used everywhere else in this file precisely so a password is never
+    /// echoed and never reaches scrollback; a plain `read_line` off a real
+    /// terminal does neither — every keystroke lands on the screen in plain
+    /// sight, which is the exact leak this flag exists to route around.
+    #[error(
+        "--password-stdin needs stdin to be a pipe or a file, not a terminal; \
+         redirect input or drop the flag"
+    )]
+    StdinIsTerminal,
+    /// `--password-stdin` read nothing usable: stdin closed immediately, or
+    /// the one line it gave, once its line ending was stripped, was empty.
+    #[error("--password-stdin: no password was read from stdin")]
+    EmptyPasswordStdin,
+    /// `--password-stdin`'s line was longer than this binary will read for
+    /// one password — a bound against the wrong stream entirely (a log file,
+    /// a binary, an unbounded pipe), not against a real password.
+    #[error("--password-stdin: the line read from stdin was too long to be a password")]
+    PasswordStdinTooLong,
+    /// `--username` was given, but was empty once trimmed the same way
+    /// [`prompt`] already trims every interactive answer.
+    #[error("--username must not be empty")]
+    EmptyUsername,
 }
 
 /// Prompt, exchange, store.
@@ -156,20 +156,50 @@ pub enum LoginError {
 /// made the fallback wrong on the enrol path, arriving through the one caller
 /// that legitimately has a fallback at all. A CA is only ever kept for the
 /// deployment it was issued for.
-pub async fn login(config_dir: &Path) -> Result<Config, LoginError> {
+///
+/// **`gateway`, `username` AND `password_stdin` ARE FOR UNATTENDED
+/// PROVISIONING (ledger 638).** Given the first two, nothing is prompted for
+/// them; given the third, the password comes from stdin instead of a
+/// concealed terminal prompt. All three together are what let `login` run
+/// with no prompt at all — a machine with no terminal to type into cannot
+/// otherwise be logged in.
+pub async fn login(
+    config_dir: &Path,
+    gateway: Option<String>,
+    username: Option<String>,
+    password_stdin: bool,
+) -> Result<Config, LoginError> {
+    // CHECKED FIRST, before a single prompt. A caller who asked for a
+    // password on stdin and handed it a real terminal instead should not
+    // first be asked for a gateway and a username it can never use the
+    // answers to.
+    if password_stdin {
+        input::ensure_stdin_pipeable()?;
+    }
+
     let stored = Config::load_from(config_dir).ok();
 
-    let gateway = prompt("Gateway address (e.g. https://gateway.yadgar.internal:18443): ")?;
+    let gateway = match gateway {
+        Some(gateway) => gateway,
+        None => prompt("Gateway address (e.g. https://gateway.yadgar.internal:18443): ")?,
+    };
     let gateway = normalise(&gateway);
     // CHECKED BEFORE ASKING FOR CREDENTIALS. A person whose address is
     // refused should not first type a username and a password that were
     // always going to be sent nowhere.
     require_https(&gateway)?;
 
-    let username = prompt("Username: ")?;
-    // Read without echo. A password in the terminal's scrollback outlives the
-    // session and reaches whatever records it.
-    let password = rpassword::prompt_password("Password: ")?;
+    let username = match username {
+        Some(username) => require_username(&username)?,
+        None => prompt("Username: ")?,
+    };
+    let password = if password_stdin {
+        input::read_password_stdin()?
+    } else {
+        // Read without echo. A password in the terminal's scrollback outlives
+        // the session and reaches whatever records it.
+        rpassword::prompt_password("Password: ")?
+    };
 
     // READ AFTER THE ADDRESS IS KNOWN, because whether it may be used depends on
     // the address.
@@ -276,7 +306,24 @@ fn reconcile(
 /// **NOTHING IS ASKED THAT THE TOKEN ALREADY ANSWERS.** The address and the CA
 /// come out of the blob, so the only questions are the password and its
 /// confirmation — which is the whole reason this is not a mode of [`login`].
-pub async fn enrol(config_dir: &Path, blob: &str) -> Result<Config, LoginError> {
+///
+/// **`password_stdin` IS FOR UNATTENDED PROVISIONING (ledger 638).** Given it,
+/// the password is read once from stdin instead of twice from a concealed
+/// terminal prompt — there is no repeat to compare, because there is only one
+/// line to read, and a caller supplying it already had exactly one chance to
+/// get it right.
+pub async fn enrol(
+    config_dir: &Path,
+    blob: &str,
+    password_stdin: bool,
+) -> Result<Config, LoginError> {
+    // CHECKED FIRST, before the blob is even decoded, for the same reason
+    // `login` checks it first: a caller who asked for a password on stdin and
+    // handed it a real terminal instead should not be told its token is fine
+    // first.
+    if password_stdin {
+        input::ensure_stdin_pipeable()?;
+    }
     let previous = Config::load_from(config_dir).ok();
     let enrolment = enrolment::decode(blob)?;
     if expired(enrolment.expires_at, now()) {
@@ -297,12 +344,20 @@ pub async fn enrol(config_dir: &Path, blob: &str) -> Result<Config, LoginError> 
         // system-wide by hand.
         println!("The token carries a CA; it will be trusted for this gateway only.");
     }
-    // Twice, and compared. `enrol` SETS the password — the admin never learns
-    // it (D73), so a typo is a lockout with nobody to ask.
-    let password = rpassword::prompt_password("Choose a password: ")?;
-    if password != rpassword::prompt_password("Repeat it: ")? {
-        return Err(LoginError::PasswordMismatch);
-    }
+    let password = if password_stdin {
+        // ONE LINE, and nothing to compare it against — the repeat prompt
+        // exists to catch a typo nobody can see themselves make; a value
+        // supplied by automation was typed nowhere and cannot have one.
+        input::read_password_stdin()?
+    } else {
+        // Twice, and compared. `enrol` SETS the password — the admin never
+        // learns it (D73), so a typo is a lockout with nobody to ask.
+        let password = rpassword::prompt_password("Choose a password: ")?;
+        if password != rpassword::prompt_password("Repeat it: ")? {
+            return Err(LoginError::PasswordMismatch);
+        }
+        password
+    };
 
     let client =
         crate::trust::client(enrolment.ca_pem.as_deref(), None).map_err(LoginError::Trust)?;
@@ -333,112 +388,6 @@ fn now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-/// The URL an enrolment goes to. Same join rule as [`login_url`], same reason.
-fn enrol_url(gateway: &str) -> String {
-    format!("{}{ENROL_PATH}", normalise(gateway))
-}
-
-/// Present the secret, set the password, take back a credential and a name.
-///
-/// **THE SECRET FIELD, NEVER THE WHOLE BLOB.** The contract is explicit, and
-/// sending the base64 envelope would present a string the server never hashed —
-/// refused as a wrong secret, with the person holding a token that is fine.
-async fn redeem(
-    client: &reqwest::Client,
-    gateway: &str,
-    secret: &str,
-    password: &str,
-) -> Result<EnrolResponse, LoginError> {
-    let url = enrol_url(gateway);
-    let response = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "secret": secret,
-            "password": password,
-            "label": label::label(),
-        }))
-        .send()
-        .await
-        .map_err(|e| LoginError::Unreachable(url, e))?;
-
-    let status = response.status();
-    match verdict(status) {
-        // A REPLAYED SECRET AND AN UNKNOWN ONE ANSWER IDENTICALLY, by design —
-        // `RedeemEnrolment` is unauthenticated, so telling them apart would say
-        // whether a given secret ever existed.
-        Verdict::Issued => response.json().await.map_err(LoginError::Malformed),
-        Verdict::Refused => Err(LoginError::SecretRefused),
-        Verdict::Unexpected => Err(LoginError::Unexpected(status)),
-    }
-}
-
-/// The URL a login request goes to, composed in ONE place.
-///
-/// Each half is already pinned — [`normalise`] guarantees exactly one trailing
-/// slash, and `LOGIN_PATH` carries none. The JOIN is what nothing covered:
-/// `LOGIN_PATH` gaining a leading slash makes `https://gw//auth/login`, which
-/// every test of either half still passes, most servers quietly accept, and
-/// some path-matching proxy in front of one does not.
-fn login_url(gateway: &str) -> String {
-    format!("{}{LOGIN_PATH}", normalise(gateway))
-}
-
-/// What the gateway's status means for the person at the terminal.
-///
-/// Separated from the request so the mapping is testable without a server, and
-/// so the 401 arm cannot be deleted unnoticed — it is what stops a refusal being
-/// reported as an outage, and sends somebody to retype a password instead of to
-/// look at their network.
-#[derive(Debug, PartialEq, Eq)]
-enum Verdict {
-    /// Read the token out of the body.
-    Issued,
-    /// The credentials were wrong.
-    Refused,
-    /// Not the person's to fix.
-    Unexpected,
-}
-
-fn verdict(status: reqwest::StatusCode) -> Verdict {
-    match status {
-        s if s.is_success() => Verdict::Issued,
-        reqwest::StatusCode::UNAUTHORIZED => Verdict::Refused,
-        _ => Verdict::Unexpected,
-    }
-}
-
-async fn exchange(
-    client: &reqwest::Client,
-    gateway: &str,
-    username: &str,
-    password: &str,
-) -> Result<String, LoginError> {
-    let url = login_url(gateway);
-    let response = client
-        .post(&url)
-        .json(&serde_json::json!({
-            "username": username,
-            "password": password,
-            // Free text naming this machine, so a person can tell their laptop's
-            // credential from their desktop's when revoking one.
-            "label": label::label(),
-        }))
-        .send()
-        .await
-        .map_err(|e| LoginError::Unreachable(url, e))?;
-
-    let status = response.status();
-    match verdict(status) {
-        Verdict::Issued => Ok(response
-            .json::<LoginResponse>()
-            .await
-            .map_err(LoginError::Malformed)?
-            .token),
-        Verdict::Refused => Err(LoginError::Refused),
-        Verdict::Unexpected => Err(LoginError::Unexpected(status)),
-    }
 }
 
 /// A trailing slash, exactly one.
@@ -487,6 +436,21 @@ fn prompt(question: &str) -> Result<String, io::Error> {
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
     Ok(line.trim().to_string())
+}
+
+/// Trim `--username` the same way [`prompt`] already trims an interactive
+/// answer, and refuse an empty result.
+///
+/// PURE, for the reason [`require_https`] is: a flag that skips the prompt
+/// must go through the same shape of check a unit test can exercise without
+/// a terminal, rather than an ad hoc inline comparison at the call site.
+fn require_username(raw: &str) -> Result<String, LoginError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        Err(LoginError::EmptyUsername)
+    } else {
+        Ok(trimmed.to_string())
+    }
 }
 
 #[cfg(test)]

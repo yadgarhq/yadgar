@@ -580,7 +580,7 @@ async fn a_host_that_sends_no_meta_still_sends_the_gateway_what_it_requires() {
     let request = served.await.unwrap().to_lowercase();
     // Taken from the constant rather than written out, so this test cannot pass
     // by agreeing with a literal the client has since stopped sending.
-    let version = super::session::GATEWAY_REVISION.to_lowercase();
+    let version = super::revision::GATEWAY_REVISION.to_lowercase();
     assert!(
         request.contains(&format!("mcp-protocol-version: {version}")),
         "no protocol header left the process for an envelope that declared none:\n{request}"
@@ -676,7 +676,7 @@ async fn the_negotiated_revision_never_leaves_for_the_gateway() {
         !request.contains("2025-06-18"),
         "the host's revision was sent to the gateway:\n{request}"
     );
-    let upstream = super::session::GATEWAY_REVISION.to_lowercase();
+    let upstream = super::revision::GATEWAY_REVISION.to_lowercase();
     assert!(
         request.contains(&format!("mcp-protocol-version: {upstream}")),
         "{request}"
@@ -688,4 +688,76 @@ async fn the_negotiated_revision_never_leaves_for_the_gateway() {
         "{request}"
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Handshake at *requested* declaring *capabilities*, forward one `tools/list`,
+/// and return what reached the gateway, lowercased.
+async fn upstream_after_handshake(requested: &str, capabilities: serde_json::Value) -> String {
+    let (addr, served) = crate::testserver::answer_once(
+        "200 OK",
+        r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}"#,
+    )
+    .await;
+    let dir = crate::testserver::scratch_dir(&format!("proxy-capabilities-{requested}"));
+    let config = Config::new(&dir, format!("http://{addr}/"), "tok".into());
+    let mut session = super::session::Session::new(Unwatched, super::watch::Catalogue::default());
+    let hello = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": requested, "capabilities": capabilities,
+                    "clientInfo": { "name": "host", "version": "0" } },
+    })
+    .to_string();
+    let client = reqwest::Client::new();
+    session
+        .message(&client, &config, &Context::default(), &hello)
+        .await;
+    session
+        .message(
+            &client,
+            &config,
+            &Context::default(),
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        )
+        .await;
+    let request = served.await.unwrap().to_lowercase();
+    std::fs::remove_dir_all(&dir).ok();
+    request
+}
+
+#[tokio::test]
+async fn a_legacy_host_s_request_capabilities_never_reach_the_gateway() {
+    // THE CLIENT CANNOT RELAY WHAT THEY INVITE. Declaring `elicitation`,
+    // `sampling` or `roots` upstream tells the gateway it may answer with an
+    // `input_required` result asking for them — and a legacy session has no way
+    // to carry that to the host (it becomes an error). Withheld, the gateway
+    // says `MissingRequiredClientCapability` for a tool that needs one, which is
+    // the honest refusal. At the gateway's own revision they are mirrored as
+    // declared, and a capability outside the three always is.
+    let declared = json!({
+        "elicitation": {"sentinelElicit": true},
+        "sampling": {"sentinelSample": true},
+        "roots": {"sentinelRoots": true},
+        "sentinelOfTheHost": {"enabled": true},
+    });
+    let legacy = upstream_after_handshake("2025-11-25", declared.clone()).await;
+    for withheld in ["sentinelelicit", "sentinelsample", "sentinelroots"] {
+        assert!(
+            !legacy.contains(withheld),
+            "a legacy host's {withheld} capability reached the gateway:\n{legacy}"
+        );
+    }
+    assert!(legacy.contains("sentinelofthehost"), "{legacy}");
+
+    let current = upstream_after_handshake("2026-07-28", declared).await;
+    for mirrored in [
+        "sentinelelicit",
+        "sentinelsample",
+        "sentinelroots",
+        "sentinelofthehost",
+    ] {
+        assert!(
+            current.contains(mirrored),
+            "a current-revision host's {mirrored} capability was withheld:\n{current}"
+        );
+    }
 }

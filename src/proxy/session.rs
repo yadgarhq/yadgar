@@ -19,123 +19,7 @@ use serde_json::{json, Value};
 
 use super::{Outcome, META_PROTOCOL_VERSION};
 
-/// The MCP revision this client speaks UPSTREAM, to the gateway.
-///
-/// **PINNED, and it is the one thing here the envelope does not decide.** The
-/// module comment on [`super`] says the proxy asserts nothing about the protocol
-/// and echoes every version out of the message it forwards. That rule still holds
-/// for a version somebody else declared; it cannot hold for a version NOBODY
-/// declared, which is the case that made the client unusable: Claude Code over
-/// stdio sends no `params._meta`, the gateway requires two keys in it, and a
-/// proxy with nothing to mirror sent nothing and earned 400 on every request.
-///
-/// A version is not a fact about the caller that this client would be forging by
-/// stating it — it is a fact about this client, which genuinely does speak this
-/// revision to the gateway. The alternative was the gateway trusting the bare
-/// HTTP header, and that was rejected because it moves a trust boundary: the body
-/// is what the gateway validates and cross-checks, and a header believed on its
-/// own is a header a proxy can rewrite without the body disagreeing.
-///
-/// **NOT THE REVISION THE HOST IS ANSWERED WITH.** That one is negotiated per
-/// session — see [`HOST_REVISIONS`]. The two are separate on purpose: this client
-/// is a translator between two protocol boundaries, and the gateway accepts
-/// exactly one revision whatever the host speaks. Passing the negotiated revision
-/// upstream would earn `-32022 UnsupportedProtocolVersion` on every call.
-///
-/// NOT A CONFIGURATION KNOB, so ADR-0569 does not reach it. It is a contract
-/// bound: the two ends must agree on one revision, and an installation varying
-/// it would make callers get different answers about what a field means — the
-/// exact case that ADR's own consequences carve out.
-pub(super) const GATEWAY_REVISION: &str = "2026-07-28";
-
-/// The revisions this client can SERVE A HOST at, newest first.
-///
-/// **MEASURED, and it is why this list exists.** Claude Code 2.1.282 over stdio
-/// sends `initialize` with `protocolVersion: "2025-11-25"` and disconnects with
-/// "Server's protocol version is not supported: 2026-07-28" when answered with
-/// the gateway's revision — measured on the Debian test VM, 2026-09-30. The
-/// lifecycle section of every revision that has `initialize` says a server that
-/// supports the requested version MUST answer with that same version, and one
-/// that does not answers with another it supports, SHOULD be its latest.
-///
-/// A revision is listed only when everything this client relays can be
-/// represented in it: `initialize`, `ping`, `tools/list`, `tools/call` and
-/// `notifications/tools/list_changed`. Both legacy revisions define all five, and
-/// their `Result` is an OPEN object (`[key: string]: unknown`), so the fields
-/// 2026-07-28 added to results — `resultType`, `ttlMs`, `cacheScope`, the
-/// namespaced `_meta` keys — are extra fields a legacy host must tolerate rather
-/// than a shape it rejects. What a legacy revision CANNOT hold is translated by
-/// [`shape_for`]. `2025-03-26` is not listed: it has no `structuredContent`, which
-/// every gateway tool result carries, and no host this client serves asks for it.
-pub(super) const HOST_REVISIONS: [&str; 3] = [GATEWAY_REVISION, "2025-11-25", "2025-06-18"];
-
-/// Pick the revision to answer a host's `initialize` with.
-///
-/// The requested one when this client can serve it, otherwise the newest this
-/// client supports — the spec's rule, and the host decides whether it can live
-/// with that. `None` or a non-string is a request that named no version this
-/// client could honour, and gets the same answer as an unknown one.
-pub(super) fn negotiate(requested: Option<&Value>) -> &'static str {
-    requested
-        .and_then(Value::as_str)
-        .and_then(|asked| HOST_REVISIONS.iter().find(|served| **served == asked))
-        .copied()
-        .unwrap_or(HOST_REVISIONS[0])
-}
-
-/// Translate one gateway reply into the shape the negotiated revision defines.
-///
-/// `None` means the body goes to the host unchanged, byte for byte — always so
-/// at [`GATEWAY_REVISION`], and so at a legacy revision whenever there is nothing
-/// it cannot hold.
-///
-/// **TWO TRANSLATIONS, and only what a legacy schema cannot hold.** Extra fields
-/// stay (see [`HOST_REVISIONS`]). What goes:
-///
-/// - an `input_required` result (MRTR, 2026-07-28 only) becomes a JSON-RPC error
-///   naming the revision: a legacy host would read it as a `CallToolResult`
-///   missing its required `content`, and there is no legacy way to ask the host
-///   for the input the gateway wants;
-/// - a `structuredContent` that is not an object is dropped: both legacy schemas
-///   type it as an object, and the spec already has the server repeat it as text
-///   in `content`, so nothing the model needs is lost.
-///
-/// **A TOOL'S `inputSchema` IS NOT REWRITTEN**, although 2026-07-28 loosened it
-/// and both legacy schemas require `type: "object"` at its root. Rewriting a
-/// schema is deciding what a tool accepts, which is the gateway's to state (D75);
-/// the gateway's tools all declare an object root today, and a host that rejects
-/// one that does not is reporting a real disagreement this client cannot settle.
-pub(super) fn shape_for(negotiated: &str, body: &str) -> Option<String> {
-    if negotiated == GATEWAY_REVISION {
-        return None;
-    }
-    let mut parsed: Value = serde_json::from_str(body).ok()?;
-    let result = parsed.get_mut("result")?.as_object_mut()?;
-    if result.get("resultType").and_then(Value::as_str) == Some("input_required") {
-        return Some(
-            json!({
-                "jsonrpc": "2.0",
-                "id": parsed.get("id").cloned().unwrap_or(Value::Null),
-                "error": {
-                    "code": -32603,
-                    "message": format!(
-                        "the yadgar gateway needs more input to finish this request, \
-                         and MCP {negotiated} cannot carry that request to the host"
-                    ),
-                },
-            })
-            .to_string(),
-        );
-    }
-    if result
-        .get("structuredContent")
-        .is_some_and(|structured| !structured.is_object())
-    {
-        result.remove("structuredContent");
-        return Some(parsed.to_string());
-    }
-    None
-}
+use super::revision::{mirrored_capabilities, negotiate, shape_for, GATEWAY_REVISION};
 
 /// The second `_meta` key the gateway requires, beside the version.
 ///
@@ -227,11 +111,12 @@ pub(super) fn terminates(method: &str, id: Option<&Value>, negotiated: Option<&s
 /// this honest.
 ///
 /// The version reported is *negotiated*, from [`negotiate`] — the host's own
-/// when this client can serve it. ADR-0661 answered with the gateway's revision
-/// unconditionally, reasoning that echoing the host's number would claim a
-/// revision this client does not implement; its revisit trigger fired on a real
-/// host (Claude Code 2.1.282 refuses `2026-07-28`), and the claim is now true for
-/// every revision in [`HOST_REVISIONS`] because [`shape_for`] makes it so.
+/// when this client can serve it (ADR-0821, superseding ADR-0661). ADR-0661
+/// answered with the gateway's revision unconditionally, reasoning that echoing
+/// the host's number would claim a revision this client does not implement; its
+/// revisit trigger fired on a real host (Claude Code 2.1.282 refuses
+/// `2026-07-28`), and the claim is now true for every revision in
+/// [`super::revision::HOST_REVISIONS`] because [`shape_for`] makes it so.
 pub(super) fn initialize_reply(id: &Value, negotiated: &str) -> String {
     json!({
         "jsonrpc": "2.0",
@@ -394,10 +279,13 @@ impl<W: Watch> Session<W> {
                 // do so at a different revision.
                 let negotiated = negotiate(parsed.pointer("/params/protocolVersion"));
                 self.negotiated = Some(negotiated);
-                self.capabilities = parsed
-                    .pointer("/params/capabilities")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                self.capabilities = mirrored_capabilities(
+                    negotiated,
+                    parsed
+                        .pointer("/params/capabilities")
+                        .cloned()
+                        .unwrap_or_else(|| json!({})),
+                );
                 // ONCE PER PROCESS. A host re-sending `initialize` is
                 // re-introducing itself, not arriving a second time, and a
                 // second watch would double the gateway's poll traffic per

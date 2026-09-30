@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 
 use crate::config::Config;
+use crate::proxy::revision::*;
 use crate::proxy::session::*;
 use crate::proxy::watch::Catalogue;
 use crate::proxy::Context;
@@ -167,13 +168,17 @@ async fn a_legacy_revision_this_client_can_serve_is_echoed() {
 }
 
 #[tokio::test]
-async fn a_revision_this_client_cannot_serve_is_answered_with_its_newest() {
+async fn a_revision_this_client_cannot_serve_is_answered_with_the_newest_that_has_a_handshake() {
     // Values no implementation plausibly contains: one older than MCP, one from
     // the future, one absent and one of the wrong type. The spec: answer with a
     // version this server supports, SHOULD be its latest — and the host decides.
-    // Asserted RELATIONALLY: the answer is the revision this client speaks
-    // upstream, whatever that is, and never the host's own number.
-    let newest = upstream_revision();
+    //
+    // THE LATEST *THAT HAS `initialize`*. 2026-07-28 removed the handshake, so a
+    // host that sends one speaks 2025-11-25 or older, and answering it with the
+    // upstream revision is exactly the reply Claude Code 2.1.282 refused. The
+    // expected value is the SPEC's newest handshake revision, written here as a
+    // spec fact, and asserted apart from the upstream revision.
+    let upstream = upstream_revision();
     for requested in [
         Some(json!("1999-01-01")),
         Some(json!("2099-01-01")),
@@ -182,9 +187,13 @@ async fn a_revision_this_client_cannot_serve_is_answered_with_its_newest() {
     ] {
         let answered = answered_with(requested.clone()).await;
         assert_eq!(
+            answered, "2025-11-25",
+            "an unservable request ({requested:?}) was not answered with the newest handshake revision"
+        );
+        assert_ne!(
             json!(answered),
-            newest,
-            "an unservable request ({requested:?}) was not answered with the newest revision"
+            upstream,
+            "a host that sent `initialize` was answered with a revision that has none"
         );
         assert_ne!(
             Some(json!(answered)),
@@ -215,16 +224,16 @@ async fn a_repeated_handshake_negotiates_again() {
             json!(requested)
         );
     }
-    // THE SESSION REMEMBERS THE LATEST, not only the reply: re-introduced at a
-    // revision this client cannot serve, the session is at the gateway's own, so
-    // a `ping` is forwarded (and, with nothing listening, is unreachable) rather
+    // THE SESSION REMEMBERS THE LATEST, not only the reply: re-introduced at the
+    // gateway's own revision, the session is no longer legacy, so a `ping` is
+    // forwarded (and, with nothing listening, is unreachable) rather
     // than answered as the legacy session it was a moment ago.
     session
         .message(
             &client,
             &config,
             &context,
-            &initialize("2099-01-01", json!({})),
+            &initialize("2026-07-28", json!({})),
         )
         .await;
     let ping = session
@@ -280,7 +289,7 @@ async fn a_legacy_ping_is_answered_here_and_a_current_one_is_not() {
             &client,
             &config,
             &context,
-            &initialize("2099-01-01", json!({})),
+            &initialize("2026-07-28", json!({})),
         )
         .await;
     let forwarded = current
@@ -315,6 +324,66 @@ fn fields_a_legacy_result_tolerates_are_left_alone() {
     for legacy in &HOST_REVISIONS[1..] {
         assert_eq!(shape_for(legacy, MEASURED_CALL), None, "{legacy}");
         assert_eq!(shape_for(legacy, list), None, "{legacy}");
+    }
+}
+
+#[test]
+fn a_result_type_a_legacy_host_cannot_read_becomes_an_error() {
+    // `ResultType` is an OPEN union in 2026-07-28 (`"complete" | "input_required"
+    // | string`), so the translation is an ALLOWLIST: absent or `complete` pass,
+    // every other value — including one invented after this line — is refused.
+    for body in [
+        r#"{"id":11,"jsonrpc":"2.0","result":{"content":[],"resultType":"sentinel-result-type"}}"#,
+        r#"{"id":11,"jsonrpc":"2.0","result":{"content":[],"resultType":5}}"#,
+    ] {
+        assert_eq!(shape_for(GATEWAY_REVISION, body), None, "{body}");
+        for legacy in &HOST_REVISIONS[1..] {
+            let shaped: Value =
+                serde_json::from_str(&shape_for(legacy, body).expect("rewritten")).unwrap();
+            assert_eq!(shaped["id"], json!(11));
+            assert!(shaped["result"].is_null(), "{shaped}");
+            assert!(shaped["error"]["code"].is_i64(), "{shaped}");
+        }
+    }
+    // Absent is `complete` by the 2026-07-28 rule, and passes untouched.
+    let absent = r#"{"id":12,"jsonrpc":"2.0","result":{"content":[]}}"#;
+    for legacy in &HOST_REVISIONS[1..] {
+        assert_eq!(shape_for(legacy, absent), None);
+    }
+}
+
+#[test]
+fn an_output_schema_without_an_object_root_is_dropped_for_a_legacy_host() {
+    // Both legacy schemas type `outputSchema` with `type: "object"` at its root,
+    // and a host validating the list rejects ALL of it for one tool that is not.
+    // 2026-07-28 allows any root (SEP-2106). The matching `structuredContent` is
+    // already dropped by the rule above, so an `outputSchema` left behind would
+    // also promise a structured result the host never receives.
+    let list = json!({"id": 13, "jsonrpc": "2.0", "result": {"tools": [
+        {"name": "scalar", "inputSchema": {"type": "object"},
+         "outputSchema": {"type": "string", "description": "sentinel-of-the-schema"}},
+        {"name": "untyped", "inputSchema": {"type": "object"},
+         "outputSchema": {"$schema": "https://json-schema.org/draft/2020-12/schema", "sentinel": 1}},
+        {"name": "object", "inputSchema": {"type": "object"},
+         "outputSchema": {"type": "object", "properties": {"sentinelKey": {}}}},
+        {"name": "none", "inputSchema": {"sentinelInput": true}},
+    ]}})
+    .to_string();
+    assert_eq!(shape_for(GATEWAY_REVISION, &list), None);
+    for legacy in &HOST_REVISIONS[1..] {
+        let shaped: Value =
+            serde_json::from_str(&shape_for(legacy, &list).expect("rewritten")).unwrap();
+        let tools = &shaped["result"]["tools"];
+        assert!(tools[0].get("outputSchema").is_none(), "{shaped}");
+        assert!(tools[1].get("outputSchema").is_none(), "{shaped}");
+        assert_eq!(
+            tools[2]["outputSchema"]["properties"]["sentinelKey"],
+            json!({}),
+            "an object-root schema a legacy host accepts was dropped: {shaped}"
+        );
+        // `inputSchema` is the gateway's to state (D75), even when odd.
+        assert_eq!(tools[3]["inputSchema"], json!({"sentinelInput": true}));
+        assert_eq!(tools.as_array().unwrap().len(), 4, "a tool was dropped");
     }
 }
 

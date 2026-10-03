@@ -19,6 +19,7 @@ pub(super) fn label() -> String {
 
 pub(super) fn label_from(var: impl Fn(&str) -> Option<String>, etc_hostname: &Path) -> String {
     hostname_from(var, etc_hostname).unwrap_or_else(|| "unnamed machine".to_string())
+    // ADR-0569-EXCEPTION(ABS): machine label fallback when no hostname source answers.
 }
 
 /// Best effort, in the order most likely to be right on each platform.

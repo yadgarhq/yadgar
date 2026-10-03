@@ -161,10 +161,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 // A default, because an unset RUST_LOG enables nothing at all.
-                //
-                // The marker sits on the READ ITSELF, so `git grep ADR-0569-EXCEPTION`
-                // lands on the line that takes the fallback rather than on prose near it.
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")), // ADR-0569-EXCEPTION(LIB): `tracing_subscriber`'s own convention for an absent RUST_LOG, same disposition as the seven service binaries.
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")), // ADR-0569-EXCEPTION(LIB): tracing_subscriber's own default for an absent RUST_LOG — log level is observability, not behaviour.
         )
         .with_writer(std::io::stderr)
         .init();

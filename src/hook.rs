@@ -73,7 +73,7 @@ pub use guard::pre_tool_guard;
 /// TWO, and only ever from [`pre_tool_guard`]. Claude Code treats 2 as a
 /// blocking error; every other non-zero status is a hook that merely failed, is
 /// reported as a non-blocking error, and lets the tool run.
-pub const REFUSED_EXIT_CODE: i32 = 2;
+pub const REFUSED_EXIT_CODE: i32 = 2; // ADR-0569-EXCEPTION(CB): Claude Code's own contract — exit 2 is the status it treats as a blocking refusal.
 
 /// What a handler decided. Anything but [`Decision::Deny`] lets the tool run.
 #[derive(Debug, PartialEq, Eq)]

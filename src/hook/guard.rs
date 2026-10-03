@@ -94,7 +94,7 @@ pub fn pre_tool_guard(payload: &Value) -> Decision {
 /// Bounded rather than trusted: a payload can nest `sh -c` inside `sh -c` as
 /// deeply as it likes, and a guard that recurses on it hangs the session it
 /// exists to protect. Two is every real case seen; deeper fails open.
-const MAX_NESTING: usize = 2;
+const MAX_NESTING: usize = 2; // ADR-0569-EXCEPTION(CB): bound on recursive -c unwrapping, not a per-install knob.
 
 fn bash(line: &str, depth: usize) -> Decision {
     let commands = shell_commands(line);

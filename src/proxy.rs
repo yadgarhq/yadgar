@@ -63,9 +63,9 @@ use replies::{gateway_message, parse_error, rejected_error, retarget, unreachabl
 /// How long to wait for the gateway before giving up on one request.
 ///
 /// Short, deliberately. The agent is blocked on this: a request that hangs for a
-/// minute is worse for the person than one that fails in five seconds and says
+/// minute is worse for the person than one that fails in thirty seconds and says
 /// why, because the agent can report a failure and carry on.
-const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30); // ADR-0569-EXCEPTION(CC): bounds one gateway round trip; coupled to the gateway's own upstream bound (dial REQUEST_TIMEOUT 30s) plus AUTH_DEADLINE 10s.
 
 /// Methods whose answer is cached so the agent can start while offline.
 ///

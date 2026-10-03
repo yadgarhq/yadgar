@@ -15,7 +15,7 @@ use super::LoginError;
 /// small enough that pointing `--password-stdin` at the wrong stream — a log
 /// file, a binary, an unbounded pipe — cannot make this allocate without
 /// limit.
-pub(super) const PASSWORD_STDIN_LIMIT: usize = 4096;
+pub(super) const PASSWORD_STDIN_LIMIT: usize = 4096; // ADR-0569-EXCEPTION(CB): a payload-size contract on --password-stdin, not a per-install knob.
 
 /// Whether `--password-stdin` may proceed, decided from a caller-supplied
 /// terminal flag rather than a live stdin.

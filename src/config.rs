@@ -154,10 +154,11 @@ fn require_https(gateway: &str, path: &Path) -> Result<(), ConfigError> {
 /// The config directory, overridable so tests never touch a real one.
 pub fn base_dir() -> PathBuf {
     if let Ok(over) = std::env::var("YADGAR_CONFIG_DIR") {
+        // ADR-0569-EXCEPTION(ABS): overridable only so tests avoid a real config directory; absence is the production path.
         return PathBuf::from(over);
     }
     dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| PathBuf::from(".")) // ADR-0569-EXCEPTION(ABS): config dir fallback when the OS names no config directory.
         .join(DIR)
 }
 

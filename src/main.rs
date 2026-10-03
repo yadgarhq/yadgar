@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 // A default, because an unset RUST_LOG enables nothing at all.
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")), // ADR-0569-EXCEPTION(LIB): tracing_subscriber's own default for an absent RUST_LOG — log level is observability, not behaviour.
         )
         .with_writer(std::io::stderr)
         .init();

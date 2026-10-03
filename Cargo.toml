@@ -176,7 +176,7 @@ all = { level = "deny", priority = -1 }
 # `pem` IS REQUIRED to hand the CA certificate to the client as the PEM string
 # an enrolment token carries — `Certificate::pem()` and
 # `KeyPair::serialize_pem()` are both behind it.
-rcgen = { version = "0.13", default-features = false, features = [
+rcgen = { version = "0.14", default-features = false, features = [
   "aws_lc_rs",
   "pem",
 ] }

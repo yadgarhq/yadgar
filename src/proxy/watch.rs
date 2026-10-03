@@ -84,7 +84,10 @@ pub(super) const POLL_INTERVAL_KEY: &str = "io.yadgarhq/toolsPollIntervalSeconds
 /// this client fell back to 600" — which is exactly the state a silent key
 /// mismatch leaves behind. [`Wait`] therefore carries WHO SAID SO beside the
 /// number, and nothing anywhere asserts on 600 alone.
-const UNNAMED_INTERVAL: Duration = Duration::from_secs(600);
+///
+/// The marker sits on the READ ITSELF, so `git grep ADR-0569-EXCEPTION` lands on
+/// the line that fixes the value rather than on prose near it.
+const UNNAMED_INTERVAL: Duration = Duration::from_secs(600); // ADR-0569-EXCEPTION(ABS): client behaviour, not configuration — see the doc comment above.
 
 /// What the host was last shown, and how often to look.
 #[derive(Debug, Default)]

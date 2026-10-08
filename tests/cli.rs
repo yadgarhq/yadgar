@@ -302,6 +302,13 @@ fn generate_ca_and_leaf() -> (
     let ca_key = rcgen::KeyPair::generate().expect("a CA key pair");
     let ca_cert = ca_params.self_signed(&ca_key).expect("a self-signed CA");
 
+    // rcgen 0.14 signs via an `Issuer` rather than a `(&Certificate, &KeyPair)`
+    // pair: it carries the CA's distinguished name, key identifier method and
+    // key usages (taken from `ca_params`, not reparsed from `ca_cert`) plus the
+    // signing key, and `signed_by` below takes this instead of the two
+    // arguments it used to.
+    let ca_issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+
     let leaf_key = rcgen::KeyPair::generate().expect("a leaf key pair");
     // `127.0.0.1` AS THE SUBJECT ALTERNATIVE NAME, not `localhost`: every
     // gateway address in these tests is the loopback address by IP, because
@@ -310,7 +317,7 @@ fn generate_ca_and_leaf() -> (
     let leaf_params =
         rcgen::CertificateParams::new(vec!["127.0.0.1".to_string()]).expect("one SAN");
     let leaf_cert = leaf_params
-        .signed_by(&leaf_key, &ca_cert, &ca_key)
+        .signed_by(&leaf_key, &ca_issuer)
         .expect("a leaf signed by the CA");
 
     let ca_pem = ca_cert.pem();

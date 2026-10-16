@@ -78,6 +78,33 @@ jobs:
         with:
           persist-credentials: false
 
+      # THE TAG IS THE VERSION, so the wheel is told it rather than reading
+      # whatever Cargo.toml happens to hold. `ci-pr.yaml`'s `version` job cuts
+      # the tag and, by design, edits no manifest — the same contract
+      # `ci-release.yaml` keeps by passing the tag to the image build and to
+      # `helm package --version`. Without this, the merge that cut v0.1.1 built
+      # wheels named 0.1.0a8 and PyPI refused them as already existing.
+      #
+      # Cargo.lock moves with Cargo.toml because the build is `--locked`: a
+      # root-package version the lock does not echo fails that flag. `\r?\n`
+      # because the Windows legs check out with CRLF line endings. A tag that is
+      # not plain MAJOR.MINOR.PATCH is refused, not translated: Cargo wants
+      # SemVer and PyPI wants PEP 440, and only the plain form is both.
+      - name: stamp the version from the tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          export VERSION
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH; refusing to guess a version"
+            exit 1
+          fi
+          perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m or die "Cargo.toml: no version line\n"' Cargo.toml
+          perl -0pi -e 's/(\nname = "yaadgaar"\r?\nversion = ")[^"]*"/$1$ENV{VERSION}"/ or die "Cargo.lock: no yaadgaar entry\n"' Cargo.lock
+          echo "Stamped version $VERSION from $GITHUB_REF_NAME" >> "$GITHUB_STEP_SUMMARY"
+
       - name: build the wheel
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
         with:
@@ -127,6 +154,19 @@ jobs:
           find dist -name '*.whl' -printf '- %f\n' >> "$GITHUB_STEP_SUMMARY"
           if [ "$count" -ne 6 ]; then
             echo "::error::expected 6 wheels, found $count"
+            exit 1
+          fi
+
+      # THE LAST CHANCE TO CATCH A WHEEL THAT IS NOT THE TAG, and it is checked
+      # here rather than trusted from the stamp step: a PyPI file is permanent,
+      # so a wrong version uploaded is a version number burned for good.
+      - name: every wheel carries the tag's version
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          wrong=$(find dist -name '*.whl' ! -name "yaadgaar-${version}-*" -printf '%f ')
+          if [ -n "$wrong" ]; then
+            echo "::error::wheels not versioned ${version} (tag ${GITHUB_REF_NAME}): ${wrong}"
             exit 1
           fi
 

@@ -112,7 +112,7 @@ fn tighten(dir: &Path) -> std::io::Result<()> {
 
 /// Create *path* new, 0600, refusing an existing file or a symlink.
 #[cfg(unix)]
-pub(super) fn create_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn create_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .write(true)
@@ -170,7 +170,7 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 /// Stated here so nobody later reads the empty functions as "nothing to do".
 /// `create_new` still refuses an existing file at the temporary path.
 #[cfg(not(unix))]
-fn create_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn create_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)

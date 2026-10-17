@@ -59,21 +59,36 @@ pub fn write_atomic_text(path: &Path, text: &str) -> anyhow::Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("yadgar");
-    let tmp = dir.join(format!(".{name}.yadgar-tmp.{}", std::process::id()));
+    // A NAME UNIQUE TO THIS WRITE, CREATED NEVER OPENED (ledger 1574). The old
+    // `.<name>.yadgar-tmp.<pid>` was predictable and `fs::write` follows a
+    // symlink, so a link planted there received the file's contents and the
+    // rename made the target that link. `config::create_exclusive` refuses
+    // anything already at the path and creates the file 0600.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.yadgar-tmp.{}.{n}", std::process::id()));
 
+    let mut created = false;
     let result = (|| -> std::io::Result<()> {
-        std::fs::write(&tmp, text)?;
-        // Carry the existing file's mode across. A fresh temp file takes
-        // 0666 less the umask (0664 under umask 002, measured in ledger 1547),
-        // and renaming it over an existing settings.json would quietly change
-        // the permissions of a file yadgar does not own.
+        use std::io::Write as _;
+        let mut file = crate::config::create_exclusive(&tmp)?;
+        created = true;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        // Carry the existing file's mode across, so renaming over an existing
+        // settings.json does not quietly change the permissions of a file
+        // yadgar does not own (ledger 1547). A file that did not exist stays
+        // 0600.
         if let Ok(meta) = std::fs::metadata(path) {
             let _ = std::fs::set_permissions(&tmp, meta.permissions());
         }
         std::fs::rename(&tmp, path)
     })();
 
-    if result.is_err() {
+    // Only a file this call created is removed: anything else at the path was
+    // somebody else's, and refusing it is the point.
+    if result.is_err() && created {
         let _ = std::fs::remove_file(&tmp);
     }
     result.map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))
@@ -403,6 +418,28 @@ mod tests {
             .filter(|name| name.contains("yadgar-tmp"))
             .collect();
         assert!(strays.is_empty(), "{strays:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_never_follows_a_symlink_planted_at_the_temporary_path() {
+        // Ledger 1574: the temporary name was predictable
+        // (`.<name>.yadgar-tmp.<pid>`) and `fs::write` follows a symlink, so a
+        // link planted there received settings.json's contents, and the rename
+        // then made settings.json that link.
+        let dir = crate::install::tests::scratch("jsonfile-link");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        let planted = dir.join(format!(".settings.json.yadgar-tmp.{}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let path = dir.join("settings.json");
+
+        write_atomic_text(&path, "ours\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_file(), "settings.json became a link");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ours\n");
     }
 
     #[cfg(unix)]

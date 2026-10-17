@@ -225,6 +225,12 @@ mod tests {
     /// the agent, and that prose has to name tools that exist. So the names
     /// live here, inside `#[cfg(test)]`, and nowhere in the shipped binary.
     ///
+    /// **IT PINS `assets/rules.md` TO A HAND-COPIED LIST, NOT TO THE LIVE
+    /// GATEWAY.** Nothing here can see what a deployment serves; a gateway that
+    /// renames a tool leaves this green. The rules therefore point the agent at
+    /// the `tools/list` descriptions as the authority and name these five as
+    /// the current set.
+    ///
     /// Source: `yadgarhq/gateway` `src/tools.rs` `SERVED` at `2b970b7`, and the
     /// `tools/list` measured on a VM against chart v0.24.17 on 2026-10-17
     /// (ledger 1543), which returned exactly these five. When the gateway

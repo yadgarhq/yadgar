@@ -31,7 +31,7 @@ at the speed of the slowest machine.
 When the gateway is unreachable at spawn, the last tool list is served from cache
 and calls fail with a plain "gateway unreachable" — because an empty list is
 indistinguishable from yadgar not being installed, and the agent would silently
-lose memory and tasks with nothing to report.
+lose its tasks with nothing to report.
 
 ## Commands
 
@@ -46,9 +46,10 @@ lose memory and tasks with nothing to report.
 | `yaadgaar hook <event>` | What `settings.json` invokes. A hook is a dispatch, not a program.                                                                                                  |
 
 `enrol` (first machine) or `login` (any other), then `install`, is the whole
-setup, and `verify` is the one to schedule. The project key is read from the
-working directory at call time (D53) — see [Getting started](#getting-started)
-— so one registration serves every repository.
+setup, and `verify` is the one to schedule. The project key is read once, from
+the directory the session was started in (D53) — see
+[Getting started](#getting-started) — so one registration serves every
+repository.
 
 ### Unattended provisioning
 
@@ -133,7 +134,10 @@ newer release, `pipx install --force yaadgaar==<version>`.
    printf '%s\n' "$NEW_PASSWORD" | yaadgaar enrol --token-file /path/to/token --password-stdin
    ```
 
-   On any further machine, `yaadgaar login` with that username and password.
+   On any further machine, `yaadgaar login` with that username and password —
+   but only against a gateway whose certificate is publicly trusted. `login`
+   has no way to receive a private CA, so for a deployment with one, ask the
+   admin for a new enrolment token for that machine instead.
 
 2. **Install**, once per machine. This registers yadgar with Claude Code at
    user level: the hooks in `~/.claude/settings.json`, the MCP entry in
@@ -145,13 +149,14 @@ newer release, `pipx install --force yaadgaar==<version>`.
    yaadgaar install
    ```
 
-3. **Name the project.** Each call carries a project key, read from the
-   working directory the agent starts in: the first `.yadgar/project-id` file
+3. **Name the project.** Each call carries a project key, read once when the
+   agent starts `yaadgaar serve`, from the directory the session starts in: the first `.yadgar/project-id` file
    found walking up from it, otherwise the git `origin` remote reduced to
    `owner/repo`. With neither, no key is sent and the gateway refuses calls
-   that need one — the refusal names `.yadgar/project-id`. A deployment that
-   enforces project registration also refuses a key it does not know; your
-   operator registers projects.
+   that need one; the client adds a reason to that refusal that names
+   `.yadgar/project-id`. A deployment that enforces project registration also
+   refuses a key it does not know, and this client has no command that
+   registers one.
 
    ```bash
    mkdir -p .yadgar && printf '%s\n' 'owner/repo' > .yadgar/project-id
@@ -165,7 +170,9 @@ newer release, `pipx install --force yaadgaar==<version>`.
    ```
 
 The config lives in `~/.config/yadgar/` (the OS config directory on macOS and
-Windows): `config.json`, owner-only, in an owner-only directory.
+Windows). On Linux and macOS, `config.json` and its directory are owner-only;
+on Windows the client sets no permissions and relies on the profile
+directory's own.
 
 ## Packaging
 

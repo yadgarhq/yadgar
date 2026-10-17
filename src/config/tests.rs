@@ -326,9 +326,10 @@ fn the_tool_cache_path_creates_an_owner_only_directory_too() {
 #[cfg(unix)]
 #[test]
 fn a_directory_not_named_for_yadgar_is_never_chmodded() {
-    // `YADGAR_CONFIG_DIR` can point anywhere, and the no-config-dir fallback
-    // is `.`. Tightening a directory somebody chose — or the current one —
-    // would change permissions on something this client does not own.
+    // `YADGAR_CONFIG_DIR` can point anywhere. An EXISTING directory is
+    // tightened only when its leaf is `yadgar` — which includes the `./yadgar`
+    // fallback and an override ending in `yadgar` — so a directory somebody
+    // chose under any other name keeps the permissions they gave it.
     use std::os::unix::fs::PermissionsExt;
     let dir = tempdir();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -338,6 +339,27 @@ fn a_directory_not_named_for_yadgar_is_never_chmodded() {
     let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755, "got {:o}", mode & 0o777);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_config_directory_is_not_tightened() {
+    // A home-manager-style setup can make `~/.config/yadgar` a symlink into a
+    // directory something else declares. `set_permissions` follows the link
+    // and would chmod that target; the link is left alone instead.
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempdir();
+    let target = parent.join("declared");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = parent.join("yadgar");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    Config::new(&link, "https://gw".into(), "secret".into())
+        .save()
+        .unwrap();
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "got {:o}", mode & 0o777);
+    std::fs::remove_dir_all(&parent).ok();
 }
 
 fn tempdir() -> PathBuf {

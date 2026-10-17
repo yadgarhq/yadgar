@@ -346,7 +346,7 @@ fn claude_code_note(path: Option<&std::ffi::OsStr>) -> Option<String> {
     });
     (!found).then(|| {
         "note: Claude Code (`claude`) was not found on PATH; registering anyway, \
-         and it takes effect once Claude Code is installed"
+         and it takes effect when Claude Code runs"
             .to_string()
     })
 }

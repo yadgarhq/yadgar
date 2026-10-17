@@ -320,12 +320,15 @@ impl Config {
 ///
 /// **A DIRECTORY THIS CREATES is made 0700 whatever it is called**: nobody
 /// else's permissions can be changed by creating it. **AN EXISTING ONE is
-/// tightened only when it is named `yadgar`** — the leaf [`base_dir`] builds.
-/// `YADGAR_CONFIG_DIR` can name any directory, and the fallback when the OS
-/// names no config directory is `.`; chmodding either would change a directory
-/// this client does not own. Only the leaf: the parents are created with the
-/// default mode, because a missing `~/.config` made 0700 here would be a
-/// surprise to every other program that uses it.
+/// tightened only when its leaf is `yadgar`** — the leaf [`base_dir`] builds,
+/// which covers the `./yadgar` fallback for an OS that names no config
+/// directory and a `YADGAR_CONFIG_DIR` that happens to end in `yadgar`. An
+/// override under any other name keeps the permissions somebody gave it.
+/// **A SYMLINK IS NEVER TIGHTENED**: `set_permissions` follows the link, and
+/// its target belongs to whatever declared it (home-manager, for one). Only
+/// the leaf: the parents are created with the default mode, because a missing
+/// `~/.config` made 0700 here would be a surprise to every other program that
+/// uses it.
 #[cfg(unix)]
 fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -341,7 +344,11 @@ fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
         }
     }
     if dir.file_name().is_some_and(|n| n == DIR) {
-        let mode = std::fs::metadata(dir)?.permissions().mode();
+        let meta = std::fs::symlink_metadata(dir)?;
+        if meta.file_type().is_symlink() {
+            return Ok(());
+        }
+        let mode = meta.permissions().mode();
         if mode & 0o077 != 0 {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
         }

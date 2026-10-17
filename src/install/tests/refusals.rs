@@ -27,43 +27,6 @@ use super::super::{hooks, install_with, mcp, uninstall, Layout};
 use super::*;
 
 #[test]
-fn a_symlinked_claude_md_is_refused_before_anything_is_written() {
-    // The failure this prevents, and it is the case on the machine this was
-    // written on: ~/.claude/CLAUDE.md is a nix store symlink. The Python version
-    // replaced it with a regular file, drifting the machine from its declared
-    // configuration. Refusing LATE would be nearly as bad — the hooks and the
-    // MCP entry would already be in place, a half-install nobody asked for.
-    let home = scratch("symlink-refusal");
-    let layout = Layout::new(&home);
-    std::fs::create_dir_all(layout.claude_dir()).unwrap();
-    let target = home.join("nix-store-CLAUDE.md");
-    std::fs::write(&target, "# managed elsewhere\n").unwrap();
-    require_symlink(&target, &layout.claude_md());
-
-    let err = install_with(&home, Path::new(BINARY))
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("symlink"), "{err}");
-
-    assert!(
-        !layout.settings().exists(),
-        "hooks were written despite the refusal"
-    );
-    assert!(
-        !layout.mcp_config().exists(),
-        "the MCP entry was written despite the refusal"
-    );
-    assert!(
-        !layout.rules().exists(),
-        "the rules file was written despite the refusal"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&target).unwrap(),
-        "# managed elsewhere\n"
-    );
-}
-
-#[test]
 fn a_read_only_claude_md_is_refused() {
     let home = scratch("readonly-refusal");
     let layout = Layout::new(&home);
@@ -305,17 +268,17 @@ fn a_symlinked_claude_md_does_not_stop_an_uninstall() {
     // stayed live, and yadgar could not be removed from the machine at all
     // because of a file it was only trying to tidy.
     //
-    // The symlink is still never written through — that is the refusal install
-    // exists for — it is only reported at the END, once everything removable is
-    // already gone, so re-running after taking the line out of whatever
-    // generates that file finishes the job.
+    // The symlink is still never written through. The line left in it is
+    // reported as a notice at the END, once everything removable is already
+    // gone, and the uninstall exits 0: the line belongs to whatever generates
+    // that file, not to a failure of this command.
     let home = scratch("uninstall-symlinked");
     let layout = Layout::new(&home);
     std::fs::create_dir_all(layout.claude_dir()).unwrap();
 
-    // Everything install would have written, written by hand instead — because
-    // on this machine `install` refuses, and the person adds the reference to
-    // whatever generates `CLAUDE.md`, exactly as the refusal tells them to.
+    // Everything install would have written, written by hand instead, with
+    // the reference added to whatever generates `CLAUDE.md`, as install's
+    // notice tells the person to.
     let store = home.join("nix-store-CLAUDE.md");
     let declared = format!("# declared elsewhere\n@{}\n", layout.rules().display());
     std::fs::write(&store, &declared).unwrap();
@@ -332,11 +295,18 @@ fn a_symlinked_claude_md_does_not_stop_an_uninstall() {
     mcp::merge(&mut config, Path::new(BINARY));
     std::fs::write(layout.mcp_config(), config.to_string()).unwrap();
 
-    let outcome = uninstall(&home);
+    let summary = uninstall(&home).expect(
+        "a complete uninstall on a nix machine must exit 0; the line is reported, not refused",
+    );
 
+    let line = format!("@{}", layout.rules().display());
     assert!(
-        outcome.is_err(),
-        "the reference line is still in a file yadgar may not write, and nothing said so"
+        summary
+            .notices
+            .iter()
+            .any(|n| n.lines().any(|l| l.trim() == line)),
+        "the reference line is still in a file yadgar may not write, and nothing said so: {:#?}",
+        summary.notices
     );
     assert_no_managed_hooks(&layout.settings());
     assert_no_mcp_entry(&layout.mcp_config());

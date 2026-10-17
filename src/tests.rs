@@ -51,6 +51,7 @@ fn summary() -> install::Summary {
         mcp_changed: false,
         rules_changed: false,
         claude_md_changed: false,
+        notices: Vec::new(),
     }
 }
 
@@ -171,4 +172,25 @@ fn a_non_executable_file_named_claude_is_not_claude_code() {
     std::fs::write(bin.join("claude"), "not a program").unwrap();
     assert!(claude_code_note(Some(bin.as_os_str())).is_some());
     std::fs::remove_dir_all(&bin).ok();
+}
+
+#[test]
+fn a_notice_is_printed_and_replaces_the_nothing_to_do_line() {
+    // A symlinked `CLAUDE.md` without the reference line: everything else is
+    // already installed, and the one thing left is for the person to do. Saying
+    // "nothing to do" beside that would be false; saying nothing would hide it.
+    let mut s = summary();
+    s.notices
+        .push("add this line: @/home/x/.claude/yadgar-rules.md".to_string());
+    let lines = report_lines("installed", "nothing to do", &s);
+    assert_eq!(
+        lines,
+        vec!["add this line: @/home/x/.claude/yadgar-rules.md".to_string()]
+    );
+
+    s.rules_changed = true;
+    let lines = report_lines("installed", "nothing to do", &s);
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert!(lines[0].contains("the rules file"), "{lines:#?}");
+    assert!(lines[1].contains("add this line"), "{lines:#?}");
 }

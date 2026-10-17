@@ -128,7 +128,7 @@ fn the_rules_file_is_owned_and_referenced_from_the_first_line() {
     assert_eq!(claude_md.lines().count(), 2);
     assert!(std::fs::read_to_string(layout.rules())
         .unwrap()
-        .contains("Yadgar"));
+        .contains("yaadgaar"));
 }
 
 #[test]

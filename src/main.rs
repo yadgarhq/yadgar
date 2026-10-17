@@ -153,20 +153,13 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // STDERR, and this is load-bearing rather than a preference. Under `serve`,
-    // stdout IS the MCP transport: a single log line written there is a frame
-    // the agent cannot parse, and the failure looks like a broken protocol
-    // rather than a misdirected logger.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                // A default, because an unset RUST_LOG enables nothing at all.
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")), // ADR-0569-EXCEPTION(LIB): tracing_subscriber's own default for an absent RUST_LOG — log level is observability, not behaviour.
-        )
-        .with_writer(std::io::stderr)
-        .init();
+    let cli = Cli::parse();
+    // NO COLOUR UNDER `hook`. Its stderr is not read by a person at a terminal:
+    // on exit 2 Claude Code hands it to the model, and ANSI escapes arrive as
+    // noise around the reason (ledger 1570).
+    init_tracing(!matches!(cli.command, Command::Hook { .. }));
 
-    match Cli::parse().command {
+    match cli.command {
         Command::Serve => {
             let config = config::Config::load().inspect_err(|e| {
                 // STDERR, through tracing: stdout is the MCP transport here.
@@ -265,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Command::Hook { name } => dispatch_hook(&name),
+        Command::Hook { name } => hook::process::run(&name),
     }
 }
 
@@ -311,37 +304,20 @@ fn blob_source(
     }
 }
 
-/// Run one hook handler and answer the agent client in the format it honours.
-///
-/// EXITS rather than returns on a refusal, and the asymmetry is the point: a
-/// handler that fails open leaves no trace, and a handler that refuses is the
-/// only thing in this binary that ever exits non-zero.
-fn dispatch_hook(name: &str) -> anyhow::Result<()> {
-    // NOT `home()?`. An error here exits 1, which Claude Code reads as a hook
-    // that merely failed — and lets the tool run. A home that cannot be found
-    // is `None`, and `None` leaves every guard on.
-    let exceptions = dirs::home_dir().map(|h| install::Layout::new(&h).exceptions());
-    match hook::run(name, &hook::read_stdin(), exceptions.as_deref()) {
-        // Silence. An allow that printed would add a line to the transcript on
-        // every single tool call.
-        hook::Decision::Allow => Ok(()),
-        hook::Decision::Deny(reason) => {
-            // The reason goes to STDERR, because that is what Claude Code
-            // feeds the model on exit 2; stdout is not read. Nothing goes to
-            // stdout: one approach per hook.
-            //
-            // FLUSHED BEFORE THE EXIT, and not for tidiness. `process::exit`
-            // runs no destructors, so an unflushed line is simply lost — and a
-            // lost reason still blocks (status 2 is a blocking error on its
-            // own) while the agent sees "No stderr output". The refusal would
-            // work and explain nothing.
-            let mut err = std::io::stderr().lock();
-            let _ = writeln!(err, "yaadgaar {name}: {reason}");
-            let _ = err.flush();
-            drop(err);
-            std::process::exit(hook::REFUSED_EXIT_CODE);
-        }
-    }
+/// Log to STDERR, and this is load-bearing rather than a preference. Under
+/// `serve`, stdout IS the MCP transport: a single log line written there is a
+/// frame the agent cannot parse, and the failure looks like a broken protocol
+/// rather than a misdirected logger.
+fn init_tracing(ansi: bool) {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                // A default, because an unset RUST_LOG enables nothing at all.
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")), // ADR-0569-EXCEPTION(LIB): tracing_subscriber's own default for an absent RUST_LOG — log level is observability, not behaviour.
+        )
+        .with_writer(std::io::stderr)
+        .with_ansi(ansi)
+        .init();
 }
 
 /// Mint this install's id, if there is a config to mint it into.

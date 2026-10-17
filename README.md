@@ -35,18 +35,20 @@ lose memory and tasks with nothing to report.
 
 ## Commands
 
-| Command                 | What it does                                                                                                                                                     |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `yaadgaar login`        | Asks for the gateway address and your credentials once and stores both together. It registers nothing — `install` owns every file the agent client reads.        |
-| `yaadgaar serve`        | The stdio MCP server the agent spawns. Not run by hand.                                                                                                          |
-| `yaadgaar install`      | Registers the hooks, the rules reference and the MCP entry, in the agent client's **user-level** config — once per machine, never per repository.                |
-| `yaadgaar uninstall`    | Removes what `install` added, and nothing else.                                                                                                                  |
-| `yaadgaar verify`       | Reports drift in the installed environment. Scheduled, not remembered — the daemon cannot see `~/.claude/settings.json`, so nothing server-side can ever notice. |
-| `yaadgaar hook <event>` | What `settings.json` invokes. A hook is a dispatch, not a program.                                                                                               |
+| Command                 | What it does                                                                                                                                                        |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `yaadgaar login`        | Asks for the gateway address and your credentials once and stores both together. It registers nothing — `install` owns every file the agent client reads.           |
+| `yaadgaar enrol`        | Redeems an admin's enrolment token: sets your password, prints your username, and stores the gateway address and credential. Replaces `login` on the first machine. |
+| `yaadgaar serve`        | The stdio MCP server the agent spawns. Not run by hand.                                                                                                             |
+| `yaadgaar install`      | Registers the hooks, the rules reference and the MCP entry, in the agent client's **user-level** config — once per machine, never per repository.                   |
+| `yaadgaar uninstall`    | Removes what `install` added, and nothing else.                                                                                                                     |
+| `yaadgaar verify`       | Reports drift in the installed environment. Scheduled, not remembered — the daemon cannot see `~/.claude/settings.json`, so nothing server-side can ever notice.    |
+| `yaadgaar hook <event>` | What `settings.json` invokes. A hook is a dispatch, not a program.                                                                                                  |
 
-`login` then `install` is the whole setup, and `verify` is the one to schedule.
-`project_id` is derived from the working directory at call time (D53), so one
-registration serves every repository and a fresh checkout works immediately.
+`enrol` (first machine) or `login` (any other), then `install`, is the whole
+setup, and `verify` is the one to schedule. The project key is read from the
+working directory at call time (D53) — see [Getting started](#getting-started)
+— so one registration serves every repository.
 
 ### Unattended provisioning
 
@@ -107,57 +109,65 @@ given.
 ## Installing
 
 ```bash
-pip install --no-cache-dir yaadgaar
-yaadgaar login
-yaadgaar install
+pipx install yaadgaar
 ```
 
-To upgrade, the same line with `--upgrade`:
+Measured with `pipx install yaadgaar==0.1.2` on a fresh Debian VM. `pip install
+yaadgaar` installs the same wheel, which holds only the binary. To move to a
+newer release, `pipx install --force yaadgaar==<version>`.
 
-```bash
-pip install --no-cache-dir --upgrade yaadgaar
-```
+## Getting started
 
-**`--no-cache-dir` is not optional while the only releases are prereleases, and
-it is the whole of the problem.** pip caches the simple-index page it fetched for
-a project. A machine that has resolved `yaadgaar` once keeps serving itself that
-page and cannot see anything published since — so an upgrade reports success
-against a version that is already stale, rather than failing.
+1. **Enrol**, on the first machine, with the enrolment token an admin gave you.
+   `enrol` sets your password, prints your username, and stores the gateway
+   address, the credential and, on a private deployment, the CA to trust — the
+   same config `login` writes. No `login` is needed afterwards.
 
-Measured on a fresh Debian VM with `0.1.0a2` already on PyPI. The VM's own `curl`
-of the simple index showed all six `a2` wheels at the same moment pip insisted
-only `a1` existed:
+   ```bash
+   yaadgaar enrol --token-file /path/to/token
+   ```
 
-| Command                                          | What it did                                               |
-| ------------------------------------------------ | --------------------------------------------------------- |
-| `pipx upgrade yaadgaar`                          | "already at latest version 0.1.0a1"                       |
-| `pipx install --force --pip-args=--pre yaadgaar` | installed `a1` again                                      |
-| `pipx install --force yaadgaar==0.1.0a2`         | "Could not find a version that satisfies the requirement" |
-| `pip install --no-cache-dir yaadgaar==0.1.0a2`   | worked, first try                                         |
+   Unattended, with the new password on stdin (see [Unattended provisioning](#unattended-provisioning)):
 
-Every row is the same cache. The third one is worth reading twice: an EXACT
-version that PyPI was serving at that moment came back as no such version, which
-is what a stale index page looks like from the inside.
+   ```bash
+   printf '%s\n' "$NEW_PASSWORD" | yaadgaar enrol --token-file /path/to/token --password-stdin
+   ```
 
-**No `--pre` and no version pin are needed**, and this is measured rather than
-reasoned — a bare `pip download --no-deps --no-cache-dir yaadgaar` against a
-fresh index fetches `0.1.0a2`, and `pip install --no-cache-dir --upgrade
---dry-run yaadgaar` resolves to `Would install yaadgaar-0.1.0a2`. PEP 440 falls
-back to prereleases when a requirement matches nothing else, so pinning would
-only fix this README to a version that goes stale on the next release. `--pre`
-widens a requirement and does not refetch anything, which is why it changed
-nothing on the VM.
+   On any further machine, `yaadgaar login` with that username and password.
 
-One command does NOT take that fallback: `pip index versions yaadgaar` reports
-"No matching distribution found" while `pip index versions --pre yaadgaar` lists
-both. It is a diagnostic, not an install, and it is the one place `--pre` earns
-its keep here.
+2. **Install**, once per machine. This registers yadgar with Claude Code at
+   user level: the hooks in `~/.claude/settings.json`, the MCP entry in
+   `~/.claude.json`, and the rules file `~/.claude/yadgar-rules.md`,
+   referenced from the first line of `~/.claude/CLAUDE.md`. If `claude` is not
+   on PATH it says so and registers anyway.
 
-Once a stable release exists, all of this goes away and `pipx install yaadgaar` /
-`pipx upgrade yaadgaar` are the lines. Until then pipx's own upgrade path is the
-one measured failing above; the pipx equivalent,
-`pipx install --force --pip-args="--no-cache-dir" yaadgaar`, is **untested** — the
-`pip` lines are the ones that were actually run.
+   ```bash
+   yaadgaar install
+   ```
+
+3. **Name the project.** Each call carries a project key, read from the
+   working directory the agent starts in: the first `.yadgar/project-id` file
+   found walking up from it, otherwise the git `origin` remote reduced to
+   `owner/repo`. With neither, no key is sent and the gateway refuses calls
+   that need one — the refusal names `.yadgar/project-id`. A deployment that
+   enforces project registration also refuses a key it does not know; your
+   operator registers projects.
+
+   ```bash
+   mkdir -p .yadgar && printf '%s\n' 'owner/repo' > .yadgar/project-id
+   ```
+
+4. **Verify**, now and on a schedule. It exits non-zero when the installed
+   environment has drifted from what `install` left.
+
+   ```bash
+   yaadgaar verify
+   ```
+
+The config lives in `~/.config/yadgar/` (the OS config directory on macOS and
+Windows): `config.json`, owner-only, in an owner-only directory.
+
+## Packaging
 
 Rust, shipped to PyPI as wheels via maturin. The language follows the rest of the
 system; the channel follows the people already using it, and a `pip`-installable command

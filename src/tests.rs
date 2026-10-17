@@ -113,3 +113,62 @@ fn a_run_that_changed_everything_names_every_file_by_path() {
         "{lines:#?}"
     );
 }
+
+#[cfg(unix)]
+fn scratch_path_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "yadgar-path-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[cfg(unix)]
+#[test]
+fn install_says_so_when_claude_code_is_not_on_path() {
+    // Ledger 1547: on a machine with no Claude Code, `install` created
+    // `~/.claude` and registered into it without a word, so the person had
+    // no hint that nothing would ever read those files. One line, not a
+    // failure: installing before Claude Code is a legitimate order.
+    let empty = scratch_path_dir("empty");
+    let note = claude_code_note(Some(empty.as_os_str()));
+    let note = note.expect("an empty PATH has no Claude Code on it");
+    assert!(note.contains("claude"), "{note}");
+    assert!(note.contains("PATH"), "{note}");
+    assert!(
+        claude_code_note(None).is_some(),
+        "an unset PATH has nothing on it"
+    );
+    std::fs::remove_dir_all(&empty).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn install_says_nothing_extra_when_claude_code_is_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let empty = scratch_path_dir("other");
+    let bin = scratch_path_dir("bin");
+    let claude = bin.join("claude");
+    std::fs::write(&claude, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A PATH of several entries, the match in the LAST one.
+    let path = std::env::join_paths([&empty, &bin]).unwrap();
+    assert_eq!(claude_code_note(Some(&path)), None);
+    std::fs::remove_dir_all(&empty).ok();
+    std::fs::remove_dir_all(&bin).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_non_executable_file_named_claude_is_not_claude_code() {
+    // What a shell would refuse to run is not on PATH in any useful sense.
+    let bin = scratch_path_dir("noexec");
+    std::fs::write(bin.join("claude"), "not a program").unwrap();
+    assert!(claude_code_note(Some(bin.as_os_str())).is_some());
+    std::fs::remove_dir_all(&bin).ok();
+}

@@ -63,9 +63,10 @@ pub fn write_atomic_text(path: &Path, text: &str) -> anyhow::Result<()> {
 
     let result = (|| -> std::io::Result<()> {
         std::fs::write(&tmp, text)?;
-        // Carry the existing file's mode across. A fresh temp file is 0600, and
-        // renaming it over a 0644 settings.json would quietly change the
-        // permissions of a file yadgar does not own.
+        // Carry the existing file's mode across. A fresh temp file takes
+        // 0666 less the umask (0664 under umask 002, measured in ledger 1547),
+        // and renaming it over an existing settings.json would quietly change
+        // the permissions of a file yadgar does not own.
         if let Ok(meta) = std::fs::metadata(path) {
             let _ = std::fs::set_permissions(&tmp, meta.permissions());
         }

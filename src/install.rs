@@ -265,7 +265,10 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
         match rules::has_reference(&layout.claude_md(), &reference) {
             Ok(true) => notices.push(rules::undeclare_notice(&layout.claude_md(), &reference)),
             Ok(false) => {}
-            Err(_) => notices.push(rules::unreadable_notice(&layout.claude_md(), &reference)),
+            Err(_) => notices.push(rules::unreadable_undeclare_notice(
+                &layout.claude_md(),
+                &reference,
+            )),
         }
         false
     } else {

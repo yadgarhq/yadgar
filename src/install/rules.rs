@@ -94,6 +94,21 @@ pub fn unreadable_notice(claude_md: &Path, line: &str) -> String {
     )
 }
 
+/// The notice UNINSTALL gives for a symlinked `CLAUDE.md` it cannot read.
+///
+/// Not [`unreadable_notice`]: after an uninstall the rules file is deleted, so
+/// the line has to come OUT of whatever generates `CLAUDE.md`. "Check that it
+/// contains the line" would tell somebody to keep an import of a missing file.
+pub fn unreadable_undeclare_notice(claude_md: &Path, line: &str) -> String {
+    format!(
+        "{} is a symlink, and yaadgaar did not edit it: could not read {}; \
+         check that it no longer contains {line}: the rules file it imports was \
+         deleted",
+        claude_md.display(),
+        link_target(claude_md),
+    )
+}
+
 /// The notice uninstall gives when the line sits in a symlinked `CLAUDE.md`.
 pub fn undeclare_notice(claude_md: &Path, line: &str) -> String {
     format!(

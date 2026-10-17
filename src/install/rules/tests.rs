@@ -282,11 +282,20 @@ fn has_reference_matches_the_exact_line_only() {
 fn the_rules_say_to_ask_once_when_no_ledger_is_named_for_deferred_work() {
     // Ledger 1565: both ledgers tell the model to file deferred work, and these
     // rules say "not both" — so with both present and nothing naming one, the
-    // model had no rule to pick by.
+    // model had no rule to pick by. "or a file it imports": the choice usually
+    // lives in an `@` import (AGENTS.md), not in CLAUDE.md itself.
+    let body = RULES_BODY.replace('\n', " ");
     assert!(
-        RULES_BODY.replace('\n', " ").contains(
-            "If both ledgers are present and CLAUDE.md does not say which to use for deferred work, ask the person once."
+        body.contains(
+            "If both ledgers are present and CLAUDE.md, or a file it imports, does not say which to use for deferred work, ask the person once."
         ),
         "no ask-once rule for deferred work"
+    );
+    // An unattended run has nobody to ask.
+    assert!(
+        body.contains(
+            "If you cannot ask (unattended run), follow whichever loaded instructions name a ledger."
+        ),
+        "no fallback for an unattended run"
     );
 }

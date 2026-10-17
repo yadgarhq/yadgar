@@ -390,6 +390,9 @@ fn mentions_a_digger_command(text: &str) -> bool {
 const WRITERS: &[&str] = &[
     "tee", "sed", "cp", "mv", "rm", "dd", "truncate", "install", "ln", "chmod", "chown", "shred",
     "patch", "sponge", "python", "python3", "perl", "ruby", "node", "jq",
+    // Not writers of bytes, but of a FIFO or device node in the file's place:
+    // a reader that blocked on one would hang until the hook timed out.
+    "mkfifo", "mknod",
 ];
 
 fn writes_the_exceptions_file(program: &str, args: &[String], writes_to: &[String]) -> bool {

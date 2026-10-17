@@ -32,6 +32,7 @@
 //! what switches one off. The hook still never crashes; it logs a notice to
 //! stderr and refuses or allows exactly as it would with no file at all.
 
+use std::io::Read as _;
 use std::path::Path;
 
 use serde_json::Value;
@@ -41,6 +42,12 @@ pub const EXCEPTIONS_FILE: &str = "yadgar-hook-exceptions.json";
 
 /// The key holding the list of switched-off guard ids.
 const DISABLED_KEY: &str = "disabled_guards";
+
+/// The most of the file that is ever read. A real one is a few hundred bytes.
+///
+/// A BOUND, not a knob: without it a symlink to `/dev/zero` is a read that
+/// never ends. Anything longer is malformed, and malformed means every guard on.
+const MAX_BYTES: u64 = 64 * 1024; // ADR-0569-EXCEPTION(CB): bound on a read of an untrusted path, not a per-install knob.
 
 /// Which refusals are ENFORCED. `true` means the guard is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +115,7 @@ impl Policy {
             );
             return Self::ALL_ON;
         };
-        let text = match std::fs::read_to_string(path) {
+        let text = match read_bounded(path) {
             Ok(text) => text,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 tracing::debug!("{} is absent; every guard stays on", path.display());
@@ -127,6 +134,41 @@ impl Policy {
             Self::ALL_ON
         })
     }
+}
+
+/// The file's text, if it is a regular file of at most [`MAX_BYTES`].
+///
+/// **The checks are on the OPEN FILE, not the path.** Opened non-blocking, so a
+/// FIFO with no writer does not block the open; then `fstat` on that same
+/// handle, so what is judged is what would be read, with no gap between a path
+/// check and the open. A FIFO, a device or a socket is refused rather than
+/// read: a read of one can block or never end, and Claude Code treats a hook it
+/// timed out as no decision at all — every guarded call would then run.
+/// `O_NONBLOCK` has no effect on a regular file's reads.
+fn read_bounded(path: &Path) -> std::io::Result<String> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut text = String::new();
+    file.take(MAX_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("longer than {MAX_BYTES} bytes"),
+        ));
+    }
+    Ok(text)
 }
 
 #[cfg(test)]

@@ -123,6 +123,79 @@ fn a_readable_file_is_honoured_and_never_written() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `Policy::load` on *path*, or `None` if it did not return within 5 seconds.
+///
+/// A hang IS the defect: Claude Code times a hook out and a timed-out hook is
+/// not a deny, so every guarded call would then run unguarded.
+fn load_within_timeout(path: std::path::PathBuf) -> Option<Policy> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(Policy::load(Some(&path)));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_in_place_of_the_file_returns_at_once_with_every_guard_on() {
+    let dir = scratch("fifo");
+    let path = dir.join(EXCEPTIONS_FILE);
+    let made = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo failed");
+    assert_eq!(
+        load_within_timeout(path),
+        Some(Policy::ALL_ON),
+        "the guard hung on a FIFO, or switched a guard off"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_an_endless_device_returns_at_once_with_every_guard_on() {
+    let dir = scratch("dev-zero");
+    let path = dir.join(EXCEPTIONS_FILE);
+    std::os::unix::fs::symlink("/dev/zero", &path).unwrap();
+    assert_eq!(
+        load_within_timeout(path),
+        Some(Policy::ALL_ON),
+        "the guard hung on /dev/zero, or switched a guard off"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_file_over_the_size_cap_is_malformed_even_when_it_would_parse() {
+    // Valid JSON disabling a guard, padded past 64 KiB with whitespace. Over
+    // the cap is malformed, so the padding cannot buy a switched-off guard.
+    let dir = scratch("oversize");
+    let path = dir.join(EXCEPTIONS_FILE);
+    let body = format!(
+        "{}{{\"disabled_guards\":[\"git_commit_flags\"]}}",
+        " ".repeat(64 * 1024)
+    );
+    std::fs::write(&path, body).unwrap();
+    assert_eq!(load_within_timeout(path.clone()), Some(Policy::ALL_ON));
+
+    // And one just under the cap is still read.
+    let fits = format!(
+        "{}{{\"disabled_guards\":[\"git_commit_flags\"]}}",
+        " ".repeat(1024)
+    );
+    std::fs::write(&path, fits).unwrap();
+    assert_eq!(
+        load_within_timeout(path),
+        Some(Policy {
+            git_commit_flags: false,
+            ..Policy::ALL_ON
+        })
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn the_file_name_is_the_one_the_engine_reads() {
     assert_eq!(EXCEPTIONS_FILE, "yadgar-hook-exceptions.json");

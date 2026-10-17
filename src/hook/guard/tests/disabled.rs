@@ -34,6 +34,9 @@ const HOOK_BYPASS_CALLS: &[&str] = &[
 const TAMPER_CALLS: &[&str] = &[
     "tee ~/.claude/yadgar-hook-exceptions.json",
     "echo '{}' > ~/.claude/yadgar-hook-exceptions.json",
+    // A FIFO or device node there would hang an unguarded reader; see policy.rs.
+    "mkfifo ~/.claude/yadgar-hook-exceptions.json",
+    "mknod ~/.claude/yadgar-hook-exceptions.json p",
 ];
 
 #[test]

@@ -231,8 +231,15 @@ fn strip_managed(hooks: &mut serde_json::Map<String, Value>) -> usize {
         array.retain_mut(|entry| {
             let gone = strip_entry(entry);
             removed += gone;
-            // Keep the entry unless we took the last thing in it.
-            gone == 0 || !entry_commands(entry).is_empty()
+            // Keep the entry unless we took the last thing in it. Counted on
+            // the RAW `hooks` array, not on `entry_commands`: an http, prompt
+            // or agent hook has no `command`, and counting commands called an
+            // entry holding one of those empty and deleted it.
+            gone == 0
+                || entry
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|hooks| !hooks.is_empty())
         });
         if array.is_empty() && before > 0 {
             emptied.push(event.clone());

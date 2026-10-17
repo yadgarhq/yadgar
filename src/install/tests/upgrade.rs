@@ -233,6 +233,40 @@ fn a_foreign_yadgar_binary_using_a_retired_handler_name_survives() {
 }
 
 #[test]
+fn a_foreign_non_command_hook_sharing_an_entry_with_ours_survives() {
+    // An http/prompt/agent hook has no `command` key. Judging "is the entry
+    // empty now?" by commands alone called this entry empty once ours was
+    // stripped, and deleted the foreign http hook with it.
+    let home = scratch("non-command-neighbour");
+    let http = json!({ "type": "http", "url": "http://127.0.0.1:9/hook" });
+    seed(
+        &home,
+        json!({ "hooks": { "Stop": [
+            { "matcher": "", "hooks": [
+                http.clone(),
+                { "type": "command", "command": format!("{OLD_BINARY} hook stop-checkpoint") }
+            ]}
+        ]}}),
+    );
+
+    install_with(&home, Path::new(BINARY)).unwrap();
+    let settings = read_json(&Layout::new(&home).settings());
+    assert_eq!(
+        settings["hooks"]["Stop"],
+        json!([{ "matcher": "", "hooks": [http.clone()] }]),
+        "{settings:#?}"
+    );
+
+    uninstall(&home).unwrap();
+    let settings = read_json(&Layout::new(&home).settings());
+    assert_eq!(
+        settings["hooks"]["Stop"],
+        json!([{ "matcher": "", "hooks": [http] }]),
+        "{settings:#?}"
+    );
+}
+
+#[test]
 fn the_managed_list_is_the_guard_alone() {
     let names: Vec<_> = MANAGED_HOOKS.iter().map(|h| (h.event, h.name)).collect();
     assert_eq!(names, vec![("PreToolUse", "pre-tool-guard")]);

@@ -232,3 +232,34 @@ fn a_first_login_on_a_machine_with_no_config_carries_nothing() {
     assert_eq!(fresh.username(), Some("someone"));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_ca_file_is_used_on_a_machine_that_never_enrolled_and_wins_over_a_stored_one() {
+    // Ledger 1549: `login` on a machine with no earlier enrolment had no CA
+    // source at all, so it could not reach a private deployment.
+    let dir = crate::testserver::scratch_dir("login-ca-file");
+    let given = "-----BEGIN CERTIFICATE-----\ngiven\n-----END CERTIFICATE-----\n";
+    let gw = "https://deployment-a/";
+    assert_eq!(
+        choose_ca(Some(given.into()), None, gw).as_deref(),
+        Some(given)
+    );
+
+    // A file named on THIS command is a fresher statement than a stored CA.
+    let stored = Config::new(&dir, gw.into(), "tok".into())
+        .with_ca_pem(Some("-----BEGIN CERTIFICATE-----\nold\n".into()));
+    assert_eq!(
+        choose_ca(Some(given.into()), Some(&stored), gw).as_deref(),
+        Some(given)
+    );
+    // Without one, the stored-CA rule is unchanged.
+    assert_eq!(
+        choose_ca(None, Some(&stored), gw),
+        ca_for(Some(&stored), gw)
+    );
+    assert_eq!(
+        choose_ca(None, Some(&stored), "https://deployment-b/"),
+        None
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

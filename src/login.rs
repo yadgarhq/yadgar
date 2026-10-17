@@ -149,8 +149,9 @@ pub enum LoginError {
 /// publicly-trusted deployment.
 ///
 /// **THE GATEWAY MUST MATCH, and that is the same rule `enrol` gets by carrying
-/// nothing.** `login` has no CA source, so for the deployment already stored the
-/// machine's anchor is the only candidate and reusing it is right. Point `login`
+/// nothing.** Without `--ca-file`, `login` has no CA source of its own, so for
+/// the deployment already stored the machine's anchor is the only candidate and
+/// reusing it is right. Point `login`
 /// at a DIFFERENT address, though, and reusing it hands private deployment A's
 /// issuer authority over connections to B — the identical trust transfer that
 /// made the fallback wrong on the enrol path, arriving through the one caller
@@ -163,11 +164,16 @@ pub enum LoginError {
 /// concealed terminal prompt. All three together are what let `login` run
 /// with no prompt at all — a machine with no terminal to type into cannot
 /// otherwise be logged in.
+///
+/// **`ca_file` IS THE CA FOR A MACHINE THAT NEVER ENROLLED (ledger 1549).**
+/// Without it such a machine has no anchor for a private deployment at all;
+/// see [`choose_ca`].
 pub async fn login(
     config_dir: &Path,
     gateway: Option<String>,
     username: Option<String>,
     password_stdin: bool,
+    ca_file: Option<&Path>,
 ) -> Result<Config, LoginError> {
     // CHECKED FIRST, before a single prompt. A caller who asked for a
     // password on stdin and handed it a real terminal instead should not
@@ -176,6 +182,10 @@ pub async fn login(
     if password_stdin {
         input::ensure_stdin_pipeable()?;
     }
+
+    // Read and checked before a single prompt, for the same reason: a CA file
+    // that will be refused should not first cost a password.
+    let ca_file = ca_file.map(crate::trust::read_ca_file).transpose()?;
 
     let stored = Config::load_from(config_dir).ok();
 
@@ -203,7 +213,7 @@ pub async fn login(
 
     // READ AFTER THE ADDRESS IS KNOWN, because whether it may be used depends on
     // the address.
-    let ca_pem = ca_for(stored.as_ref(), &gateway);
+    let ca_pem = choose_ca(ca_file, stored.as_ref(), &gateway);
     let client = crate::trust::client(ca_pem.as_deref(), None).map_err(LoginError::Trust)?;
     let token = exchange(&client, &gateway, &username, &password).await?;
 
@@ -217,6 +227,15 @@ pub async fn login(
     );
     config.save()?;
     Ok(config)
+}
+
+/// The CA `--ca-file` named, else [`ca_for`]'s stored one (ledger 1549).
+///
+/// The file WINS: it is what the person said on this very command, and on a
+/// machine that never enrolled it is the only CA there is. It is then stored
+/// like an enrolment's CA, so `serve` trusts the same anchor `login` did.
+fn choose_ca(ca_file: Option<String>, previous: Option<&Config>, gateway: &str) -> Option<String> {
+    ca_file.or_else(|| ca_for(previous, gateway))
 }
 
 /// The stored CA, but ONLY when it belongs to the address being logged into.
@@ -253,8 +272,9 @@ fn ca_for(previous: Option<&Config>, gateway: &str) -> Option<String> {
 /// function used to fall back to the previous config's `ca_pem` whenever the new
 /// one was `None`, which is right for `login` and is a TRUST BUG on `enrol`:
 ///
-/// * On the `login` path there is no CA source at all, so `None` means "I was
-///   not told" and the machine's existing anchor is the only candidate.
+/// * On the `login` path, without `--ca-file`, there is no CA source, so `None`
+///   means "I was not told" and the machine's existing anchor is the only
+///   candidate.
 /// * On the `enrol` path `None` is a POSITIVE STATEMENT the contract defines —
 ///   "this deployment uses a publicly-trusted certificate, use system trust".
 ///   Carrying a previous anchor over it means that enrolling into deployment B,

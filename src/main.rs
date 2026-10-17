@@ -71,6 +71,16 @@ enum Command {
         /// flag would echo it in plain sight instead.
         #[arg(long = "password-stdin", requires_all = ["gateway", "username"])]
         password_stdin: bool,
+
+        /// Trust this PEM CA for the gateway, in addition to the system roots,
+        /// and store it with the credential as an enrolment's CA is stored
+        /// (ledger 1549).
+        ///
+        /// For a private deployment on a machine that never enrolled: without
+        /// it there is no anchor to verify the gateway against. It wins over a
+        /// CA stored for the same gateway.
+        #[arg(long = "ca-file")]
+        ca_file: Option<std::path::PathBuf>,
     },
 
     /// Redeem the enrolment token an admin gave you: set a password, learn your
@@ -212,9 +222,11 @@ async fn main() -> anyhow::Result<()> {
             gateway,
             username,
             password_stdin,
+            ca_file,
         } => {
             let dir = config::base_dir();
-            let config = login::login(&dir, gateway, username, password_stdin).await?;
+            let config =
+                login::login(&dir, gateway, username, password_stdin, ca_file.as_deref()).await?;
             println!(
                 "logged in to {} — the credential is stored in {}",
                 config.gateway_url(),

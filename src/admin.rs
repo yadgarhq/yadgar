@@ -46,6 +46,13 @@ pub enum AdminCommand {
         /// Print the token alone on stdout, for a pipe.
         #[arg(long)]
         stdout: bool,
+
+        /// Revoke every credential the user holds when they redeem this
+        /// token: a password reset after a lost or leaked machine (ledger
+        /// 1569). Off by default, because it also logs out the user's other
+        /// machines. The bootstrap token may not ask for it.
+        #[arg(long = "revoke-existing")]
+        revoke_existing: bool,
     },
 }
 
@@ -68,6 +75,14 @@ pub enum AdminError {
     Rejected(reqwest::StatusCode, String),
     #[error("the gateway's answer was not an enrolment: {0}")]
     Malformed(String),
+    /// The gateway echoed a different `revoke_existing_credentials` than was
+    /// sent (ledger 1579). The enrolment exists, but it does not do what was
+    /// asked, so it is never reported as a success.
+    #[error(
+        "the gateway issued the enrolment with revoke_existing_credentials={echoed}, \
+         but {sent} was asked for; do not hand this token over"
+    )]
+    EchoMismatch { sent: bool, echoed: bool },
     #[error("--user-id must not be empty")]
     EmptyUserId,
     #[error("cannot write the token to {0}: {1}")]
@@ -80,6 +95,10 @@ pub struct Issued {
     /// The base64 blob the person redeems. A secret: shown once.
     pub token: String,
     pub enrolment_id: String,
+    /// The gateway's echo of the revocation demand (ledger 1579). Absent from
+    /// a gateway older than the echo.
+    #[serde(default)]
+    pub revoke_existing_credentials: Option<bool>,
 }
 
 /// Run one `admin` subcommand against the logged-in gateway.
@@ -89,6 +108,7 @@ pub async fn run(command: AdminCommand) -> Result<(), AdminError> {
             user_id,
             out,
             stdout,
+            revoke_existing,
         } => {
             let user_id = require_user_id(&user_id)?;
             let config = Config::load()?;
@@ -99,8 +119,13 @@ pub async fn run(command: AdminCommand) -> Result<(), AdminError> {
                 config.token(),
                 config.instance(),
                 &user_id,
+                revoke_existing,
             )
             .await?;
+            if let Some(warning) = check_echo(revoke_existing, issued.revoke_existing_credentials)?
+            {
+                eprintln!("warning: {warning}");
+            }
             // The receipt goes to STDERR in both cases, so `--stdout` leaves
             // the token alone on stdout for whatever reads the pipe.
             match out {
@@ -148,6 +173,7 @@ async fn request(
     bearer: &str,
     instance: Option<&str>,
     user_id: &str,
+    revoke_existing: bool,
 ) -> Result<Issued, AdminError> {
     // NORMALISED, for `login::normalise`'s reason: `config.json` can be edited
     // by hand, and `https://gw` + `admin/...` is a request to host `gwadmin`.
@@ -155,7 +181,10 @@ async fn request(
     let mut builder = client
         .post(&url)
         .bearer_auth(bearer)
-        .json(&serde_json::json!({ "user_id": user_id }));
+        .json(&serde_json::json!({
+            "user_id": user_id,
+            "revoke_existing_credentials": revoke_existing,
+        }));
     if let Some(instance) = instance {
         builder = builder.header("x-yadgar-instance", instance);
     }
@@ -172,6 +201,25 @@ async fn request(
         reqwest::StatusCode::UNAUTHORIZED => Err(AdminError::Refused),
         reqwest::StatusCode::FORBIDDEN => Err(AdminError::NotAdmin),
         _ => Err(AdminError::Rejected(status, gateway_error(&body))),
+    }
+}
+
+/// Compare the revocation demand *sent* with the gateway's *echoed* one.
+///
+/// A different echo is an error. No echo at all is a gateway older than ledger
+/// 1579: when revocation was asked for, that gateway may also predate the
+/// field and have ignored it, so the old credentials may SURVIVE. That earns a
+/// warning, never silence. Not an error: the enrolment itself was issued.
+fn check_echo(sent: bool, echoed: Option<bool>) -> Result<Option<String>, AdminError> {
+    match echoed {
+        Some(echoed) if echoed != sent => Err(AdminError::EchoMismatch { sent, echoed }),
+        Some(_) => Ok(None),
+        None if sent => Ok(Some(
+            "the gateway did not confirm revoke_existing_credentials; an older gateway \
+             ignores it, and the user's existing credentials would then keep working"
+                .to_string(),
+        )),
+        None => Ok(None),
     }
 }
 

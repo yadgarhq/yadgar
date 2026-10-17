@@ -16,7 +16,15 @@ async fn ask_at(
     let (addr, served) = crate::testserver::answer_once(status, body).await;
     let client = crate::trust::client(None, None).unwrap();
     let gateway = format!("http://{addr}{suffix}");
-    let result = request(&client, &gateway, "adm1n-t0ken", Some("inst-1"), "u-42").await;
+    let result = request(
+        &client,
+        &gateway,
+        "adm1n-t0ken",
+        Some("inst-1"),
+        "u-42",
+        true,
+    )
+    .await;
     // BOUNDED: a request that never reached the server leaves it waiting for a
     // connection, and the test must fail rather than hang.
     let sent = tokio::time::timeout(std::time::Duration::from_secs(5), served)
@@ -64,7 +72,11 @@ async fn the_request_names_the_user_and_carries_the_callers_own_credential() {
     assert!(lower.contains("x-yadgar-instance: inst-1"), "{sent}");
     let body = &sent[sent.find("\r\n\r\n").unwrap() + 4..];
     let body: serde_json::Value = serde_json::from_str(body).unwrap();
-    assert_eq!(body, serde_json::json!({"user_id": "u-42"}));
+    // The revocation demand travels as a JSON bool (ledger 1569).
+    assert_eq!(
+        body,
+        serde_json::json!({"user_id": "u-42", "revoke_existing_credentials": true})
+    );
 }
 
 #[tokio::test]
@@ -126,4 +138,67 @@ fn an_empty_user_id_is_refused_before_anything_is_sent() {
         Err(AdminError::EmptyUserId)
     ));
     assert_eq!(require_user_id(" u-42 ").unwrap(), "u-42");
+}
+
+#[test]
+fn an_echo_that_contradicts_the_revocation_asked_for_is_an_error() {
+    // Ledger 1579: the gateway echoes `revoke_existing_credentials`. An echo
+    // that differs means the old credentials may still work, or were revoked
+    // when nobody asked: either way the person must not be told it went well.
+    assert!(matches!(
+        check_echo(true, Some(false)),
+        Err(AdminError::EchoMismatch {
+            sent: true,
+            echoed: false
+        })
+    ));
+    assert!(matches!(
+        check_echo(false, Some(true)),
+        Err(AdminError::EchoMismatch {
+            sent: false,
+            echoed: true
+        })
+    ));
+    assert_eq!(check_echo(true, Some(true)).unwrap(), None);
+    assert_eq!(check_echo(false, Some(false)).unwrap(), None);
+}
+
+#[test]
+fn an_older_gateway_that_echoes_nothing_earns_a_warning_when_revocation_was_asked() {
+    // A gateway before the field ignores it, so the old credentials SURVIVE.
+    // Not an error (the enrolment was issued), but never silent.
+    let warning = check_echo(true, None).unwrap().expect("a warning");
+    assert!(warning.contains("not confirm"), "{warning}");
+    assert_eq!(check_echo(false, None).unwrap(), None);
+}
+
+#[tokio::test]
+async fn the_echo_is_read_off_the_gateways_answer() {
+    let (result, _) = ask(
+        "200 OK",
+        r#"{"token":"B","enrolment_id":"e","revoke_existing_credentials":true}"#,
+    )
+    .await;
+    assert_eq!(result.unwrap().revoke_existing_credentials, Some(true));
+}
+
+#[test]
+fn revoke_existing_is_an_opt_in_flag() {
+    use clap::Parser as _;
+    #[derive(clap::Parser)]
+    struct Probe {
+        #[command(subcommand)]
+        command: AdminCommand,
+    }
+    let parse = |extra: &[&str]| {
+        let mut args = vec!["probe", "issue-enrolment", "--user-id", "u", "--stdout"];
+        args.extend_from_slice(extra);
+        match Probe::try_parse_from(args).unwrap().command {
+            AdminCommand::IssueEnrolment {
+                revoke_existing, ..
+            } => revoke_existing,
+        }
+    };
+    assert!(!parse(&[]));
+    assert!(parse(&["--revoke-existing"]));
 }

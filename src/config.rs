@@ -254,7 +254,7 @@ impl Config {
     /// with an error about the gateway rather than about the file.
     pub fn save(&self) -> Result<(), ConfigError> {
         let dir = &self.dir;
-        std::fs::create_dir_all(dir).map_err(|e| ConfigError::Unwritable(dir.into(), e))?;
+        ensure_private_dir(dir).map_err(|e| ConfigError::Unwritable(dir.into(), e))?;
         let path = dir.join(FILE);
         let tmp = dir.join(format!(".{FILE}.tmp"));
         let body = serde_json::to_string_pretty(self).expect("config serialises");
@@ -305,11 +305,61 @@ impl Config {
     /// that produced it — the answer is already correct and already going back.
     pub fn write_tool_cache(&self, body: &str) -> std::io::Result<()> {
         let dir = &self.dir;
-        std::fs::create_dir_all(dir)?;
+        ensure_private_dir(dir)?;
         let tmp = dir.join(format!(".{TOOL_CACHE}.tmp"));
         std::fs::write(&tmp, body)?;
         std::fs::rename(tmp, dir.join(TOOL_CACHE))
     }
+}
+
+/// Make *dir* exist, owner-only (ledger 1547).
+///
+/// The file inside is 0600, and that protects nothing while the DIRECTORY is
+/// group-writable: anyone who can write the directory can replace the file. It
+/// followed the umask before — 0775 under umask 002.
+///
+/// **A DIRECTORY THIS CREATES is made 0700 whatever it is called**: nobody
+/// else's permissions can be changed by creating it. **AN EXISTING ONE is
+/// tightened only when its leaf is `yadgar`** — the leaf [`base_dir`] builds,
+/// which covers the `./yadgar` fallback for an OS that names no config
+/// directory and a `YADGAR_CONFIG_DIR` that happens to end in `yadgar`. An
+/// override under any other name keeps the permissions somebody gave it.
+/// **A SYMLINK IS NEVER TIGHTENED**: `set_permissions` follows the link, and
+/// its target belongs to whatever declared it (home-manager, for one). Only
+/// the leaf: the parents are created with the default mode, because a missing
+/// `~/.config` made 0700 here would be a surprise to every other program that
+/// uses it.
+#[cfg(unix)]
+fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    if !dir.exists() {
+        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+            Ok(()) => {}
+            // Lost a race with another `serve`: fall through to the tighten.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if dir.file_name().is_some_and(|n| n == DIR) {
+        let meta = std::fs::symlink_metadata(dir)?;
+        if meta.file_type().is_symlink() {
+            return Ok(());
+        }
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
+/// No mode bits on Windows — the same gap [`restrict`] records below.
+#[cfg(not(unix))]
+fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)
 }
 
 /// Owner-only. The file holds a bearer credential.

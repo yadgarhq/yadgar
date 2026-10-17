@@ -269,6 +269,99 @@ fn the_config_is_not_world_readable() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_config_directory_it_creates_is_owner_only() {
+    // Ledger 1547: the directory followed the umask — 0775 under umask 002 —
+    // while the file inside it was 0600. A group-writable directory lets
+    // another user replace `config.json` outright, and the 0600 on the file
+    // does nothing about that. Asserted as "no group or other bits", which is
+    // red under any normal umask without this test touching the process-wide
+    // one.
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempdir();
+    let dir = parent.join("yadgar");
+    Config::new(&dir, "https://gw".into(), "secret".into())
+        .save()
+        .unwrap();
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700, "got {:o}", mode & 0o777);
+    std::fs::remove_dir_all(&parent).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_looser_config_directory_left_by_an_older_client_is_tightened() {
+    // Every 0.1.x install already has a 0775 directory, so fixing only the
+    // create path fixes nobody who upgrades.
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempdir();
+    let dir = parent.join("yadgar");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+    Config::new(&dir, "https://gw".into(), "secret".into())
+        .save()
+        .unwrap();
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700, "got {:o}", mode & 0o777);
+    std::fs::remove_dir_all(&parent).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_tool_cache_path_creates_an_owner_only_directory_too() {
+    // The second create site. `serve` writes the cache, and on a machine
+    // whose config was written elsewhere this can be the first write.
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempdir();
+    let dir = parent.join("yadgar");
+    Config::new(&dir, "https://gw".into(), "secret".into())
+        .write_tool_cache("[]")
+        .unwrap();
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700, "got {:o}", mode & 0o777);
+    std::fs::remove_dir_all(&parent).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_not_named_for_yadgar_is_never_chmodded() {
+    // `YADGAR_CONFIG_DIR` can point anywhere. An EXISTING directory is
+    // tightened only when its leaf is `yadgar` — which includes the `./yadgar`
+    // fallback and an override ending in `yadgar` — so a directory somebody
+    // chose under any other name keeps the permissions they gave it.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    Config::new(&dir, "https://gw".into(), "secret".into())
+        .save()
+        .unwrap();
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "got {:o}", mode & 0o777);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_config_directory_is_not_tightened() {
+    // A home-manager-style setup can make `~/.config/yadgar` a symlink into a
+    // directory something else declares. `set_permissions` follows the link
+    // and would chmod that target; the link is left alone instead.
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempdir();
+    let target = parent.join("declared");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let link = parent.join("yadgar");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    Config::new(&link, "https://gw".into(), "secret".into())
+        .save()
+        .unwrap();
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "got {:o}", mode & 0o777);
+    std::fs::remove_dir_all(&parent).ok();
+}
+
 fn tempdir() -> PathBuf {
     let p = std::env::temp_dir().join(format!(
         "yadgar-cfg-{}-{}",

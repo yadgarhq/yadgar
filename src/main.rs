@@ -176,6 +176,12 @@ async fn main() -> anyhow::Result<()> {
             // the install and not inside it, and a machine that has not logged
             // in yet simply has nothing to mint into.
             mint_instance();
+            // BEFORE the install, and never instead of it: registering ahead
+            // of Claude Code is a legitimate order, so this informs rather
+            // than refuses.
+            if let Some(note) = claude_code_note(std::env::var_os("PATH").as_deref()) {
+                println!("{note}");
+            }
             report(
                 "installed",
                 "nothing to do — the agent environment is already registered.",
@@ -325,6 +331,42 @@ fn mint_instance() {
             tracing::warn!("could not record this install's id: {e}");
         }
     }
+}
+
+/// One line for `install` to print when Claude Code is not on *path*.
+///
+/// `install` writes into `~/.claude` and creates it when it is missing, so on a
+/// machine with no Claude Code it registers into files nothing reads — and
+/// said nothing about it (ledger 1547). *path* is a parameter, read by the
+/// caller, for the reason [`home`] is: a probe that reads `PATH` itself is a
+/// probe whose tests depend on the machine running them.
+fn claude_code_note(path: Option<&std::ffi::OsStr>) -> Option<String> {
+    let found = path.is_some_and(|p| {
+        std::env::split_paths(p).any(|dir| CLAUDE_NAMES.iter().any(|n| is_executable(&dir.join(n))))
+    });
+    (!found).then(|| {
+        "note: Claude Code (`claude`) was not found on PATH; registering anyway, \
+         and it takes effect when Claude Code runs"
+            .to_string()
+    })
+}
+
+/// The names Claude Code's launcher has on PATH: the bare name on Unix, and
+/// the `.exe` or npm's `.cmd` shim on Windows.
+#[cfg(unix)]
+const CLAUDE_NAMES: [&str; 1] = ["claude"];
+#[cfg(not(unix))]
+const CLAUDE_NAMES: [&str; 3] = ["claude.exe", "claude.cmd", "claude"];
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file()
 }
 
 /// The home directory every managed path is derived from.

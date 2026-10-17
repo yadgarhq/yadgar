@@ -217,6 +217,80 @@ fn without_line(text: &str, line: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The tools the gateway serves, as `tools/list` names them.
+    ///
+    /// **A TEST FIXTURE, NOT A REGISTRY.** This client holds no per-tool code
+    /// (D75): `tools/list` is forwarded and answered by the gateway alone. The
+    /// rules file is the one place this repository NAMES tools, in prose for
+    /// the agent, and that prose has to name tools that exist. So the names
+    /// live here, inside `#[cfg(test)]`, and nowhere in the shipped binary.
+    ///
+    /// **IT PINS `assets/rules.md` TO A HAND-COPIED LIST, NOT TO THE LIVE
+    /// GATEWAY.** Nothing here can see what a deployment serves; a gateway that
+    /// renames a tool leaves this green. The rules therefore point the agent at
+    /// the `tools/list` descriptions as the authority and name these five as
+    /// the current set.
+    ///
+    /// Source: `yadgarhq/gateway` `src/tools.rs` `SERVED` at `2b970b7`, and the
+    /// `tools/list` measured on a VM against chart v0.24.17 on 2026-10-17
+    /// (ledger 1543), which returned exactly these five. When the gateway
+    /// grows a tool, this list and `assets/rules.md` change together.
+    const GATEWAY_TOOLS: [&str; 5] = [
+        "create_task",
+        "read_task",
+        "find_tasks",
+        "edit_task",
+        "transition_task",
+    ];
+
+    /// Every `backticked` span in *text*.
+    fn backticked(text: &str) -> Vec<&str> {
+        text.split('`').skip(1).step_by(2).collect()
+    }
+
+    #[test]
+    fn the_rules_name_every_tool_the_gateway_serves() {
+        // Ledger 1543: the rules told the agent to call `task_list`,
+        // `task_get` and `task_write` — none of which the gateway serves — so
+        // an agent following its own instructions failed on every call.
+        let spans = backticked(RULES_BODY);
+        for tool in GATEWAY_TOOLS {
+            assert!(
+                spans.contains(&tool),
+                "the rules never name `{tool}`, which the gateway serves"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rules_name_no_tool_the_gateway_does_not_serve() {
+        // A backticked identifier that LOOKS like a tool — about tasks,
+        // memories, the wiki, or recall — and is not served is an instruction
+        // the agent cannot follow. Status names and argument names
+        // (`in_progress`, `expect_version`) carry none of these words.
+        const TOOL_WORDS: [&str; 6] = ["task", "tasks", "memory", "memorize", "wiki", "recall"];
+        for span in backticked(RULES_BODY) {
+            let identifier =
+                !span.is_empty() && span.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+            let tool_like = span.split('_').any(|w| TOOL_WORDS.contains(&w));
+            if identifier && tool_like {
+                assert!(
+                    GATEWAY_TOOLS.contains(&span),
+                    "the rules name `{span}`, which the gateway does not serve"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_rules_name_the_command_that_writes_them() {
+        // The executable is `yaadgaar`; `yadgar` on PATH is the Python client
+        // this one coexists with (ADR-0505), so naming it sends a reader to the
+        // wrong program.
+        assert!(RULES_BODY.contains("`yaadgaar install`"));
+        assert!(!RULES_BODY.contains("`yadgar install`"));
+    }
+
     #[test]
     fn the_reference_goes_first_and_the_rest_survives_byte_for_byte() {
         let dir = crate::install::tests::scratch("rules-reference");

@@ -134,10 +134,10 @@ newer release, `pipx install --force yaadgaar==<version>`.
    printf '%s\n' "$NEW_PASSWORD" | yaadgaar enrol --token-file /path/to/token --password-stdin
    ```
 
-   On any further machine, `yaadgaar login` with that username and password —
-   but only against a gateway whose certificate is publicly trusted. `login`
-   has no way to receive a private CA, so for a deployment with one, ask the
-   admin for a new enrolment token for that machine instead.
+   On any further machine, `yaadgaar login` with that username and password.
+   For a deployment with a private CA, pass the CA's PEM file with
+   `--ca-file /path/to/ca.pem`; `login` stores it with the credential, as
+   `enrol` stores the CA its token carries.
 
 2. **Install**, once per machine. This registers yadgar with Claude Code at
    user level: one hook in `~/.claude/settings.json` (the `PreToolUse` guard,

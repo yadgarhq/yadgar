@@ -91,7 +91,7 @@ pub const MANAGED_HOOKS: &[HookSpec] = &[
     HookSpec {
         event: "PostToolUse",
         name: "block-reflect",
-        matcher: "mcp__yadgar__block_(create|update|delete|replace|append)",
+        matcher: "mcp__yaadgaar__block_(create|update|delete|replace|append)",
         fire_and_forget: false,
     },
     HookSpec {

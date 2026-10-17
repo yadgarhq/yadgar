@@ -144,6 +144,7 @@ pub fn install_with(home: &Path, binary: &Path) -> anyhow::Result<Summary> {
     rules::check_owned(&layout.rules())?;
     let mut settings = jsonfile::load(&layout.settings())?;
     let mut mcp = jsonfile::load(&layout.mcp_config())?;
+    mcp::check(&mcp, &layout.mcp_config())?;
 
     // ── Writes ───────────────────────────────────────────────────────────────
     //

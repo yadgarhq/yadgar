@@ -72,8 +72,9 @@ enum Command {
         #[arg(long = "password-stdin", requires_all = ["gateway", "username"])]
         password_stdin: bool,
 
-        /// Trust this PEM CA for the gateway, and store it with the credential
-        /// as an enrolment's CA is stored (ledger 1549).
+        /// Trust this PEM CA for the gateway, in addition to the system roots,
+        /// and store it with the credential as an enrolment's CA is stored
+        /// (ledger 1549).
         ///
         /// For a private deployment on a machine that never enrolled: without
         /// it there is no anchor to verify the gateway against. It wins over a

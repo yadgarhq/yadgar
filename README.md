@@ -73,6 +73,10 @@ printf '%s\n' "$PASSWORD" | yaadgaar login --gateway https://gateway.yadgar.inte
   --username someone --password-stdin
 ```
 
+Add `--ca-file /path/to/ca.pem` when the deployment uses a private CA and this
+machine never enrolled. The CA is trusted in addition to the system roots and
+stored with the credential.
+
 A fully unattended enrolment:
 
 ```bash

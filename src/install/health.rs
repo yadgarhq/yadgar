@@ -141,7 +141,7 @@ pub(super) fn report_lines(found: &[Drift]) -> Vec<String> {
     let label = format!("{} verify", hooks::BINARY_NAME);
     if found.is_empty() {
         return vec![format!(
-            "{label}: OK — {} hooks, MCP entry, rules file.",
+            "{label}: OK — {} hook(s), MCP entry, rules file.",
             MANAGED_HOOKS.len()
         )];
     }

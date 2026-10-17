@@ -140,7 +140,10 @@ newer release, `pipx install --force yaadgaar==<version>`.
    admin for a new enrolment token for that machine instead.
 
 2. **Install**, once per machine. This registers yadgar with Claude Code at
-   user level: the hooks in `~/.claude/settings.json`, the MCP entry in
+   user level: one hook in `~/.claude/settings.json` (the `PreToolUse` guard,
+   `yaadgaar hook pre-tool-guard`; an install over 0.1.4 or older removes the
+   eleven inert hook entries those versions wrote, and never touches another
+   tool's hooks), the MCP entry in
    `~/.claude.json` under the key `yaadgaar` (tools appear as `mcp__yaadgaar__*`;
    an existing entry under that key that this client did not write makes install
    refuse, and the separate `yadgar` key is never touched), and the rules file
@@ -177,10 +180,24 @@ newer release, `pipx install --force yaadgaar==<version>`.
    yaadgaar verify
    ```
 
-The config lives in `~/.config/yadgar/` (the OS config directory on macOS and
-Windows). On Linux and macOS, `config.json` and its directory are owner-only;
-on Windows the client sets no permissions and relies on the profile
-directory's own.
+The config lives in `~/.config/yaadgaar/` (the OS config directory on macOS
+and Windows; `YAADGAAR_CONFIG_DIR` overrides it). On Linux and macOS,
+`config.json` and its directory are owner-only; on Windows the client sets no
+permissions and relies on the profile directory's own.
+
+Up to 0.1.4 the config lived in `~/.config/yadgar/`, which is also where the
+yadgar memory engine keeps its `config.yaml` and `secrets.env`. This client no
+longer reads, writes or moves anything there. If it finds its old
+`config.json` or `tools-cache.json` there and no new config, `install`,
+`verify` and `serve` print a hint: run `yaadgaar login` (or `yaadgaar enrol`)
+again. A new login mints a new install id.
+
+The guard reads `disabled_guards` from `~/.claude/yadgar-hook-exceptions.json`,
+the file the memory engine's own guard reads, and never writes it. It honours
+three ids, spelled as the engine spells them: `terraform_family` (terraform,
+tofu, tfp and digger comments), `git_commit_flags` (commits that skip hooks or
+signing) and `hook_config_tamper` (writes to that file). Every other id is
+ignored. A missing, unreadable or malformed file leaves every guard on.
 
 ## Packaging
 

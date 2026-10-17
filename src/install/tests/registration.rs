@@ -51,30 +51,12 @@ fn foreign_hook_entries_survive_an_install() {
 /// Edit, not Bash, to add itself to a push allowlist — and flipping
 /// `pre-compact-drain` to synchronous was MISSED, after which every compaction
 /// blocks on the drain.
-const EXPECTED_REGISTRATIONS: &[(&str, &str, &str, bool)] = &[
-    ("PreCompact", "pre-compact-drain", "", true),
-    ("SessionStart", "session-start-context", "", false),
-    ("SessionStart", "post-compact-rehydrate", "compact", false),
-    ("PostToolUse", "post-tool-capture", "", false),
-    (
-        "PostToolUse",
-        "block-reflect",
-        "mcp__yaadgaar__block_(create|update|delete|replace|append)",
-        false,
-    ),
-    ("UserPromptSubmit", "prompt-recall", "", false),
-    (
-        "PreToolUse",
-        "pre-tool-guard",
-        "Bash|Edit|Write|NotebookEdit",
-        false,
-    ),
-    ("Stop", "stop-checkpoint", "", false),
-    ("SessionEnd", "session-end-capture", "", false),
-    ("InstructionsLoaded", "instructions-loaded", "", false),
-    ("SubagentStart", "subagent-start", "", false),
-    ("FileChanged", "file-changed", "", false),
-];
+const EXPECTED_REGISTRATIONS: &[(&str, &str, &str, bool)] = &[(
+    "PreToolUse",
+    "pre-tool-guard",
+    "Bash|Edit|Write|NotebookEdit",
+    false,
+)];
 
 #[test]
 fn every_managed_hook_is_registered_once_with_the_matcher_and_async_flag_it_needs() {
@@ -136,21 +118,17 @@ fn one_written_entry_is_pinned_as_literal_bytes() {
     // reads, this is a durable format in a third party's file, and the shape
     // could change entirely with every assertion in this module still green.
     //
-    // So: the bytes. Two entries, because the async one and the ordinary one
-    // are different shapes and `async` is absent rather than false on the
-    // second. Compared as text rather than as `Value`, so key ORDER is pinned
+    // So: the bytes. `async` is absent rather than false on an ordinary entry;
+    // the async shape is pinned in `hooks.rs`, since no current registration
+    // has it. Compared as text rather than as `Value`, so key ORDER is pinned
     // too — a `Value` comparison is order-insensitive and would not notice.
     let home = scratch("entry-bytes");
     install_with(&home, Path::new(BINARY)).unwrap();
     let settings = read_json(&Layout::new(&home).settings());
 
     assert_eq!(
-        settings["hooks"]["PreCompact"].to_string(),
-        r#"[{"matcher":"","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-compact-drain","async":true}]}]"#
-    );
-    assert_eq!(
-        settings["hooks"]["UserPromptSubmit"].to_string(),
-        r#"[{"matcher":"","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook prompt-recall"}]}]"#
+        settings["hooks"]["PreToolUse"].to_string(),
+        r#"[{"matcher":"Bash|Edit|Write|NotebookEdit","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-tool-guard"}]}]"#
     );
 }
 
@@ -236,13 +214,13 @@ fn a_stale_registration_is_replaced_rather_than_duplicated() {
     let home = scratch("stale-replaced");
     seed(
         &home,
-        json!({ "hooks": { "UserPromptSubmit": [
-            { "matcher": "", "hooks": [{ "type": "command", "command": "/old/path/yaadgaar hook prompt-recall" }] }
+        json!({ "hooks": { "PreToolUse": [
+            { "matcher": "Bash|Edit|Write|NotebookEdit", "hooks": [{ "type": "command", "command": "/old/path/yaadgaar hook pre-tool-guard" }] }
         ]}}),
     );
     install_with(&home, Path::new(BINARY)).unwrap();
     let settings = read_json(&Layout::new(&home).settings());
-    let entries = settings["hooks"]["UserPromptSubmit"].as_array().unwrap();
+    let entries = settings["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(entries.len(), 1, "{entries:#?}");
     assert!(hooks::entry_commands(&entries[0])[0].starts_with(BINARY));
 }
@@ -259,7 +237,7 @@ fn a_stale_hook_behind_a_foreign_one_in_the_same_entry_is_replaced_not_doubled()
     install_with(&home, Path::new(BINARY)).unwrap();
 
     let settings = read_json(&Layout::new(&home).settings());
-    let commands = commands_for_event(&settings, "Stop");
+    let commands = commands_for_event(&settings, "PreToolUse");
     assert!(
         commands.iter().any(|c| c.contains("other-tool")),
         "the foreign hook sharing the entry was eaten: {commands:#?}"
@@ -267,10 +245,10 @@ fn a_stale_hook_behind_a_foreign_one_in_the_same_entry_is_replaced_not_doubled()
     assert_eq!(
         commands
             .iter()
-            .filter(|c| c.ends_with("hook stop-checkpoint"))
+            .filter(|c| c.ends_with("hook pre-tool-guard"))
             .count(),
         1,
-        "stop-checkpoint fires more than once: {commands:#?}"
+        "pre-tool-guard fires more than once: {commands:#?}"
     );
     assert!(
         !commands.iter().any(|c| c.starts_with("/old/path/")),
@@ -290,13 +268,13 @@ fn an_uninstall_empties_a_shared_entry_of_ours_and_leaves_the_foreign_hook() {
     uninstall(&home).unwrap();
 
     let settings = read_json(&Layout::new(&home).settings());
-    let commands = commands_for_event(&settings, "Stop");
+    let commands = commands_for_event(&settings, "PreToolUse");
     assert!(
         commands.iter().any(|c| c.contains("other-tool")),
         "uninstall ate the foreign hook: {commands:#?}"
     );
     assert!(
-        !commands.iter().any(|c| c.contains("hook stop-checkpoint")),
+        !commands.iter().any(|c| c.contains("hook pre-tool-guard")),
         "a live yadgar hook was left behind: {commands:#?}"
     );
 }
@@ -309,12 +287,12 @@ fn verify_sees_a_duplicate_hidden_behind_a_foreign_hook_in_the_same_entry() {
     install_with(&home, Path::new(BINARY)).unwrap();
     let layout = Layout::new(&home);
     let mut settings = read_json(&layout.settings());
-    settings["hooks"]["Stop"]
+    settings["hooks"]["PreToolUse"]
         .as_array_mut()
         .unwrap()
-        .push(json!({ "matcher": "", "hooks": [
+        .push(json!({ "matcher": "Bash", "hooks": [
             { "type": "command", "command": "/usr/bin/other-tool run" },
-            { "type": "command", "command": "/somewhere/else/yaadgaar hook stop-checkpoint" }
+            { "type": "command", "command": "/somewhere/else/yaadgaar hook pre-tool-guard" }
         ]}));
     std::fs::write(layout.settings(), settings.to_string()).unwrap();
 
@@ -322,7 +300,7 @@ fn verify_sees_a_duplicate_hidden_behind_a_foreign_hook_in_the_same_entry() {
     assert!(
         found.iter().any(|d| matches!(
             d,
-            Drift::HookDuplicated { name, .. } if name == "stop-checkpoint"
+            Drift::HookDuplicated { name, .. } if name == "pre-tool-guard"
         )),
         "{found:#?}"
     );

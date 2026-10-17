@@ -288,16 +288,16 @@ fn commands_for_event(settings: &Value, event: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// A `Stop` entry whose FIRST hook is foreign and whose second is a stale ours.
+/// A `PreToolUse` entry whose FIRST hook is foreign and whose second is a stale ours.
 ///
 /// Claude Code's schema puts an ARRAY under `hooks`, so one matcher entry can
 /// carry several commands. An installer that reads only `hooks[0]` sees this
 /// entry as entirely foreign and leaves our stale registration inside it.
 fn entry_with_a_foreign_hook_before_ours() -> Value {
-    json!({ "hooks": { "Stop": [
-        { "matcher": "", "hooks": [
+    json!({ "hooks": { "PreToolUse": [
+        { "matcher": "Bash", "hooks": [
             { "type": "command", "command": "/usr/bin/other-tool run" },
-            { "type": "command", "command": "/old/path/yaadgaar hook stop-checkpoint" }
+            { "type": "command", "command": "/old/path/yaadgaar hook pre-tool-guard" }
         ]}
     ]}})
 }
@@ -306,4 +306,5 @@ mod coexistence;
 mod lifecycle;
 mod refusals;
 mod registration;
+mod upgrade;
 mod verification;

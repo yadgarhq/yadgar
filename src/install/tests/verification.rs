@@ -127,8 +127,9 @@ fn an_install_removed_by_hand_is_never_reported_clean() {
 
 #[test]
 fn verify_catches_one_hook_deleted_by_hand() {
-    // The realistic shape: somebody edits settings.json and takes one entry
-    // out. Eleven of twelve handlers still fire, so nothing else notices.
+    // The realistic shape: somebody edits settings.json and takes the entry
+    // out. Every other hook on the machine still fires, so nothing else
+    // notices that the guard no longer does.
     let home = scratch("verify-hook-gone");
     let layout = Layout::new(&home);
     install_with(&home, Path::new(BINARY)).unwrap();
@@ -136,7 +137,7 @@ fn verify_catches_one_hook_deleted_by_hand() {
     settings["hooks"]
         .as_object_mut()
         .unwrap()
-        .remove("UserPromptSubmit")
+        .remove("PreToolUse")
         .expect("the fixture never had the entry this test deletes");
     std::fs::write(layout.settings(), settings.to_string()).unwrap();
 
@@ -144,7 +145,7 @@ fn verify_catches_one_hook_deleted_by_hand() {
     assert!(
         found.iter().any(|d| matches!(
             d,
-            Drift::HookMissing { name, .. } if name == "prompt-recall"
+            Drift::HookMissing { name, .. } if name == "pre-tool-guard"
         )),
         "{found:#?}"
     );
@@ -159,7 +160,7 @@ fn verify_catches_a_hook_this_version_has_no_handler_for() {
     let layout = Layout::new(&home);
     install_with(&home, Path::new(BINARY)).unwrap();
     let mut settings = read_json(&layout.settings());
-    settings["hooks"]["Stop"]
+    settings["hooks"]["PreToolUse"]
         .as_array_mut()
         .unwrap()
         .push(json!({ "matcher": "", "hooks": [

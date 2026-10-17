@@ -169,7 +169,7 @@ fn the_tool_cache_lands_beside_the_config_it_was_loaded_with() {
     // went through the process-global `base_dir()` while the config came
     // from wherever `load_from` was pointed. A test that loaded a config
     // from a temp directory read and OVERWROTE the real
-    // `~/.config/yadgar/tools-cache.json` belonging to the person running
+    // `~/.config/yaadgaar/tools-cache.json` belonging to the person running
     // it, and nothing said so.
     let dir = tempdir();
     let config = Config::new(&dir, "https://gw".into(), "tok".into());
@@ -280,7 +280,7 @@ fn a_config_directory_it_creates_is_owner_only() {
     // one.
     use std::os::unix::fs::PermissionsExt;
     let parent = tempdir();
-    let dir = parent.join("yadgar");
+    let dir = parent.join(DIR);
     Config::new(&dir, "https://gw".into(), "secret".into())
         .save()
         .unwrap();
@@ -296,7 +296,7 @@ fn a_looser_config_directory_left_by_an_older_client_is_tightened() {
     // create path fixes nobody who upgrades.
     use std::os::unix::fs::PermissionsExt;
     let parent = tempdir();
-    let dir = parent.join("yadgar");
+    let dir = parent.join(DIR);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o775)).unwrap();
     Config::new(&dir, "https://gw".into(), "secret".into())
@@ -314,7 +314,7 @@ fn the_tool_cache_path_creates_an_owner_only_directory_too() {
     // whose config was written elsewhere this can be the first write.
     use std::os::unix::fs::PermissionsExt;
     let parent = tempdir();
-    let dir = parent.join("yadgar");
+    let dir = parent.join(DIR);
     Config::new(&dir, "https://gw".into(), "secret".into())
         .write_tool_cache("[]")
         .unwrap();
@@ -325,11 +325,12 @@ fn the_tool_cache_path_creates_an_owner_only_directory_too() {
 
 #[cfg(unix)]
 #[test]
-fn a_directory_not_named_for_yadgar_is_never_chmodded() {
-    // `YADGAR_CONFIG_DIR` can point anywhere. An EXISTING directory is
-    // tightened only when its leaf is `yadgar` — which includes the `./yadgar`
-    // fallback and an override ending in `yadgar` — so a directory somebody
-    // chose under any other name keeps the permissions they gave it.
+fn a_directory_not_named_for_yaadgaar_is_never_chmodded() {
+    // `YAADGAAR_CONFIG_DIR` can point anywhere. An EXISTING directory is
+    // tightened only when its leaf is `yaadgaar` — which includes the
+    // `./yaadgaar` fallback and an override ending in `yaadgaar` — so a
+    // directory somebody chose under any other name keeps the permissions they
+    // gave it.
     use std::os::unix::fs::PermissionsExt;
     let dir = tempdir();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -344,7 +345,7 @@ fn a_directory_not_named_for_yadgar_is_never_chmodded() {
 #[cfg(unix)]
 #[test]
 fn a_symlinked_config_directory_is_not_tightened() {
-    // A home-manager-style setup can make `~/.config/yadgar` a symlink into a
+    // A home-manager-style setup can make `~/.config/yaadgaar` a symlink into a
     // directory something else declares. `set_permissions` follows the link
     // and would chmod that target; the link is left alone instead.
     use std::os::unix::fs::PermissionsExt;
@@ -352,7 +353,7 @@ fn a_symlinked_config_directory_is_not_tightened() {
     let target = parent.join("declared");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let link = parent.join("yadgar");
+    let link = parent.join(DIR);
     std::os::unix::fs::symlink(&target, &link).unwrap();
     Config::new(&link, "https://gw".into(), "secret".into())
         .save()
@@ -360,6 +361,48 @@ fn a_symlinked_config_directory_is_not_tightened() {
     let mode = std::fs::metadata(&target).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o755, "got {:o}", mode & 0o777);
     std::fs::remove_dir_all(&parent).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn the_memory_engines_directory_is_never_chmodded() {
+    // `~/.config/yadgar` belongs to the yadgar memory engine now: its
+    // `config.yaml` and `secrets.env` live there. A config pointed at that
+    // directory (an override, or a test) must leave its mode alone.
+    use std::os::unix::fs::PermissionsExt;
+    let parent = tempdir();
+    let dir = parent.join("yadgar");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    Config::new(&dir, "https://gw".into(), "secret".into())
+        .save()
+        .unwrap();
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o755, "got {:o}", mode & 0o777);
+    std::fs::remove_dir_all(&parent).ok();
+}
+
+#[test]
+fn the_config_lives_in_its_own_yaadgaar_directory() {
+    // Not `yadgar`: that directory holds the memory engine's secrets.
+    let root = PathBuf::from("/home/x/.config");
+    assert_eq!(
+        base_dir_from(None, Some(root.clone())),
+        root.join("yaadgaar")
+    );
+    assert_eq!(base_dir_from(None, None), PathBuf::from("./yaadgaar"));
+}
+
+#[test]
+fn the_override_is_yaadgaar_config_dir_and_wins() {
+    assert_eq!(CONFIG_DIR_ENV, "YAADGAAR_CONFIG_DIR");
+    assert_eq!(
+        base_dir_from(
+            Some("/elsewhere".into()),
+            Some(PathBuf::from("/home/x/.config"))
+        ),
+        PathBuf::from("/elsewhere")
+    );
 }
 
 fn tempdir() -> PathBuf {

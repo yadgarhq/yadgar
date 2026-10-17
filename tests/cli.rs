@@ -227,7 +227,7 @@ fn enrol_is_a_command_the_binary_actually_has() {
         .env("HOME", &home)
         // Its own directory, so a refused enrolment cannot be confused with —
         // or write over — the config of whoever is running the tests.
-        .env("YADGAR_CONFIG_DIR", home.join("config"))
+        .env("YAADGAAR_CONFIG_DIR", home.join("config"))
         .output()
         .expect("the binary under test did not run");
 
@@ -613,7 +613,7 @@ fn login_with_password_stdin_reaches_a_real_gateway_with_no_terminal_and_prompts
             "--password-stdin",
         ],
         &[(
-            "YADGAR_CONFIG_DIR",
+            "YAADGAAR_CONFIG_DIR",
             config_dir.to_str().expect("a UTF-8 path"),
         )],
         "hunter2\n",
@@ -672,7 +672,7 @@ fn enrol_with_password_stdin_reaches_a_real_gateway_with_no_terminal_and_prompts
             "--password-stdin",
         ],
         &[(
-            "YADGAR_CONFIG_DIR",
+            "YAADGAAR_CONFIG_DIR",
             config_dir.to_str().expect("a UTF-8 path"),
         )],
         "a-new-password\n",
@@ -726,7 +726,7 @@ fn a_missing_token_file_is_reported_with_its_own_path() {
         .args(["enrol", "--token-file"])
         .arg(&missing)
         .env("HOME", &home)
-        .env("YADGAR_CONFIG_DIR", home.join("config"))
+        .env("YAADGAAR_CONFIG_DIR", home.join("config"))
         .output()
         .expect("the binary under test did not run");
 
@@ -753,7 +753,7 @@ fn enrol_refuses_a_token_argument_together_with_token_file() {
             "/does/not/matter",
         ])
         .env("HOME", &home)
-        .env("YADGAR_CONFIG_DIR", home.join("config"))
+        .env("YAADGAAR_CONFIG_DIR", home.join("config"))
         .output()
         .expect("the binary under test did not run");
 

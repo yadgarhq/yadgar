@@ -7,6 +7,7 @@
 //! days while every signal read healthy. A single binary at one stable path has
 //! no second copy to diverge from.
 
+mod admin;
 mod config;
 mod enrolment;
 mod hook;
@@ -159,6 +160,12 @@ enum Command {
         /// `pre-tool-guard`.
         name: String,
     },
+
+    /// Administrative verbs, run with your own credential (ledger 1552).
+    Admin {
+        #[command(subcommand)]
+        command: admin::AdminCommand,
+    },
 }
 
 #[tokio::main]
@@ -271,6 +278,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::Hook { name } => hook::process::run(&name),
+        Command::Admin { command } => Ok(admin::run(command).await?),
     }
 }
 

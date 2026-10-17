@@ -415,7 +415,7 @@ fn now() -> i64 {
 /// The address is joined with a path later, and `https://gw` + `auth/login`
 /// silently becomes `https://gwauth/login` — a request to a host that does not
 /// exist, reported as a DNS failure rather than as the typo it is.
-fn normalise(raw: &str) -> String {
+pub(crate) fn normalise(raw: &str) -> String {
     let trimmed = raw.trim().trim_end_matches('/');
     format!("{trimmed}/")
 }

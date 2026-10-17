@@ -13,6 +13,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+use super::hooks::binary_stem;
 use super::jsonfile::ensure_object;
 
 /// The key under `mcpServers` that this client owns: the product's binary name.
@@ -81,6 +82,9 @@ pub fn check(config: &Value, path: &Path) -> anyhow::Result<()> {
 
 /// Whether *entry* has the shape [`entry_for`] writes: stdio, `serve`, no url or
 /// headers, and a command whose file name is the `yaadgaar` binary.
+///
+/// The file name comes from [`binary_stem`], not `Path::file_stem`: the entry
+/// may have been written on another platform than the one reading it.
 pub fn is_ours(entry: &Value) -> bool {
     let Some(obj) = entry.as_object() else {
         return false;
@@ -93,7 +97,7 @@ pub fn is_ours(entry: &Value) -> bool {
     let binary = obj
         .get("command")
         .and_then(Value::as_str)
-        .and_then(|c| Path::new(c).file_stem())
+        .and_then(binary_stem)
         .is_some_and(|stem| stem.eq_ignore_ascii_case("yaadgaar"));
     stdio && serve && binary && !obj.contains_key("url") && !obj.contains_key("headers")
 }
@@ -152,5 +156,19 @@ mod tests {
         assert!(!text.contains("Bearer"), "{text}");
         assert!(!text.to_lowercase().contains("authorization"), "{text}");
         assert!(!text.to_lowercase().contains("token"), "{text}");
+    }
+
+    #[test]
+    fn an_entry_written_on_windows_is_ours_when_read_on_any_platform() {
+        // `Path::file_stem` splits on `\` only on a Windows build, so on Linux
+        // this whole string is one "file name" and the stem is not `yaadgaar`.
+        // A `.claude.json` read on WSL beside a Windows install would then make
+        // install refuse over its own entry and uninstall leave it behind.
+        let entry = json!({
+            "type": "stdio",
+            "command": "C:\\Program Files\\yaadgaar\\yaadgaar.exe",
+            "args": ["serve"],
+        });
+        assert!(is_ours(&entry), "{entry}");
     }
 }

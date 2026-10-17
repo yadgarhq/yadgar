@@ -361,9 +361,12 @@ fn uninstall_leaves_every_file_that_holds_somebody_elses_content() {
 const FOREIGN_YADGAR: &str = r#"{"mcpServers":{"yadgar":{"type":"http","url":"http://127.0.0.1:8765/mcp","headers":{"Authorization":"Bearer x"}}}}"#;
 
 #[test]
-fn a_foreign_yadgar_entry_survives_install_and_uninstall_byte_identical() {
+fn a_foreign_yadgar_entry_survives_install_and_uninstall_unchanged() {
     // The failure this prevents: the memory MCP registered under `yadgar` was
-    // overwritten by install and deleted by uninstall.
+    // overwritten by install and deleted by uninstall. Compared as parsed JSON,
+    // not bytes: install rewrites the file pretty-printed by design, so the
+    // property is that the `yadgar` entry and every other key are unchanged.
+    // The not-written-at-all case is `coexistence.rs`.
     let home = scratch("foreign-yadgar");
     let layout = Layout::new(&home);
     std::fs::write(layout.mcp_config(), FOREIGN_YADGAR).unwrap();

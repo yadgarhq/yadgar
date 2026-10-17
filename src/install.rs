@@ -1,4 +1,4 @@
-//! `yadgar install`, `uninstall` and `verify` — the whole client surface (D76).
+//! `yaadgaar install`, `uninstall` and `verify` — the whole client surface (D76).
 //!
 //! Three files are touched and no others: the agent's user-level MCP config
 //! (`~/.claude.json`), its settings (`~/.claude/settings.json`), and a rules

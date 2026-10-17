@@ -53,13 +53,16 @@ pub enum ReferencePlan {
 /// (`health::check_rules`), and an install that disagreed refused on a machine
 /// `verify` called healthy. A symlink without the line is somebody else's file
 /// (nix, most likely): a notice, not a failure, because everything this client
-/// owns can still be installed. Only a regular file that needs the line goes
+/// owns can still be installed. A symlink whose target cannot be read is a
+/// notice too, saying so rather than claiming the line is missing. Only a
+/// regular file that needs the line goes
 /// through [`check_reference_target`]'s refusals.
 pub fn plan_reference(claude_md: &Path, line: &str) -> anyhow::Result<ReferencePlan> {
     let link = is_symlink(claude_md);
     match has_reference(claude_md, line) {
         Ok(true) => Ok(ReferencePlan::Present),
-        Ok(false) | Err(_) if link => Ok(ReferencePlan::Declared(format!(
+        Err(_) if link => Ok(ReferencePlan::Declared(unreadable_notice(claude_md, line))),
+        Ok(false) if link => Ok(ReferencePlan::Declared(format!(
             "{} is a symlink (-> {}), so something else declares it — nix, most \
              likely — and yaadgaar did not edit it. Add this line to whatever \
              generates it so Claude Code reads the rules:\n    {line}",
@@ -75,6 +78,20 @@ pub fn plan_reference(claude_md: &Path, line: &str) -> anyhow::Result<ReferenceP
             Err(e)
         }
     }
+}
+
+/// The notice for a symlinked `CLAUDE.md` whose target cannot be read.
+///
+/// Not "add this line": the line may well be there, and telling somebody to add
+/// a line they already declared sends them to edit the wrong thing. Not a
+/// failure either — the file is never written, so nothing here needs to read it.
+pub fn unreadable_notice(claude_md: &Path, line: &str) -> String {
+    format!(
+        "{} is a symlink, and yaadgaar did not edit it: could not read {}; \
+         check that it contains {line}",
+        claude_md.display(),
+        link_target(claude_md),
+    )
 }
 
 /// The notice uninstall gives when the line sits in a symlinked `CLAUDE.md`.

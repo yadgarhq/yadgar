@@ -21,11 +21,13 @@ Use it to record work that the next session must be able to find.
   are not kept after the session ends.
 - `mcp__yadgar__task_*`, if present: a different product, the yadgar memory
   engine, with its own task list and its own rules. Its tools require a
-  `project` argument. Follow that server's own instructions for its tools.
-  Nothing in this file applies to them.
+  `project_id` argument; `project` there is only an optional override. Follow
+  that server's own instructions for its tools. Nothing in this file applies to
+  them.
 
 Do not file the same task in both ledgers. Do not copy tasks from one ledger to
-the other unless the person asks.
+the other unless the person asks. If both ledgers are present and CLAUDE.md
+does not say which to use for deferred work, ask the person once.
 
 **For `mcp__yaadgaar__*` tools, the project is chosen for you.** The client
 names the project once, from the directory the session was started in: the

@@ -241,3 +241,165 @@ fn uninstall_on_a_symlinked_claude_md_succeeds_with_a_notice() {
     assert!(!summary.claude_md_changed);
     assert!(!layout.rules().exists(), "the rules file was left behind");
 }
+
+/// The keys of the object at *pointer* in the JSON file at *path*, in file order.
+fn keys_at(path: &Path, pointer: &str) -> Vec<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    value
+        .pointer(pointer)
+        .and_then(serde_json::Value::as_object)
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect()
+}
+
+// KEY ORDER. `serde_json` is built with `preserve_order`, where `Map::remove`
+// is `swap_remove`: it moves the LAST key into the removed key's slot. Every
+// removal of ours from a map that is not at its end therefore reordered keys
+// in a file somebody else owns.
+
+#[test]
+fn uninstall_keeps_the_order_of_the_other_mcp_servers() {
+    let home = scratch("coexist-order-uninstall");
+    let layout = Layout::new(&home);
+    let config = serde_json::json!({ "numStartups": 1, "mcpServers": {
+        "alpha": { "type": "http", "url": "http://a.test/mcp" },
+        "yaadgaar": { "type": "stdio", "command": BINARY, "args": ["serve"] },
+        "beta": { "type": "http", "url": "http://b.test/mcp" },
+        "gamma": { "type": "http", "url": "http://c.test/mcp" },
+    }});
+    std::fs::write(layout.mcp_config(), config.to_string()).unwrap();
+
+    uninstall(&home).unwrap();
+
+    assert_eq!(
+        keys_at(&layout.mcp_config(), "/mcpServers"),
+        ["alpha", "beta", "gamma"]
+    );
+}
+
+#[test]
+fn the_legacy_migration_keeps_the_order_of_the_other_mcp_servers() {
+    let home = scratch("coexist-order-legacy");
+    let layout = Layout::new(&home);
+    let config = serde_json::json!({ "numStartups": 1, "mcpServers": {
+        "yadgar": { "type": "stdio", "command": BINARY, "args": ["serve"] },
+        "alpha": { "type": "http", "url": "http://a.test/mcp" },
+        "beta": { "type": "http", "url": "http://b.test/mcp" },
+    }});
+    std::fs::write(layout.mcp_config(), config.to_string()).unwrap();
+
+    install_with(&home, Path::new(BINARY)).unwrap();
+
+    assert_eq!(
+        keys_at(&layout.mcp_config(), "/mcpServers"),
+        ["alpha", "beta", "yaadgaar"]
+    );
+}
+
+#[test]
+fn removing_an_emptied_hook_event_keeps_the_order_of_the_others() {
+    let home = scratch("coexist-order-hooks");
+    let layout = Layout::new(&home);
+    std::fs::create_dir_all(layout.claude_dir()).unwrap();
+    let ours = |name: &str| {
+        serde_json::json!([{ "matcher": "", "hooks": [{ "type": "command",
+            "command": format!("{BINARY} hook {name}") }] }])
+    };
+    let foreign = serde_json::json!([{ "matcher": "", "hooks": [{ "type": "command",
+        "command": "/usr/local/bin/audit-shell record" }] }]);
+    let settings = serde_json::json!({ "model": "opus", "hooks": {
+        "PreCompact": ours("pre-compact"),
+        "SessionStart": foreign.clone(),
+        "Stop": foreign.clone(),
+        "Notification": foreign,
+    }});
+    std::fs::write(layout.settings(), settings.to_string()).unwrap();
+
+    uninstall(&home).unwrap();
+
+    assert_eq!(
+        keys_at(&layout.settings(), "/hooks"),
+        ["SessionStart", "Stop", "Notification"]
+    );
+}
+
+/// Make *store* unreadable (mode 000); `None` when this process can read it
+/// anyway (root, or a filesystem that ignores the mode) — then there is
+/// nothing to test, the rule `refusals.rs` states for permission tests.
+#[cfg(unix)]
+fn make_unreadable(store: &Path) -> Option<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(store, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(store).is_ok() {
+        std::fs::set_permissions(store, std::fs::Permissions::from_mode(0o644)).unwrap();
+        return None;
+    }
+    Some(())
+}
+
+#[cfg(unix)]
+fn restore_readable(store: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(store, std::fs::Permissions::from_mode(0o644)).unwrap();
+}
+
+/// The notice for a target that could not be read: names the target and the
+/// exact line, and does not claim the line is missing.
+#[cfg(unix)]
+fn assert_unreadable_notice(notices: &[String], store: &Path, line: &str) {
+    let expected = format!(
+        "could not read {}; check that it contains {line}",
+        store.display()
+    );
+    assert!(
+        notices.iter().any(|n| n.contains(&expected)),
+        "no notice says {expected:?}: {notices:#?}"
+    );
+    assert!(
+        !notices.iter().any(|n| n.contains("Add this line")),
+        "an unreadable target was reported as missing the line: {notices:#?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn install_on_an_unreadable_symlink_target_says_it_could_not_read_it() {
+    let (home, store) = nix_home("coexist-unreadable-install", |line| format!("{line}\n"));
+    let layout = Layout::new(&home);
+    let line = format!("@{}", layout.rules().display());
+    let Some(()) = make_unreadable(&store) else {
+        return;
+    };
+
+    let outcome = install_with(&home, Path::new(BINARY));
+
+    restore_readable(&store);
+    let summary = outcome.expect("an unreadable symlink target must not fail install");
+    assert_unreadable_notice(&summary.notices, &store, &line);
+    assert!(std::fs::symlink_metadata(layout.claude_md())
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
+
+#[cfg(unix)]
+#[test]
+fn uninstall_on_an_unreadable_symlink_target_says_it_could_not_read_it() {
+    let (home, store) = nix_home("coexist-unreadable-uninstall", |line| format!("{line}\n"));
+    let layout = Layout::new(&home);
+    let line = format!("@{}", layout.rules().display());
+    install_with(&home, Path::new(BINARY)).unwrap();
+    let Some(()) = make_unreadable(&store) else {
+        return;
+    };
+
+    let outcome = uninstall(&home);
+
+    restore_readable(&store);
+    let summary = outcome.expect("an unreadable symlink target must not fail uninstall");
+    assert_unreadable_notice(&summary.notices, &store, &line);
+    assert!(!layout.rules().exists(), "the rules file was left behind");
+}

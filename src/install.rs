@@ -264,8 +264,10 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
     let reference = rules::reference_line(&layout.rules());
     let mut notices = Vec::new();
     let claude_md_changed = if rules::is_symlink(&layout.claude_md()) {
-        if rules::has_reference(&layout.claude_md(), &reference).unwrap_or(false) {
-            notices.push(rules::undeclare_notice(&layout.claude_md(), &reference));
+        match rules::has_reference(&layout.claude_md(), &reference) {
+            Ok(true) => notices.push(rules::undeclare_notice(&layout.claude_md(), &reference)),
+            Ok(false) => {}
+            Err(_) => notices.push(rules::unreadable_notice(&layout.claude_md(), &reference)),
         }
         false
     } else {

@@ -252,9 +252,15 @@ fn the_rules_name_all_three_task_systems() {
         .nth(1)
         .expect("engine tools named");
     let engine_paragraph = engine.split("\n\n").next().unwrap();
+    // `project_id` is the engine's required argument; `project` is only an
+    // optional override there.
     assert!(
-        engine_paragraph.contains("`project`"),
-        "the rules do not say the engine's task tools take `project`: {engine_paragraph}"
+        engine_paragraph.contains("`project_id`"),
+        "the rules do not say the engine's task tools require `project_id`: {engine_paragraph}"
+    );
+    assert!(
+        !engine_paragraph.contains("require a `project` argument"),
+        "the rules still say the engine requires `project`: {engine_paragraph}"
     );
 }
 
@@ -270,4 +276,17 @@ fn has_reference_matches_the_exact_line_only() {
     assert!(!has_reference(&path, "@/opt/rules.md").unwrap());
     std::fs::write(&path, "x\n  @/opt/rules.md  \ny\n").unwrap();
     assert!(has_reference(&path, "@/opt/rules.md").unwrap());
+}
+
+#[test]
+fn the_rules_say_to_ask_once_when_no_ledger_is_named_for_deferred_work() {
+    // Ledger 1565: both ledgers tell the model to file deferred work, and these
+    // rules say "not both" — so with both present and nothing naming one, the
+    // model had no rule to pick by.
+    assert!(
+        RULES_BODY.replace('\n', " ").contains(
+            "If both ledgers are present and CLAUDE.md does not say which to use for deferred work, ask the person once."
+        ),
+        "no ask-once rule for deferred work"
+    );
 }

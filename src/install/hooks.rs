@@ -300,7 +300,8 @@ fn strip_managed(hooks: &mut serde_json::Map<String, Value>) -> usize {
         }
     }
     for event in emptied {
-        hooks.remove(&event);
+        // `shift_remove`: `remove` is a swap_remove under `preserve_order`.
+        hooks.shift_remove(&event);
     }
     removed
 }

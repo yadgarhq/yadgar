@@ -58,7 +58,9 @@ pub fn merge(config: &mut Value, binary: &Path) {
         return;
     };
     if servers.get(LEGACY_SERVER_KEY).is_some_and(is_ours) {
-        servers.remove(LEGACY_SERVER_KEY);
+        // `shift_remove`, not `remove`: under `preserve_order` the latter is a
+        // swap_remove and reorders the keys of somebody else's servers.
+        servers.shift_remove(LEGACY_SERVER_KEY);
     }
     servers.insert(SERVER_KEY.to_string(), entry_for(binary));
 }
@@ -124,7 +126,7 @@ pub fn strip(config: &mut Value) {
     if let Some(servers) = config.get_mut(SERVERS_KEY).and_then(Value::as_object_mut) {
         for key in [SERVER_KEY, LEGACY_SERVER_KEY] {
             if servers.get(key).is_some_and(is_ours) {
-                servers.remove(key);
+                servers.shift_remove(key); // keeps the others' order
             }
         }
     }

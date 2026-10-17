@@ -12,13 +12,20 @@
 //! is the one list; this dispatches on the same strings, so a handler that is
 //! registered and a handler that exists cannot drift apart unnoticed.
 //!
-//! ## Fail open, without exception
+//! ## The guard fails closed; nothing else can refuse
 //!
-//! Every handler swallows its errors and allows. A hook runs on the critical
-//! path of somebody's session: a panic here does not degrade yadgar, it breaks
-//! the agent. The only thing that may ever exit non-zero is
-//! [`pre_tool_guard`], and only on a positively matched dangerous command —
-//! never on an error, never on uncertainty.
+//! [`pre_tool_guard`] is the only handler that can exit non-zero. It refuses a
+//! positively matched dangerous command, and it also refuses when it cannot
+//! judge the call at all: a payload that is not JSON (see [`dispatch`]) or a
+//! panic (see [`process::contain_panic`]). Both used to let the tool run — exit 0
+//! for the payload, and status 101 for the panic, which Claude Code reads as a
+//! non-blocking error (ledger 1570). A guard that allows what it could not read
+//! is a guard any malformed call walks past.
+//!
+//! A command the guard reads but cannot DECIDE (a script file, an alias) still
+//! allows; `guard.rs` lists those cases. Every other handler name allows,
+//! whatever its payload: a retired handler judges nothing, and refusing on its
+//! behalf would block a session over a no-op.
 //!
 //! ## How a refusal reaches the agent client
 //!
@@ -42,6 +49,7 @@ use serde_json::Value;
 
 mod guard;
 mod policy;
+pub mod process;
 
 pub use guard::pre_tool_guard;
 pub use policy::{Policy, EXCEPTIONS_FILE};
@@ -85,15 +93,32 @@ pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>) -> Decision {
     }
 }
 
+/// [`run`], for a payload that may not have been readable.
+///
+/// An unreadable payload REFUSES under the guard and allows under every other
+/// name; the module docs say why.
+pub fn dispatch(name: &str, payload: Result<Value, String>, exceptions: Option<&Path>) -> Decision {
+    match payload {
+        Ok(payload) => run(name, &payload, exceptions),
+        Err(e) if name == "pre-tool-guard" => Decision::Deny(format!(
+            "refused: the hook payload could not be read ({e}), so this tool call \
+             was not checked. Retry it; if this repeats, run `yaadgaar verify`."
+        )),
+        Err(_) => Decision::Allow,
+    }
+}
+
 /// The hook payload the agent client writes to this process's stdin.
 ///
-/// Separate from [`run`] so the dispatch is testable without a process.
-pub fn read_stdin() -> Value {
+/// `Err` when stdin cannot be read or is not JSON — never a stand-in value,
+/// because `Null` is a payload the guard allows. Separate from [`run`] so the
+/// dispatch is testable without a process.
+pub fn read_stdin() -> Result<Value, String> {
     let mut buf = String::new();
-    if std::io::stdin().read_to_string(&mut buf).is_err() {
-        return Value::Null;
-    }
-    serde_json::from_str(&buf).unwrap_or(Value::Null)
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("stdin: {e}"))?;
+    serde_json::from_str(&buf).map_err(|e| format!("not JSON: {e}"))
 }
 
 #[cfg(test)]
@@ -163,6 +188,22 @@ mod tests {
             Decision::Deny(_)
         ));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_payload_refuses_under_the_guard_and_only_there() {
+        let err = || Err("not JSON: eof".to_string());
+        let Decision::Deny(reason) = dispatch("pre-tool-guard", err(), None) else {
+            panic!("the guard allowed a call it could not read");
+        };
+        assert!(reason.contains("not JSON: eof"), "{reason}");
+        for name in RETIRED {
+            assert_eq!(dispatch(name, err(), None), Decision::Allow, "{name}");
+        }
+        assert!(matches!(
+            dispatch("pre-tool-guard", Ok(bash("terraform apply")), None),
+            Decision::Deny(_)
+        ));
     }
 
     #[test]

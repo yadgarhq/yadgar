@@ -326,18 +326,26 @@ fn removing_an_emptied_hook_event_keeps_the_order_of_the_others() {
     );
 }
 
-/// Make *store* unreadable (mode 000); `None` when this process can read it
-/// anyway (root, or a filesystem that ignores the mode) — then there is
-/// nothing to test, the rule `refusals.rs` states for permission tests.
+/// Make *store* unreadable (mode 000), or FAIL saying why that is impossible.
+///
+/// A FAILURE, not a skip. These tests used to `return` green when the process
+/// could read the file anyway — as root, or on a filesystem that ignores the
+/// mode — so a root CI reported them passing having asserted nothing. A
+/// precondition that cannot be met is a failure, the same rule
+/// `require_symlink` states in `mod.rs`.
 #[cfg(unix)]
-fn make_unreadable(store: &Path) -> Option<()> {
+fn make_unreadable(store: &Path) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(store, std::fs::Permissions::from_mode(0o000)).unwrap();
     if std::fs::read(store).is_ok() {
         std::fs::set_permissions(store, std::fs::Permissions::from_mode(0o644)).unwrap();
-        return None;
+        panic!(
+            "{} is still readable at mode 000: this process runs as root or the \
+             filesystem ignores permissions, so this test cannot check anything. \
+             Run the suite as an ordinary user.",
+            store.display()
+        );
     }
-    Some(())
 }
 
 #[cfg(unix)]
@@ -347,13 +355,11 @@ fn restore_readable(store: &Path) {
 }
 
 /// The notice for a target that could not be read: names the target and the
-/// exact line, and does not claim the line is missing.
+/// exact line, and does not claim the line is missing. *check* is what the
+/// person is told to verify, which differs between install and uninstall.
 #[cfg(unix)]
-fn assert_unreadable_notice(notices: &[String], store: &Path, line: &str) {
-    let expected = format!(
-        "could not read {}; check that it contains {line}",
-        store.display()
-    );
+fn assert_unreadable_notice(notices: &[String], store: &Path, check: &str) {
+    let expected = format!("could not read {}; {check}", store.display());
     assert!(
         notices.iter().any(|n| n.contains(&expected)),
         "no notice says {expected:?}: {notices:#?}"
@@ -370,15 +376,17 @@ fn install_on_an_unreadable_symlink_target_says_it_could_not_read_it() {
     let (home, store) = nix_home("coexist-unreadable-install", |line| format!("{line}\n"));
     let layout = Layout::new(&home);
     let line = format!("@{}", layout.rules().display());
-    let Some(()) = make_unreadable(&store) else {
-        return;
-    };
+    make_unreadable(&store);
 
     let outcome = install_with(&home, Path::new(BINARY));
 
     restore_readable(&store);
     let summary = outcome.expect("an unreadable symlink target must not fail install");
-    assert_unreadable_notice(&summary.notices, &store, &line);
+    assert_unreadable_notice(
+        &summary.notices,
+        &store,
+        &format!("check that it contains {line}"),
+    );
     assert!(std::fs::symlink_metadata(layout.claude_md())
         .unwrap()
         .file_type()
@@ -392,14 +400,27 @@ fn uninstall_on_an_unreadable_symlink_target_says_it_could_not_read_it() {
     let layout = Layout::new(&home);
     let line = format!("@{}", layout.rules().display());
     install_with(&home, Path::new(BINARY)).unwrap();
-    let Some(()) = make_unreadable(&store) else {
-        return;
-    };
+    make_unreadable(&store);
 
     let outcome = uninstall(&home);
 
     restore_readable(&store);
     let summary = outcome.expect("an unreadable symlink target must not fail uninstall");
-    assert_unreadable_notice(&summary.notices, &store, &line);
+    // After an uninstall the rules file is GONE, so the line must come out:
+    // "check that it contains" would tell somebody to keep an import of a file
+    // that no longer exists.
+    assert_unreadable_notice(
+        &summary.notices,
+        &store,
+        &format!("check that it no longer contains {line}: the rules file it imports was deleted"),
+    );
+    assert!(
+        !summary
+            .notices
+            .iter()
+            .any(|n| n.contains("check that it contains")),
+        "uninstall told somebody to keep the line: {:#?}",
+        summary.notices
+    );
     assert!(!layout.rules().exists(), "the rules file was left behind");
 }

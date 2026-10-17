@@ -94,12 +94,10 @@ impl Layout {
 
     /// Never written and never removed: it holds decisions a human made.
     ///
-    /// Referenced only by the test that proves an uninstall leaves it alone,
-    /// which is the point — no code path here touches it, and the name exists so
-    /// that stays deliberate rather than accidental.
-    #[allow(dead_code)]
+    /// READ by the guard (`yaadgaar hook pre-tool-guard`) for `disabled_guards`,
+    /// and by nothing else. No install, uninstall or repair path touches it.
     pub fn exceptions(&self) -> PathBuf {
-        self.claude_dir().join("yadgar-hook-exceptions.json")
+        self.claude_dir().join(crate::hook::EXCEPTIONS_FILE)
     }
 }
 
@@ -267,7 +265,10 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
         match rules::has_reference(&layout.claude_md(), &reference) {
             Ok(true) => notices.push(rules::undeclare_notice(&layout.claude_md(), &reference)),
             Ok(false) => {}
-            Err(_) => notices.push(rules::unreadable_notice(&layout.claude_md(), &reference)),
+            Err(_) => notices.push(rules::unreadable_undeclare_notice(
+                &layout.claude_md(),
+                &reference,
+            )),
         }
         false
     } else {

@@ -47,7 +47,7 @@
 
 use serde_json::Value;
 
-use super::Decision;
+use super::{Decision, Policy, EXCEPTIONS_FILE};
 use crate::install::shellword::{shell_commands, SimpleCommand};
 
 /// Refuse a tool call that the standing rules forbid.
@@ -56,7 +56,7 @@ use crate::install::shellword::{shell_commands, SimpleCommand};
 /// an agent once used Edit rather than Bash to add itself to the push
 /// allowlist, pushed to master, then reverted the file to conceal it — and a
 /// Bash-only matcher never even routed the call to the guard.
-pub fn pre_tool_guard(payload: &Value) -> Decision {
+pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
     let tool = payload
         .get("tool_name")
         .and_then(Value::as_str)
@@ -71,7 +71,7 @@ pub fn pre_tool_guard(payload: &Value) -> Decision {
     };
 
     match tool {
-        "Bash" => bash(&field("command"), 0),
+        "Bash" => bash(&field("command"), 0, policy),
 
         // ONLY THE PATH. An edit executes nothing, so its CONTENT is text a
         // person wrote and not a command anybody ran. Reading the content is
@@ -79,7 +79,7 @@ pub fn pre_tool_guard(payload: &Value) -> Decision {
         // MIGRATION_NOTES.md — the exact action the rule it enforces asks for.
         "Edit" | "Write" | "NotebookEdit" => {
             let path = [field("file_path"), field("notebook_path")].join("\n");
-            if is_the_exceptions_file(&path) {
+            if policy.hook_config_tamper && is_the_exceptions_file(&path) {
                 return Decision::Deny(EXCEPTIONS.into());
             }
             Decision::Allow
@@ -96,12 +96,14 @@ pub fn pre_tool_guard(payload: &Value) -> Decision {
 /// exists to protect. Two is every real case seen; deeper fails open.
 const MAX_NESTING: usize = 2; // ADR-0569-EXCEPTION(CB): bound on recursive -c unwrapping, not a per-install knob.
 
-fn bash(line: &str, depth: usize) -> Decision {
+fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
     let commands = shell_commands(line);
 
     // Asked over the WHOLE line, because this is the one rule where mentioning
     // is the act. It is still gated on something in the line doing the posting.
-    if posts_a_digger_command(line, &commands) {
+    // Each rule is skipped only when the exceptions file switched its id off;
+    // see `policy.rs` for which id covers which rule.
+    if policy.terraform_family && posts_a_digger_command(line, &commands) {
         return Decision::Deny(DIGGER.into());
     }
 
@@ -109,20 +111,22 @@ fn bash(line: &str, depth: usize) -> Decision {
         let Some((program, args)) = executed(command) else {
             continue;
         };
-        if runs_terraform(program, args) {
+        if policy.terraform_family && runs_terraform(program, args) {
             return Decision::Deny(TERRAFORM.into());
         }
-        if skips_hooks(program, args) {
+        if policy.git_commit_flags && skips_hooks(program, args) {
             return Decision::Deny(HOOK_BYPASS.into());
         }
-        if writes_the_exceptions_file(program, args, &command.writes_to) {
+        if policy.hook_config_tamper
+            && writes_the_exceptions_file(program, args, &command.writes_to)
+        {
             return Decision::Deny(EXCEPTIONS.into());
         }
         // A `-c` script is part of the command, so it is read. The rule is about
         // what runs, and `sh -c 'terraform apply'` runs terraform.
         if SHELLS.contains(&program) && depth < MAX_NESTING {
             if let Some(script) = value_of(args, "-c") {
-                if let Decision::Deny(reason) = bash(script, depth + 1) {
+                if let Decision::Deny(reason) = bash(script, depth + 1, policy) {
                     return Decision::Deny(reason);
                 }
             }
@@ -376,8 +380,6 @@ fn mentions_a_digger_command(text: &str) -> bool {
 }
 
 // ── the exceptions file ──────────────────────────────────────────────────────
-
-const EXCEPTIONS_FILE: &str = "yadgar-hook-exceptions.json";
 
 /// Commands that write a file named on their command line.
 ///

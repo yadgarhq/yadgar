@@ -13,8 +13,8 @@ mod legacy;
 mod private;
 
 pub use legacy::{hint as legacy_hint, legacy_dir};
-pub(crate) use private::create_exclusive;
 use private::write_private;
+pub(crate) use private::{create_first_free, temp_names};
 
 /// `yaadgaar`, NOT `yadgar`. Up to 0.1.4 this was `yadgar`, the directory the
 /// yadgar memory engine keeps its `config.yaml` and `secrets.env` in. Sharing it

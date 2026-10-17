@@ -17,9 +17,9 @@ use std::path::{Path, PathBuf};
 /// rather than redirecting it, and the credential is never readable by anyone
 /// else, not even for the instant before a chmod.
 ///
-/// A NAME UNIQUE TO THIS WRITE (see [`tmp_path`]), not a fixed one. Several
-/// `serve` processes write the tool cache at once; with one shared name, one
-/// would unlink or rename another's half-written file.
+/// A NAME UNIQUE TO THIS WRITE (see [`temp_names`]), not a fixed one.
+/// Several `serve` processes write the tool cache at once; with one shared
+/// name, one would unlink or rename another's half-written file.
 ///
 /// The fresh file is also the OWNER PROBE: it belongs to whoever this process
 /// runs as, so a directory with a different owner is refused before a byte is
@@ -29,10 +29,21 @@ pub(super) fn write_private(
     name: &str,
     body: &[u8],
 ) -> Result<(), (PathBuf, std::io::Error)> {
+    write_private_at(dir, name, body, temp_names(dir, &format!(".{name}")))
+}
+
+/// [`write_private`], trying the temporary names *candidates* in order.
+///
+/// Separate so a test can plant something at EXACTLY the name tried first.
+pub(super) fn write_private_at(
+    dir: &Path,
+    name: &str,
+    body: &[u8],
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> Result<(), (PathBuf, std::io::Error)> {
     use std::io::Write as _;
     create_private_dir(dir).map_err(|e| (dir.to_path_buf(), e))?;
-    let tmp = tmp_path(dir, name);
-    let mut file = create_exclusive(&tmp).map_err(|e| (tmp.clone(), e))?;
+    let (tmp, mut file) = create_first_free(candidates).map_err(|e| (dir.to_path_buf(), e))?;
     if let Err(e) = check_owner(dir, &file).and_then(|()| tighten(dir)) {
         let _ = std::fs::remove_file(&tmp);
         return Err((dir.to_path_buf(), e));
@@ -49,13 +60,53 @@ pub(super) fn write_private(
     })
 }
 
-/// `.<name>.<pid>.<n>.tmp` in *dir*: the pid keeps processes apart, the
-/// counter keeps one process's concurrent writes apart.
-fn tmp_path(dir: &Path, name: &str) -> PathBuf {
+/// How many temporary names one write tries before giving up.
+///
+/// Each name already taken is a crash leftover or a planted file; sixteen in a
+/// row is not an accident to retry past.
+const TEMP_ATTEMPTS: usize = 16; // ADR-0569-EXCEPTION(CB): bound on a retry loop over temporary names, not a per-install knob.
+
+/// `<stem>.<pid>.<n>.tmp` in *dir*, [`TEMP_ATTEMPTS`] of them, lazily.
+///
+/// The pid keeps processes apart and the counter keeps one process's writes
+/// apart. Neither is enough on its own after a crash: a container restart or a
+/// short CLI run can reuse a pid, and the counter restarts at zero, so the
+/// first name can already be taken by a leftover. [`create_first_free`] moves
+/// past it.
+pub(crate) fn temp_names(dir: &Path, stem: &str) -> impl Iterator<Item = PathBuf> {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    dir.join(format!(".{name}.{}.{n}.tmp", std::process::id()))
+    let dir = dir.to_path_buf();
+    let stem = stem.to_string();
+    let pid = std::process::id();
+    (0..TEMP_ATTEMPTS).map(move |_| {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        dir.join(format!("{stem}.{pid}.{n}.tmp"))
+    })
+}
+
+/// Create the first of *candidates* that nothing occupies, through
+/// [`create_exclusive`].
+///
+/// ONLY `AlreadyExists` moves on — a leftover file or a planted link, either
+/// of which is left exactly as it was. Any other error is returned at once.
+pub(crate) fn create_first_free(
+    candidates: impl IntoIterator<Item = PathBuf>,
+) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let mut last = None;
+    for path in candidates {
+        match create_exclusive(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "no temporary name was free",
+        )
+    }))
 }
 
 /// Make *dir* exist, owner-only (ledger 1547).

@@ -52,27 +52,39 @@ pub fn write_atomic(path: &Path, value: &Value) -> anyhow::Result<()> {
 /// Write *text* over *path* atomically: temp file in the same directory, then
 /// rename. Same directory because a rename across filesystems is not atomic and
 /// falls back to a copy — which is precisely the truncation this avoids.
+///
+/// THE TEMPORARY FILE IS CREATED, NEVER OPENED (ledger 1574). The old
+/// `.<name>.yadgar-tmp.<pid>` was predictable and `fs::write` follows a
+/// symlink, so a link planted there received the file's contents and the
+/// rename made the target that link. `config::create_first_free` creates it
+/// with `O_CREAT|O_EXCL|O_NOFOLLOW` at 0600 and moves past a name already
+/// taken.
 pub fn write_atomic_text(path: &Path, text: &str) -> anyhow::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir)?;
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("yadgar");
-    // A NAME UNIQUE TO THIS WRITE, CREATED NEVER OPENED (ledger 1574). The old
-    // `.<name>.yadgar-tmp.<pid>` was predictable and `fs::write` follows a
-    // symlink, so a link planted there received the file's contents and the
-    // rename made the target that link. `config::create_exclusive` refuses
-    // anything already at the path and creates the file 0600.
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!(".{name}.yadgar-tmp.{}.{n}", std::process::id()));
+    let names = crate::config::temp_names(dir, &format!(".{name}.yadgar-tmp"));
+    write_atomic_text_at(path, text, names)
+}
 
-    let mut created = false;
+/// [`write_atomic_text`], trying the temporary names *candidates* in order.
+///
+/// Separate so a test can plant something at EXACTLY the name tried first.
+fn write_atomic_text_at(
+    path: &Path,
+    text: &str,
+    candidates: impl IntoIterator<Item = std::path::PathBuf>,
+) -> anyhow::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+
+    let mut tmp = None;
     let result = (|| -> std::io::Result<()> {
         use std::io::Write as _;
-        let mut file = crate::config::create_exclusive(&tmp)?;
-        created = true;
+        let (at, mut file) = crate::config::create_first_free(candidates)?;
+        let at = tmp.insert(at);
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
         drop(file);
@@ -81,15 +93,15 @@ pub fn write_atomic_text(path: &Path, text: &str) -> anyhow::Result<()> {
         // yadgar does not own (ledger 1547). A file that did not exist stays
         // 0600.
         if let Ok(meta) = std::fs::metadata(path) {
-            let _ = std::fs::set_permissions(&tmp, meta.permissions());
+            let _ = std::fs::set_permissions(&*at, meta.permissions());
         }
-        std::fs::rename(&tmp, path)
+        std::fs::rename(&*at, path)
     })();
 
-    // Only a file this call created is removed: anything else at the path was
-    // somebody else's, and refusing it is the point.
-    if result.is_err() && created {
-        let _ = std::fs::remove_file(&tmp);
+    // Only a file this call created is removed: anything else at a candidate
+    // name was somebody else's, and refusing it is the point.
+    if let (Err(_), Some(at)) = (&result, &tmp) {
+        let _ = std::fs::remove_file(at);
     }
     result.map_err(|e| anyhow::anyhow!("cannot write {}: {e}", path.display()))
 }
@@ -422,24 +434,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_write_never_follows_a_symlink_planted_at_the_temporary_path() {
-        // Ledger 1574: the temporary name was predictable
-        // (`.<name>.yadgar-tmp.<pid>`) and `fs::write` follows a symlink, so a
-        // link planted there received settings.json's contents, and the rename
-        // then made settings.json that link.
+    fn a_write_never_follows_a_symlink_at_its_next_temporary_name() {
+        // Ledger 1574: the temporary name was predictable and `fs::write`
+        // followed a symlink there, so the link received settings.json's
+        // contents and the rename made settings.json that link. The name is
+        // INJECTED, so the link sits exactly where the write tries first.
         let dir = crate::install::tests::scratch("jsonfile-link");
         let victim = dir.join("victim");
         std::fs::write(&victim, "untouched").unwrap();
-        let planted = dir.join(format!(".settings.json.yadgar-tmp.{}", std::process::id()));
-        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let taken = dir.join(".taken.tmp");
+        std::os::unix::fs::symlink(&victim, &taken).unwrap();
         let path = dir.join("settings.json");
 
-        write_atomic_text(&path, "ours\n").unwrap();
+        write_atomic_text_at(&path, "ours\n", [taken, dir.join(".free.tmp")]).unwrap();
 
         assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
         let meta = std::fs::symlink_metadata(&path).unwrap();
         assert!(meta.file_type().is_file(), "settings.json became a link");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "ours\n");
+    }
+
+    #[test]
+    fn a_leftover_at_the_next_temporary_name_does_not_block_a_write() {
+        let dir = crate::install::tests::scratch("jsonfile-leftover");
+        let taken = dir.join(".taken.tmp");
+        std::fs::write(&taken, "leftover").unwrap();
+        let path = dir.join("settings.json");
+
+        write_atomic_text_at(&path, "ours\n", [taken.clone(), dir.join(".free.tmp")]).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ours\n");
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "leftover");
     }
 
     #[cfg(unix)]

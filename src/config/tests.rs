@@ -417,28 +417,6 @@ fn plant_tmp_link(dir: &Path, name: &str) -> PathBuf {
 
 #[cfg(unix)]
 #[test]
-fn save_never_writes_through_a_symlink_planted_at_its_temporary_path() {
-    // Ledger 1553: `fs::write` follows a symlink, so a link at
-    // `.config.json.tmp` sent the bearer token into whatever it pointed at, and
-    // the rename then made `config.json` itself that link.
-    let dir = tempdir();
-    let victim = plant_tmp_link(&dir, FILE);
-    Config::new(&dir, "https://gw".into(), "secret".into())
-        .save()
-        .unwrap();
-    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
-    let meta = std::fs::symlink_metadata(dir.join(FILE)).unwrap();
-    assert!(
-        meta.file_type().is_file(),
-        "config.json is not a plain file"
-    );
-    let loaded = Config::load_from(&dir).unwrap();
-    assert_eq!(loaded.token(), "secret");
-    std::fs::remove_dir_all(&dir).ok();
-}
-
-#[cfg(unix)]
-#[test]
 fn the_temporary_file_is_created_exclusively_and_never_through_a_link() {
     let dir = tempdir();
     let victim = plant_tmp_link(&dir, "x");
@@ -497,17 +475,66 @@ fn concurrent_writes_all_land_and_leave_no_temporary_file_behind() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Two temporary names handed to `write_private_at`: *taken* is planted with
+/// something by the test, *free* is not. Injected rather than predicted, so the
+/// planted name is EXACTLY the one the write tries first (review of #60: tests
+/// planting at a name the code never uses passed against a link-following
+/// create).
+fn temp_names(dir: &Path) -> (PathBuf, PathBuf) {
+    (dir.join(".taken.tmp"), dir.join(".free.tmp"))
+}
+
 #[cfg(unix)]
 #[test]
-fn the_tool_cache_never_writes_through_a_planted_symlink_either() {
+fn a_symlink_at_the_next_temporary_name_is_skipped_and_never_written_through() {
+    // Ledger 1553: `fs::write` followed a symlink at the temporary name, so the
+    // link received the bearer token and the rename made config.json the link.
     let dir = tempdir();
-    let victim = plant_tmp_link(&dir, TOOL_CACHE);
-    Config::new(&dir, "https://gw".into(), "secret".into())
-        .write_tool_cache("[]")
-        .unwrap();
+    let victim = dir.join("victim");
+    std::fs::write(&victim, "untouched").unwrap();
+    let (taken, free) = temp_names(&dir);
+    std::os::unix::fs::symlink(&victim, &taken).unwrap();
+
+    private::write_private_at(&dir, FILE, b"secret", [taken.clone(), free]).unwrap();
+
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
-    let meta = std::fs::symlink_metadata(dir.join(TOOL_CACHE)).unwrap();
-    assert!(meta.file_type().is_file(), "the cache is not a plain file");
+    let meta = std::fs::symlink_metadata(dir.join(FILE)).unwrap();
+    assert!(
+        meta.file_type().is_file(),
+        "config.json is not a plain file"
+    );
+    assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), "secret");
+    assert!(std::fs::symlink_metadata(&taken)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_leftover_at_the_next_temporary_name_does_not_block_the_write() {
+    // A crash leftover plus a reused pid (containers, short CLI runs) used to
+    // make the first save fail on `AlreadyExists`. The write moves on to the
+    // next name and leaves the leftover alone.
+    let dir = tempdir();
+    let (taken, free) = temp_names(&dir);
+    std::fs::write(&taken, "leftover").unwrap();
+
+    private::write_private_at(&dir, FILE, b"secret", [taken.clone(), free]).unwrap();
+
+    assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), "secret");
+    assert_eq!(std::fs::read_to_string(&taken).unwrap(), "leftover");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn when_every_temporary_name_is_taken_the_write_fails_and_writes_nothing() {
+    let dir = tempdir();
+    let (taken, _) = temp_names(&dir);
+    std::fs::write(&taken, "leftover").unwrap();
+    let err = private::write_private_at(&dir, FILE, b"secret", [taken]).unwrap_err();
+    assert_eq!(err.1.kind(), std::io::ErrorKind::AlreadyExists, "{err:?}");
+    assert!(!dir.join(FILE).exists());
     std::fs::remove_dir_all(&dir).ok();
 }
 

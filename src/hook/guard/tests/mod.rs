@@ -2,17 +2,25 @@
 
 use super::*;
 use serde_json::json;
+
+mod disabled;
+
+/// The guard with every refusal on: what a machine with no exceptions file gets.
+fn guard(call: &Value) -> Decision {
+    pre_tool_guard(call, &Policy::ALL_ON)
+}
+
 fn bash_call(command: &str) -> Value {
     json!({"tool_name": "Bash", "tool_input": {"command": command}})
 }
 
 fn denies(command: &str) -> bool {
-    matches!(pre_tool_guard(&bash_call(command)), Decision::Deny(_))
+    matches!(guard(&bash_call(command)), Decision::Deny(_))
 }
 
 /// The reason a call was refused under, for the tests that assert WHICH rule.
 fn reason_for(call: &Value) -> String {
-    match pre_tool_guard(call) {
+    match guard(call) {
         Decision::Deny(reason) => reason,
         Decision::Allow => panic!("the call was allowed rather than refused: {call}"),
     }
@@ -129,7 +137,7 @@ fn writing_a_digger_command_into_a_file_is_the_remedy_and_not_the_offence() {
             "content": "Post this on the pull request yourself:\n\n    digger apply\n"
         }
     });
-    assert_eq!(pre_tool_guard(&write), Decision::Allow);
+    assert_eq!(guard(&write), Decision::Allow);
 }
 
 #[test]
@@ -143,7 +151,7 @@ fn an_edit_is_judged_on_its_path_and_not_on_its_text() {
             "new_string": "run `terraform apply` on the bastion, then `digger unlock`"
         }
     });
-    assert_eq!(pre_tool_guard(&edit), Decision::Allow);
+    assert_eq!(guard(&edit), Decision::Allow);
 
     // And the same for the exceptions file BY NAME. Only the path decides;
     // a note that mentions the file is a note.
@@ -154,7 +162,7 @@ fn an_edit_is_judged_on_its_path_and_not_on_its_text() {
             "content": "the allowlist lives in ~/.claude/yadgar-hook-exceptions.json"
         }
     });
-    assert_eq!(pre_tool_guard(&note), Decision::Allow);
+    assert_eq!(guard(&note), Decision::Allow);
 }
 
 #[test]
@@ -171,7 +179,7 @@ fn the_exceptions_file_is_protected_from_edit_not_just_bash() {
             }
         });
         assert!(
-            matches!(pre_tool_guard(&call), Decision::Deny(_)),
+            matches!(guard(&call), Decision::Deny(_)),
             "{tool} was allowed to write the exceptions file"
         );
     }
@@ -181,17 +189,14 @@ fn the_exceptions_file_is_protected_from_edit_not_just_bash() {
 fn an_unreadable_payload_allows_rather_than_denying() {
     // Fail OPEN. A guard that denied on a payload it could not parse would
     // block the session on its own bug.
-    assert_eq!(pre_tool_guard(&Value::Null), Decision::Allow);
-    assert_eq!(
-        pre_tool_guard(&json!({"tool_name": "Bash"})),
-        Decision::Allow
-    );
+    assert_eq!(guard(&Value::Null), Decision::Allow);
+    assert_eq!(guard(&json!({"tool_name": "Bash"})), Decision::Allow);
 }
 
 #[test]
 fn a_tool_the_guard_does_not_cover_is_allowed() {
     let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/etc/passwd"}});
-    assert_eq!(pre_tool_guard(&read), Decision::Allow);
+    assert_eq!(guard(&read), Decision::Allow);
 }
 
 #[test]

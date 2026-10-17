@@ -167,7 +167,17 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Serve => proxy::serve(config::Config::load()?).await,
+        Command::Serve => {
+            let config = config::Config::load().inspect_err(|e| {
+                // STDERR, through tracing: stdout is the MCP transport here.
+                if matches!(e, config::ConfigError::Missing) {
+                    if let Some(hint) = legacy_config_hint() {
+                        tracing::warn!("{hint}");
+                    }
+                }
+            })?;
+            proxy::serve(config).await
+        }
 
         Command::Install => {
             // ADR-0511 mints the install id HERE. It is separate from the four
@@ -182,6 +192,9 @@ async fn main() -> anyhow::Result<()> {
             if let Some(note) = claude_code_note(std::env::var_os("PATH").as_deref()) {
                 println!("{note}");
             }
+            if let Some(hint) = legacy_config_hint() {
+                println!("{hint}");
+            }
             report(
                 "installed",
                 "nothing to do — the agent environment is already registered.",
@@ -195,7 +208,12 @@ async fn main() -> anyhow::Result<()> {
         ),
         // `verify` prints its own report and returns `Err` on drift, so this
         // exits non-zero without anyone remembering to check a return value.
-        Command::Verify => install::verify(&home()?),
+        Command::Verify => {
+            if let Some(hint) = legacy_config_hint() {
+                println!("{hint}");
+            }
+            install::verify(&home()?)
+        }
 
         Command::Login {
             gateway,
@@ -299,7 +317,11 @@ fn blob_source(
 /// handler that fails open leaves no trace, and a handler that refuses is the
 /// only thing in this binary that ever exits non-zero.
 fn dispatch_hook(name: &str) -> anyhow::Result<()> {
-    match hook::run(name, &hook::read_stdin()) {
+    // NOT `home()?`. An error here exits 1, which Claude Code reads as a hook
+    // that merely failed — and lets the tool run. A home that cannot be found
+    // is `None`, and `None` leaves every guard on.
+    let exceptions = dirs::home_dir().map(|h| install::Layout::new(&h).exceptions());
+    match hook::run(name, &hook::read_stdin(), exceptions.as_deref()) {
         // Silence. An allow that printed would add a line to the transcript on
         // every single tool call.
         hook::Decision::Allow => Ok(()),
@@ -331,6 +353,15 @@ fn mint_instance() {
             tracing::warn!("could not record this install's id: {e}");
         }
     }
+}
+
+/// The hint to log in again, when only a 0.1.4-era config exists.
+///
+/// Read-only: existence checks on two file names in the old directory, which
+/// is the memory engine's now. See `config::legacy`.
+fn legacy_config_hint() -> Option<String> {
+    let legacy = config::legacy_dir()?;
+    config::legacy_hint(&config::base_dir(), &legacy)
 }
 
 /// One line for `install` to print when Claude Code is not on *path*.

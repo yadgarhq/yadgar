@@ -9,7 +9,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const DIR: &str = "yadgar";
+mod legacy;
+
+pub use legacy::{hint as legacy_hint, legacy_dir};
+
+/// `yaadgaar`, NOT `yadgar`. Up to 0.1.4 this was `yadgar`, the directory the
+/// yadgar memory engine keeps its `config.yaml` and `secrets.env` in. Sharing it
+/// made every write here a write beside another program's secrets; see
+/// [`legacy`] for how an old config is noticed without being touched.
+const DIR: &str = "yaadgaar";
 const FILE: &str = "config.json";
 const TOOL_CACHE: &str = "tools-cache.json";
 
@@ -66,7 +74,7 @@ pub struct Config {
     /// process-global directory while the config itself came from wherever
     /// [`Config::load_from`] was pointed — so a test that loaded a config from a
     /// temp directory still read and OVERWROTE the real
-    /// `~/.config/yadgar/tools-cache.json` on the machine running it. Every
+    /// `~/.config/yaadgaar/tools-cache.json` on the machine running it. Every
     /// path a `Config` touches now comes from the `Config`.
     ///
     /// Skipped by serde in BOTH directions: it is where the file is, so writing
@@ -151,13 +159,24 @@ fn require_https(gateway: &str, path: &Path) -> Result<(), ConfigError> {
     }
 }
 
+/// The variable that overrides [`base_dir`], so tests never touch a real one.
+pub const CONFIG_DIR_ENV: &str = "YAADGAAR_CONFIG_DIR";
+
 /// The config directory, overridable so tests never touch a real one.
 pub fn base_dir() -> PathBuf {
-    if let Ok(over) = std::env::var("YADGAR_CONFIG_DIR") {
+    base_dir_from(std::env::var_os(CONFIG_DIR_ENV), dirs::config_dir())
+}
+
+/// [`base_dir`] given what it reads: the override, and the OS config directory.
+///
+/// Separate so the rule is a unit test and not a mutation of the process-wide
+/// environment, which every other test in the binary shares.
+fn base_dir_from(over: Option<std::ffi::OsString>, config_root: Option<PathBuf>) -> PathBuf {
+    if let Some(over) = over {
         // ADR-0569-EXCEPTION(ABS): overridable only so tests avoid a real config directory; absence is the production path.
         return PathBuf::from(over);
     }
-    dirs::config_dir()
+    config_root
         .unwrap_or_else(|| PathBuf::from(".")) // ADR-0569-EXCEPTION(ABS): config dir fallback when the OS names no config directory.
         .join(DIR)
 }
@@ -320,10 +339,11 @@ impl Config {
 ///
 /// **A DIRECTORY THIS CREATES is made 0700 whatever it is called**: nobody
 /// else's permissions can be changed by creating it. **AN EXISTING ONE is
-/// tightened only when its leaf is `yadgar`** — the leaf [`base_dir`] builds,
-/// which covers the `./yadgar` fallback for an OS that names no config
-/// directory and a `YADGAR_CONFIG_DIR` that happens to end in `yadgar`. An
-/// override under any other name keeps the permissions somebody gave it.
+/// tightened only when its leaf is `yaadgaar`** — the leaf [`base_dir`] builds,
+/// which covers the `./yaadgaar` fallback for an OS that names no config
+/// directory and a `YAADGAAR_CONFIG_DIR` that happens to end in `yaadgaar`. An
+/// override under any other name keeps the permissions somebody gave it — and
+/// that now includes `~/.config/yadgar`, the memory engine's directory.
 /// **A SYMLINK IS NEVER TIGHTENED**: `set_permissions` follows the link, and
 /// its target belongs to whatever declared it (home-manager, for one). Only
 /// the leaf: the parents are created with the default mode, because a missing

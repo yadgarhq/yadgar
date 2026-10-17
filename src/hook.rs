@@ -61,12 +61,15 @@
 //!   the status blocks even if the JSON is somehow lost.
 
 use std::io::Read as _;
+use std::path::Path;
 
 use serde_json::Value;
 
 mod guard;
+mod policy;
 
 pub use guard::pre_tool_guard;
+pub use policy::{Policy, EXCEPTIONS_FILE};
 
 /// The exit status a positively matched refusal leaves.
 ///
@@ -118,33 +121,23 @@ fn event_for(name: &str) -> Option<&'static str> {
 ///
 /// The payload is a PARAMETER rather than read here, so every path through this
 /// function is reachable from a test. A `run` that read stdin itself could only
-/// be exercised by spawning a process, which is why it never was.
-pub fn run(name: &str, payload: &Value) -> Decision {
+/// be exercised by spawning a process, which is why it never was. *exceptions*
+/// is the path of the exceptions file, for the same reason: `None` when the
+/// home directory could not be found, which leaves every guard on.
+pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>) -> Decision {
     match name {
-        // The one handler that can refuse. Purely local — it inspects the
-        // command it was handed and needs nothing from the gateway, which is
-        // why it works before anything is deployed.
-        "pre-tool-guard" => pre_tool_guard(payload),
+        // The one handler, and the one that can refuse. Purely local — it
+        // inspects the command it was handed and needs nothing from the
+        // gateway. The exceptions file is read here and nowhere else, so a
+        // stale entry for any other name never opens it.
+        "pre-tool-guard" => pre_tool_guard(payload, &Policy::load(exceptions)),
 
-        // Everything else needs the gateway, and the gateway has no hook
-        // endpoints yet. These are INERT rather than fake: they do nothing,
-        // report nothing, and `yaadgaar verify` names them as inert so their
-        // silence cannot be mistaken for them working. The Python version's
-        // stub-not-noop rule, applied to a half-built server.
-        other if is_managed(other) => Decision::Allow,
-
-        // An unknown name means settings.json and this binary disagree — most
-        // likely a stale entry from an older install. Allow, and let `verify`
-        // be the thing that says so.
+        // Any other name is an entry an older install left behind: up to 0.1.4
+        // `install` registered eleven more handlers, all of them inert, and they
+        // keep firing until the next `yaadgaar install` strips them. Allow,
+        // silently, and let `verify` be the thing that names them.
         _ => Decision::Allow,
     }
-}
-
-/// Handlers this binary knows about, mirroring the install-side list.
-fn is_managed(name: &str) -> bool {
-    crate::install::hooks::MANAGED_HOOKS
-        .iter()
-        .any(|h| h.name == name)
 }
 
 /// The hook payload the agent client writes to this process's stdin.
@@ -217,7 +210,7 @@ mod tests {
         // `run` was never called by anything, so eight passing tests of
         // `pre_tool_guard` read as coverage of a deny path that could not
         // refuse. This is the end-to-end seam: name in, wire format out.
-        let decision = run("pre-tool-guard", &bash("git commit --no-verify -m x"));
+        let decision = run("pre-tool-guard", &bash("git commit --no-verify -m x"), None);
         let Decision::Deny(reason) = decision else {
             panic!("the dispatcher allowed a command the guard refuses");
         };
@@ -225,11 +218,49 @@ mod tests {
         assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
     }
 
+    /// The handlers 0.1.4 and earlier registered beside the guard, all inert.
+    const RETIRED: &[&str] = &[
+        "pre-compact-drain",
+        "session-start-context",
+        "post-compact-rehydrate",
+        "post-tool-capture",
+        "block-reflect",
+        "prompt-recall",
+        "stop-checkpoint",
+        "session-end-capture",
+        "instructions-loaded",
+        "subagent-start",
+        "file-changed",
+    ];
+
     #[test]
-    fn an_inert_handler_allows_through_the_dispatcher() {
-        // Registered, needs the gateway, and the gateway has no hook endpoints
-        // yet. It must do nothing rather than refuse.
-        assert_eq!(run("session-start-context", &Value::Null), Decision::Allow);
+    fn an_entry_an_older_install_left_behind_allows_through_the_dispatcher() {
+        // Until the next `install` strips them, these keep firing. They must do
+        // nothing, even on a call the guard would refuse.
+        for name in RETIRED {
+            assert_eq!(
+                run(name, &bash("terraform apply"), None),
+                Decision::Allow,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_guard_switched_off_in_the_exceptions_file_allows_through_the_dispatcher() {
+        // The file is read by `run`, from the path it is handed — not only by
+        // `Policy` in isolation.
+        let dir = std::env::temp_dir().join(format!("yaadgaar-hook-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(EXCEPTIONS_FILE);
+        std::fs::write(&path, r#"{"disabled_guards":["git_commit_flags"]}"#).unwrap();
+        let call = bash("git commit --no-verify -m x");
+        assert_eq!(run("pre-tool-guard", &call, Some(&path)), Decision::Allow);
+        assert!(matches!(
+            run("pre-tool-guard", &bash("terraform apply"), Some(&path)),
+            Decision::Deny(_)
+        ));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -240,14 +271,17 @@ mod tests {
     }
 
     #[test]
-    fn every_registered_handler_is_known_to_the_dispatcher() {
+    fn every_registered_handler_is_a_real_handler_in_the_dispatcher() {
         // The drift this pins: a handler registered in settings.json that this
-        // binary does not recognise fires on every session and does nothing,
-        // silently. One list, checked from both ends.
+        // binary does not dispatch fires on every session and does nothing,
+        // silently. Every registration must reach a handler that can refuse.
         for spec in crate::install::hooks::MANAGED_HOOKS {
             assert!(
-                is_managed(spec.name),
-                "{} is registered but the dispatcher does not know it",
+                matches!(
+                    run(spec.name, &bash("terraform apply"), None),
+                    Decision::Deny(_)
+                ),
+                "{} is registered but the dispatcher does not run it",
                 spec.name
             );
         }

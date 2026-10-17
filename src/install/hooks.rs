@@ -47,100 +47,39 @@ pub const HOOKS_KEY: &str = "hooks";
 pub struct HookSpec {
     /// The Claude Code event key.
     pub event: &'static str,
-    /// The argument passed to `yadgar hook`, and the handler's name.
+    /// The argument passed to `yaadgaar hook`, and the handler's name.
     pub name: &'static str,
     /// Claude Code's tool/source matcher. Empty means "every one".
     pub matcher: &'static str,
     /// Claude Code's `async` flag: fire and forget, the session does not wait.
+    /// No current registration sets it; kept so a handler that must not block
+    /// (a compaction drain, say) can come back without a schema change.
     pub fire_and_forget: bool,
 }
 
-/// Twelve registrations across ten event keys.
+/// ONE registration: the guard, the only handler that does any work.
 ///
-/// Two events carry two entries each and that is deliberate: `SessionStart`
-/// fires once normally and once after a compaction (matcher `compact`), and the
-/// two need different handlers because a rehydrate is not a fresh start.
-/// `PostToolUse` has a generic capture plus a narrow matcher for yadgar's own
-/// block writes.
-pub const MANAGED_HOOKS: &[HookSpec] = &[
-    HookSpec {
-        event: "PreCompact",
-        name: "pre-compact-drain",
-        matcher: "",
-        // The one fire-and-forget entry: a compaction must not block on a drain.
-        fire_and_forget: true,
-    },
-    HookSpec {
-        event: "SessionStart",
-        name: "session-start-context",
-        matcher: "",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "SessionStart",
-        name: "post-compact-rehydrate",
-        matcher: "compact",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "PostToolUse",
-        name: "post-tool-capture",
-        matcher: "",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "PostToolUse",
-        name: "block-reflect",
-        matcher: "mcp__yaadgaar__block_(create|update|delete|replace|append)",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "UserPromptSubmit",
-        name: "prompt-recall",
-        matcher: "",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "PreToolUse",
-        // Edit/Write/NotebookEdit are in the matcher because of a real incident:
-        // an agent used Edit, not Bash, to add itself to the hook exceptions
-        // file, pushed to a protected branch, then reverted the file to conceal
-        // it. A Bash-only matcher never even routed that call to the guard.
-        name: "pre-tool-guard",
-        matcher: "Bash|Edit|Write|NotebookEdit",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "Stop",
-        name: "stop-checkpoint",
-        matcher: "",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "SessionEnd",
-        name: "session-end-capture",
-        matcher: "",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "InstructionsLoaded",
-        name: "instructions-loaded",
-        matcher: "",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "SubagentStart",
-        name: "subagent-start",
-        matcher: "",
-        fire_and_forget: false,
-    },
-    HookSpec {
-        event: "FileChanged",
-        name: "file-changed",
-        matcher: "",
-        fire_and_forget: false,
-    },
-];
+/// Up to 0.1.4 this list held twelve. Eleven of them needed hook endpoints the
+/// gateway does not have, so they did nothing — while still spawning this
+/// binary on every tool call, prompt, stop and compaction, beside the memory
+/// engine's own hooks, and turning into eleven "command not found" errors per
+/// event the day the binary path went stale. They come back one at a time, each
+/// with the gateway endpoint that gives it something to do.
+///
+/// Nothing else is needed to retire the eleven: [`merge`] strips EVERY entry of
+/// ours before appending, and "ours" is the invocation shape (see
+/// [`is_managed`]), not a handler name in this list. So the next `install` over
+/// a 0.1.4 machine removes all twelve and writes back this one.
+pub const MANAGED_HOOKS: &[HookSpec] = &[HookSpec {
+    event: "PreToolUse",
+    // Edit/Write/NotebookEdit are in the matcher because of a real incident:
+    // an agent used Edit, not Bash, to add itself to the hook exceptions
+    // file, pushed to a protected branch, then reverted the file to conceal
+    // it. A Bash-only matcher never even routed that call to the guard.
+    name: "pre-tool-guard",
+    matcher: "Bash|Edit|Write|NotebookEdit",
+    fire_and_forget: false,
+}];
 
 /// The command string written into `settings.json` for one spec.
 pub fn command_for(binary: &Path, name: &str) -> String {
@@ -292,8 +231,15 @@ fn strip_managed(hooks: &mut serde_json::Map<String, Value>) -> usize {
         array.retain_mut(|entry| {
             let gone = strip_entry(entry);
             removed += gone;
-            // Keep the entry unless we took the last thing in it.
-            gone == 0 || !entry_commands(entry).is_empty()
+            // Keep the entry unless we took the last thing in it. Counted on
+            // the RAW `hooks` array, not on `entry_commands`: an http, prompt
+            // or agent hook has no `command`, and counting commands called an
+            // entry holding one of those empty and deleted it.
+            gone == 0
+                || entry
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|hooks| !hooks.is_empty())
         });
         if array.is_empty() && before > 0 {
             emptied.push(event.clone());
@@ -424,6 +370,32 @@ mod tests {
                 "/usr/bin/other-tool run",
                 "/usr/local/bin/yaadgaar hook stop-checkpoint"
             ]
+        );
+    }
+
+    #[test]
+    fn a_fire_and_forget_entry_carries_async_true_and_an_ordinary_one_omits_it() {
+        // No registration sets `fire_and_forget` today, so this pins the shape
+        // directly: `async` is a key Claude Code reads, present and true, and
+        // absent rather than false on every other entry.
+        let spec = HookSpec {
+            event: "PreCompact",
+            name: "pre-compact-drain",
+            matcher: "",
+            fire_and_forget: true,
+        };
+        assert_eq!(
+            entry_for(Path::new("/usr/local/bin/yaadgaar"), &spec).to_string(),
+            r#"{"matcher":"","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-compact-drain","async":true}]}"#
+        );
+        let ordinary = HookSpec {
+            fire_and_forget: false,
+            ..spec
+        };
+        assert!(
+            entry_for(Path::new("/usr/local/bin/yaadgaar"), &ordinary)["hooks"][0]
+                .get("async")
+                .is_none()
         );
     }
 

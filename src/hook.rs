@@ -22,43 +22,18 @@
 //!
 //! ## How a refusal reaches the agent client
 //!
-//! A `Decision` that nothing serialises refuses nothing, so the wire format is
-//! part of this module rather than an afterthought at the call site. Claude
-//! Code reads a hook's STDOUT as JSON and maps it before it looks at the exit
-//! code — verified against the installed client, `claude-code-2.1.251`, whose
-//! hook-result reducer contains, literally:
+//! A refusal is exit status [`REFUSED_EXIT_CODE`] plus the reason as plain text
+//! on STDERR, and nothing on stdout. That is the documented contract for a
+//! blocking hook: "Exit with code 2 to block the action ... The message that
+//! comes with the block is your hook's stderr." (Claude Code hooks reference,
+//! "Exit code 2".) The same page advises one approach per hook, either exit
+//! codes alone or exit 0 with JSON, so no JSON is printed.
 //!
-//! ```text
-//! switch(e.hookSpecificOutput.hookEventName){case"PreToolUse":
-//!   if(e.hookSpecificOutput.permissionDecision)
-//!     switch(e.hookSpecificOutput.permissionDecision){ …
-//!       case"deny": O.permissionBehavior="deny",
-//!         O.blockingError={blockingError:
-//!           e.hookSpecificOutput.permissionDecisionReason||e.reason
-//!           ||"Blocked by hook",command:t};break;
-//! ```
-//!
-//! and, on the same reducer, the event-agnostic older form:
-//!
-//! ```text
-//! if(e.decision)switch(e.decision){ …
-//!   case"block": O.permissionBehavior="deny",
-//!     O.blockingError={blockingError:e.reason||"Blocked by hook",command:t};
-//! ```
-//!
-//! Two details from the same source decide the shape [`refusal`] emits:
-//!
-//! * The reducer **throws** when `hookSpecificOutput.hookEventName` is not the
-//!   event that fired — `Hook returned incorrect event name: expected '…' but
-//!   got '…'`. A second literal for the event name here would turn every
-//!   refusal into a silent allow, which is exactly D76's dead-pipeline shape
-//!   inside the one handler written to refuse. So the event is read from
-//!   [`crate::install::MANAGED_HOOKS`], never written twice.
-//! * Stdout is parsed BEFORE any exit-code branch, and status 2 is separately a
-//!   blocking error (`if(nr.status===2&&!xn.blockingError)` — it fills in from
-//!   stderr only when the JSON did not already refuse). So a refusal both prints
-//!   the JSON and exits [`REFUSED_EXIT_CODE`]: the JSON carries the reason, and
-//!   the status blocks even if the JSON is somehow lost.
+//! The earlier shape printed a `hookSpecificOutput` JSON to stdout and left
+//! stderr empty. The block held, because status 2 blocks on its own, but the
+//! agent was shown no reason: measured on a real home, a refusal arrived as
+//! "No stderr output". Exit 2 also fails closed if the client ever changes how
+//! it parses stdout, which exit 0 plus JSON would not.
 
 use std::io::Read as _;
 use std::path::Path;
@@ -85,36 +60,6 @@ pub enum Decision {
     Allow,
     /// Refuse, with a reason the agent shows the person.
     Deny(String),
-}
-
-/// The JSON a refusal writes to stdout, in the form the agent client honours.
-///
-/// See the module note for the citation. The event name is looked up rather
-/// than written: a mismatch is thrown on, not ignored.
-pub fn refusal(name: &str, reason: &str) -> String {
-    match event_for(name) {
-        Some(event) => serde_json::json!({
-            "hookSpecificOutput": {
-                "hookEventName": event,
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        }),
-        // A handler this binary can refuse from but cannot name an event for
-        // should be impossible — [`run`] only refuses from a registered
-        // handler. If it ever happens, the event-agnostic form still blocks,
-        // where guessing an event name would throw and allow.
-        None => serde_json::json!({ "decision": "block", "reason": reason }),
-    }
-    .to_string()
-}
-
-/// The event key the registration for *name* fires on.
-fn event_for(name: &str) -> Option<&'static str> {
-    crate::install::MANAGED_HOOKS
-        .iter()
-        .find(|h| h.name == name)
-        .map(|h| h.event)
 }
 
 /// Run one hook. Never returns an error: the caller allows regardless.
@@ -161,61 +106,18 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_is_emitted_in_the_form_the_agent_client_honours() {
-        // The shape, pinned against literals read off claude-code-2.1.251's own
-        // hook-result reducer. Getting any one of the three keys wrong is not a
-        // degraded refusal, it is no refusal at all.
-        let v: Value =
-            serde_json::from_str(&refusal("pre-tool-guard", "because it would delete master"))
-                .unwrap();
-        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
-        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert_eq!(
-            v["hookSpecificOutput"]["permissionDecisionReason"],
-            "because it would delete master"
-        );
-    }
-
-    #[test]
-    fn the_event_a_refusal_names_is_the_one_its_registration_fires_on() {
-        // The reducer THROWS on a mismatch — `Hook returned incorrect event
-        // name` — and a thrown reducer refuses nothing. So this is not a
-        // cosmetic assertion: a second literal for the event name is a silent
-        // allow, which is D76's dead-pipeline shape inside the one handler
-        // written to refuse.
-        let registered = crate::install::MANAGED_HOOKS
-            .iter()
-            .find(|h| h.name == "pre-tool-guard")
-            .expect("the guard is registered");
-        let v: Value = serde_json::from_str(&refusal("pre-tool-guard", "no")).unwrap();
-        assert_eq!(
-            v["hookSpecificOutput"]["hookEventName"], registered.event,
-            "the refusal names an event the registration does not fire on"
-        );
-    }
-
-    #[test]
-    fn a_handler_with_no_registration_still_blocks() {
-        // Guessing an event name would throw and therefore ALLOW. The
-        // event-agnostic form is the one the same reducer maps without ever
-        // comparing an event.
-        let v: Value = serde_json::from_str(&refusal("not-a-registered-handler", "no")).unwrap();
-        assert_eq!(v["decision"], "block");
-        assert_eq!(v["reason"], "no");
-        assert!(v["hookSpecificOutput"].is_null());
-    }
-
-    #[test]
     fn the_guard_refuses_through_the_dispatcher_and_not_only_in_isolation() {
         // `run` was never called by anything, so eight passing tests of
         // `pre_tool_guard` read as coverage of a deny path that could not
-        // refuse. This is the end-to-end seam: name in, wire format out.
+        // refuse. This is the end-to-end seam: name in, reason out.
         let decision = run("pre-tool-guard", &bash("git commit --no-verify -m x"), None);
         let Decision::Deny(reason) = decision else {
             panic!("the dispatcher allowed a command the guard refuses");
         };
-        let v: Value = serde_json::from_str(&refusal("pre-tool-guard", &reason)).unwrap();
-        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            !reason.trim().is_empty(),
+            "a refusal needs a reason on stderr"
+        );
     }
 
     /// The handlers 0.1.4 and earlier registered beside the guard, all inert.

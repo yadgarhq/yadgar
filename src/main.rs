@@ -326,16 +326,19 @@ fn dispatch_hook(name: &str) -> anyhow::Result<()> {
         // every single tool call.
         hook::Decision::Allow => Ok(()),
         hook::Decision::Deny(reason) => {
-            let body = hook::refusal(name, &reason);
-            // FLUSHED BEFORE THE EXIT, and not for tidiness. `process::exit` runs
-            // no destructors, so an unflushed line is simply lost — and a lost
-            // body still blocks (status 2 is a blocking error on its own) while
-            // reporting "No stderr output" as the reason. The refusal would work
-            // and explain nothing.
-            let mut out = std::io::stdout().lock();
-            let _ = writeln!(out, "{body}");
-            let _ = out.flush();
-            drop(out);
+            // The reason goes to STDERR, because that is what Claude Code
+            // feeds the model on exit 2; stdout is not read. Nothing goes to
+            // stdout: one approach per hook.
+            //
+            // FLUSHED BEFORE THE EXIT, and not for tidiness. `process::exit`
+            // runs no destructors, so an unflushed line is simply lost — and a
+            // lost reason still blocks (status 2 is a blocking error on its
+            // own) while the agent sees "No stderr output". The refusal would
+            // work and explain nothing.
+            let mut err = std::io::stderr().lock();
+            let _ = writeln!(err, "yaadgaar {name}: {reason}");
+            let _ = err.flush();
+            drop(err);
             std::process::exit(hook::REFUSED_EXIT_CODE);
         }
     }

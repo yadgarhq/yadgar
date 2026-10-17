@@ -59,7 +59,7 @@ const EXPECTED_REGISTRATIONS: &[(&str, &str, &str, bool)] = &[
     (
         "PostToolUse",
         "block-reflect",
-        "mcp__yadgar__block_(create|update|delete|replace|append)",
+        "mcp__yaadgaar__block_(create|update|delete|replace|append)",
         false,
     ),
     ("UserPromptSubmit", "prompt-recall", "", false),

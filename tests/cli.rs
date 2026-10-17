@@ -85,7 +85,7 @@ fn seed_an_installed_home(home: &Path) {
     .unwrap();
     std::fs::write(
         home.join(".claude.json"),
-        r#"{"numStartups":41,"mcpServers":{"yadgar":{"type":"stdio","command":"/usr/local/bin/yaadgaar","args":["serve"]}}}"#,
+        r#"{"numStartups":41,"mcpServers":{"yaadgaar":{"type":"stdio","command":"/usr/local/bin/yaadgaar","args":["serve"]}}}"#,
     )
     .unwrap();
     std::fs::write(&rules, "# the rules yadgar owns\n").unwrap();
@@ -188,7 +188,7 @@ fn an_uninstall_leaves_the_configs_of_a_machine_it_was_installed_on() {
     .unwrap();
     std::fs::write(
         home.join(".claude.json"),
-        r#"{"mcpServers":{"other-server":{},"yadgar":{"type":"stdio","command":"/usr/local/bin/yaadgaar","args":["serve"]}}}"#,
+        r#"{"mcpServers":{"other-server":{},"yaadgaar":{"type":"stdio","command":"/usr/local/bin/yaadgaar","args":["serve"]}}}"#,
     )
     .unwrap();
 

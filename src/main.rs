@@ -429,6 +429,7 @@ fn report_lines(verb: &str, nothing: &str, s: &install::Summary) -> Vec<String> 
     if s.claude_md_changed {
         lines.push(format!("{verb} the reference line in CLAUDE.md"));
     }
+    lines.extend(s.notices.iter().cloned());
     if lines.is_empty() {
         lines.push(nothing.to_string());
     }

@@ -58,7 +58,7 @@ fn verify_catches_a_credential_left_in_the_mcp_config() {
     install_with(&home, Path::new(BINARY)).unwrap();
     let layout = Layout::new(&home);
     let mut config = read_json(&layout.mcp_config());
-    config["mcpServers"]["yadgar"]["headers"] = json!({ "Authorization": "Bearer leaked" });
+    config["mcpServers"]["yaadgaar"]["headers"] = json!({ "Authorization": "Bearer leaked" });
     std::fs::write(layout.mcp_config(), config.to_string()).unwrap();
 
     assert!(drift(&home)
@@ -187,7 +187,7 @@ fn verify_catches_an_mcp_entry_of_the_wrong_shape() {
     install_with(&home, Path::new(BINARY)).unwrap();
 
     let mut config = read_json(&layout.mcp_config());
-    config["mcpServers"]["yadgar"]["type"] = json!("http");
+    config["mcpServers"]["yaadgaar"]["type"] = json!("http");
     std::fs::write(layout.mcp_config(), config.to_string()).unwrap();
     let found = drift(&home);
     assert!(
@@ -198,7 +198,7 @@ fn verify_catches_an_mcp_entry_of_the_wrong_shape() {
     );
 
     let mut config = read_json(&layout.mcp_config());
-    config["mcpServers"]["yadgar"] = json!({ "type": "stdio" });
+    config["mcpServers"]["yaadgaar"] = json!({ "type": "stdio" });
     std::fs::write(layout.mcp_config(), config.to_string()).unwrap();
     let found = drift(&home);
     assert!(

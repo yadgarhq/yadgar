@@ -8,7 +8,8 @@
 //! prose somebody wrote by hand. An owned file has no markers to get wrong.
 //!
 //! Into `CLAUDE.md`, yadgar writes exactly one line: the `@` reference, first,
-//! or nothing.
+//! or nothing. A line already present anywhere is left where it is, and a
+//! `CLAUDE.md` that is a symlink is never written at all.
 
 use std::path::Path;
 
@@ -30,6 +31,89 @@ const RULES_BODY: &str = include_str!("assets/rules.md");
 /// in `~/.claude` or in a repository.
 pub fn reference_line(rules_path: &Path) -> String {
     format!("@{}", rules_path.display())
+}
+
+/// What install does about the reference line, decided before anything is written.
+#[derive(Debug, PartialEq)]
+pub enum ReferencePlan {
+    /// The exact line is already in the file, wherever it sits. Nothing to write.
+    Present,
+    /// The file is ours to write into, and the line goes first.
+    Write,
+    /// `CLAUDE.md` is a symlink and lacks the line. Never written: the notice
+    /// tells the person which line to add to whatever generates it.
+    Declared(String),
+}
+
+/// Decide what to do about the reference, refusing only where a write is due.
+///
+/// The order is the whole design. The exact line ANYWHERE means there is
+/// nothing to write, so nothing to refuse — whether the file is a symlink,
+/// read-only, or neither; `verify` has always accepted it anywhere
+/// (`health::check_rules`), and an install that disagreed refused on a machine
+/// `verify` called healthy. A symlink without the line is somebody else's file
+/// (nix, most likely): a notice, not a failure, because everything this client
+/// owns can still be installed. A symlink whose target cannot be read is a
+/// notice too, saying so rather than claiming the line is missing. Only a
+/// regular file that needs the line goes
+/// through [`check_reference_target`]'s refusals.
+pub fn plan_reference(claude_md: &Path, line: &str) -> anyhow::Result<ReferencePlan> {
+    let link = is_symlink(claude_md);
+    match has_reference(claude_md, line) {
+        Ok(true) => Ok(ReferencePlan::Present),
+        Err(_) if link => Ok(ReferencePlan::Declared(unreadable_notice(claude_md, line))),
+        Ok(false) if link => Ok(ReferencePlan::Declared(format!(
+            "{} is a symlink (-> {}), so something else declares it — nix, most \
+             likely — and yaadgaar did not edit it. Add this line to whatever \
+             generates it so Claude Code reads the rules:\n    {line}",
+            claude_md.display(),
+            link_target(claude_md),
+        ))),
+        Ok(false) => {
+            check_reference_target(claude_md)?;
+            Ok(ReferencePlan::Write)
+        }
+        Err(e) => {
+            check_reference_target(claude_md)?;
+            Err(e)
+        }
+    }
+}
+
+/// The notice for a symlinked `CLAUDE.md` whose target cannot be read.
+///
+/// Not "add this line": the line may well be there, and telling somebody to add
+/// a line they already declared sends them to edit the wrong thing. Not a
+/// failure either — the file is never written, so nothing here needs to read it.
+pub fn unreadable_notice(claude_md: &Path, line: &str) -> String {
+    format!(
+        "{} is a symlink, and yaadgaar did not edit it: could not read {}; \
+         check that it contains {line}",
+        claude_md.display(),
+        link_target(claude_md),
+    )
+}
+
+/// The notice uninstall gives when the line sits in a symlinked `CLAUDE.md`.
+pub fn undeclare_notice(claude_md: &Path, line: &str) -> String {
+    format!(
+        "{} is a symlink (-> {}), so yaadgaar did not edit it. Remove this line \
+         from whatever generates it:\n    {line}",
+        claude_md.display(),
+        link_target(claude_md),
+    )
+}
+
+/// Whether *path* is itself a symlink. Absent or uninspectable reads as not:
+/// the callers then reach the read or the write, which report the real error.
+pub fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+fn link_target(path: &Path) -> String {
+    std::fs::read_link(path)
+        .map(|t| t.display().to_string())
+        .unwrap_or_default()
 }
 
 /// Refuse to write a `CLAUDE.md` that is not ours to write.
@@ -136,18 +220,19 @@ pub fn has_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
     Ok(read(claude_md)?.lines().any(|l| l.trim() == line))
 }
 
-/// Put the reference on the first line. Returns whether the file changed.
+/// Put the reference on the first line, unless it is already somewhere.
+/// Returns whether the file changed.
 ///
-/// Idempotent in the strong sense: when the line is already first, the file is
-/// not written at all — not rewritten identically. Rewriting would change the
-/// mtime of a file yadgar does not own on every install, for no reason.
+/// Idempotent in the strong sense: when the line is already present, the file
+/// is not written at all — not rewritten identically, and not reordered.
+/// Rewriting would change the mtime of a file yadgar does not own on every
+/// install, and moving the line would undo wherever somebody chose to put it.
 pub fn ensure_reference(claude_md: &Path, line: &str) -> anyhow::Result<bool> {
     let existing = read(claude_md)?;
-    let desired = format!("{line}\n{}", without_line(&existing, line));
-    if desired == existing {
+    if existing.lines().any(|l| l.trim() == line) {
         return Ok(false);
     }
-    write_atomic_text(claude_md, &desired)?;
+    write_atomic_text(claude_md, &format!("{line}\n{existing}"))?;
     Ok(true)
 }
 
@@ -214,221 +299,4 @@ fn without_line(text: &str, line: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The tools the gateway serves, as `tools/list` names them.
-    ///
-    /// **A TEST FIXTURE, NOT A REGISTRY.** This client holds no per-tool code
-    /// (D75): `tools/list` is forwarded and answered by the gateway alone. The
-    /// rules file is the one place this repository NAMES tools, in prose for
-    /// the agent, and that prose has to name tools that exist. So the names
-    /// live here, inside `#[cfg(test)]`, and nowhere in the shipped binary.
-    ///
-    /// **IT PINS `assets/rules.md` TO A HAND-COPIED LIST, NOT TO THE LIVE
-    /// GATEWAY.** Nothing here can see what a deployment serves; a gateway that
-    /// renames a tool leaves this green. The rules therefore point the agent at
-    /// the `tools/list` descriptions as the authority and name these five as
-    /// the current set.
-    ///
-    /// Source: `yadgarhq/gateway` `src/tools.rs` `SERVED` at `2b970b7`, and the
-    /// `tools/list` measured on a VM against chart v0.24.17 on 2026-10-17
-    /// (ledger 1543), which returned exactly these five. When the gateway
-    /// grows a tool, this list and `assets/rules.md` change together.
-    const GATEWAY_TOOLS: [&str; 5] = [
-        "create_task",
-        "read_task",
-        "find_tasks",
-        "edit_task",
-        "transition_task",
-    ];
-
-    /// Every `backticked` span in *text*.
-    fn backticked(text: &str) -> Vec<&str> {
-        text.split('`').skip(1).step_by(2).collect()
-    }
-
-    #[test]
-    fn the_rules_name_every_tool_the_gateway_serves() {
-        // Ledger 1543: the rules told the agent to call `task_list`,
-        // `task_get` and `task_write` — none of which the gateway serves — so
-        // an agent following its own instructions failed on every call.
-        let spans = backticked(RULES_BODY);
-        for tool in GATEWAY_TOOLS {
-            assert!(
-                spans.contains(&tool),
-                "the rules never name `{tool}`, which the gateway serves"
-            );
-        }
-    }
-
-    #[test]
-    fn the_rules_name_no_tool_the_gateway_does_not_serve() {
-        // A backticked identifier that LOOKS like a tool — about tasks,
-        // memories, the wiki, or recall — and is not served is an instruction
-        // the agent cannot follow. Status names and argument names
-        // (`in_progress`, `expect_version`) carry none of these words.
-        const TOOL_WORDS: [&str; 6] = ["task", "tasks", "memory", "memorize", "wiki", "recall"];
-        for span in backticked(RULES_BODY) {
-            let identifier =
-                !span.is_empty() && span.chars().all(|c| c.is_ascii_lowercase() || c == '_');
-            let tool_like = span.split('_').any(|w| TOOL_WORDS.contains(&w));
-            if identifier && tool_like {
-                assert!(
-                    GATEWAY_TOOLS.contains(&span),
-                    "the rules name `{span}`, which the gateway does not serve"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_rules_name_the_command_that_writes_them() {
-        // The executable is `yaadgaar`; `yadgar` on PATH is the Python client
-        // this one coexists with (ADR-0505), so naming it sends a reader to the
-        // wrong program.
-        assert!(RULES_BODY.contains("`yaadgaar install`"));
-        assert!(!RULES_BODY.contains("`yadgar install`"));
-    }
-
-    #[test]
-    fn the_reference_goes_first_and_the_rest_survives_byte_for_byte() {
-        let dir = crate::install::tests::scratch("rules-reference");
-        let path = dir.join("CLAUDE.md");
-        std::fs::write(&path, "# Mine\r\n\r\nprose with no trailing newline").unwrap();
-        assert!(ensure_reference(&path, "@/opt/yadgar-rules.md").unwrap());
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(
-            text,
-            "@/opt/yadgar-rules.md\n# Mine\r\n\r\nprose with no trailing newline"
-        );
-    }
-
-    #[test]
-    fn a_second_install_does_not_rewrite_the_file() {
-        // The failure this prevents: an install that appends its line again, or
-        // touches a file it does not own on every run.
-        let dir = crate::install::tests::scratch("rules-idempotent");
-        let path = dir.join("CLAUDE.md");
-        std::fs::write(&path, "existing\n").unwrap();
-        assert!(ensure_reference(&path, "@/opt/rules.md").unwrap());
-        assert!(!ensure_reference(&path, "@/opt/rules.md").unwrap());
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "@/opt/rules.md\nexisting\n"
-        );
-    }
-
-    /// A second install must not TOUCH `CLAUDE.md`, not merely leave it equal.
-    ///
-    /// `#[cfg(unix)]` for the reason `refusals.rs` states the rule for: this
-    /// needs an inode, which Windows has no equivalent of. The inode is the
-    /// discriminator rather than the mtime because it cannot flake on a clock
-    /// or on a filesystem's timestamp granularity — `write_atomic_text` renames
-    /// a fresh temp file over the target, so a rewrite changes the inode while
-    /// leaving every byte the same.
-    ///
-    /// That is exactly why `installing_twice_is_byte_identical` cannot see
-    /// this: it compares BYTES, and the property here is that a file yadgar
-    /// does not own is not written to at all. Deleting the
-    /// `if desired == existing { return Ok(false) }` early return left the
-    /// suite green.
-    #[cfg(unix)]
-    #[test]
-    fn a_second_install_does_not_touch_the_file_it_does_not_own() {
-        use std::os::unix::fs::MetadataExt;
-        let dir = crate::install::tests::scratch("rules-untouched");
-        let path = dir.join("CLAUDE.md");
-        std::fs::write(&path, "# my own instructions\n").unwrap();
-
-        assert!(ensure_reference(&path, "@/opt/rules.md").unwrap());
-        let first = std::fs::metadata(&path).unwrap().ino();
-
-        assert!(!ensure_reference(&path, "@/opt/rules.md").unwrap());
-
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().ino(),
-            first,
-            "a second install rewrote a file it does not own — the bytes are \
-             the same, and the file is not"
-        );
-    }
-
-    #[test]
-    fn a_file_left_holding_only_blank_lines_is_removed_too() {
-        // The residue this module set out to remove, in its nearest neighbour
-        // case. A `CLAUDE.md` created by install and holding the reference line
-        // plus one blank line came out of an uninstall as a one-byte file
-        // holding `"\n"` — the emptied file D76 says must not be left behind,
-        // one newline short of the case that was fixed.
-        //
-        // Whitespace is nothing in the sense this decision needs: there is no
-        // prose in it to lose. ONE WORD of somebody's writing and the file is
-        // written back instead, which the second half asserts.
-        let dir = crate::install::tests::scratch("rules-blank-residue");
-
-        let residue = dir.join("CLAUDE.md");
-        std::fs::write(&residue, "@/opt/rules.md\n\n").unwrap();
-        assert!(remove_reference(&residue, "@/opt/rules.md").unwrap());
-        assert!(
-            !residue.exists(),
-            "a file holding one newline was left behind: {:?}",
-            std::fs::read_to_string(&residue)
-        );
-
-        let theirs = dir.join("theirs.md");
-        std::fs::write(&theirs, "@/opt/rules.md\n\nmine\n").unwrap();
-        assert!(remove_reference(&theirs, "@/opt/rules.md").unwrap());
-        assert_eq!(
-            std::fs::read_to_string(&theirs).unwrap(),
-            "\nmine\n",
-            "somebody's own prose was deleted with the reference line"
-        );
-    }
-
-    /// Pins `read` itself, not the pre-flight check that also catches this.
-    ///
-    /// `install` refuses an unreadable `CLAUDE.md` twice over: once in
-    /// `check_reference_target`, before anything is written, and once here.
-    /// The end-to-end test can only ever see the first of them, so removing
-    /// this one — going back to `unwrap_or_default()` — was invisible through
-    /// the public path. Two independent defenses need two independent tests,
-    /// or one of them is decoration.
-    #[cfg(unix)]
-    #[test]
-    fn an_unreadable_file_is_an_error_rather_than_an_empty_one() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = crate::install::tests::scratch("rules-unreadable");
-        let path = dir.join("CLAUDE.md");
-        let theirs = "# my own instructions\n";
-        std::fs::write(&path, theirs).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o200)).unwrap();
-        if std::fs::read_to_string(&path).is_ok() {
-            // Root, or a filesystem that ignores the mode: nothing to test.
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-            return;
-        }
-
-        let outcome = ensure_reference(&path, "@/opt/yadgar-rules.md");
-
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(outcome.is_err(), "an unreadable file was treated as empty");
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            theirs,
-            "the person's instructions were overwritten"
-        );
-    }
-
-    #[test]
-    fn a_reference_further_down_is_moved_to_the_front_not_duplicated() {
-        let dir = crate::install::tests::scratch("rules-move");
-        let path = dir.join("CLAUDE.md");
-        std::fs::write(&path, "first\n@/opt/rules.md\nlast\n").unwrap();
-        ensure_reference(&path, "@/opt/rules.md").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&path).unwrap(),
-            "@/opt/rules.md\nfirst\nlast\n"
-        );
-    }
-}
+mod tests;

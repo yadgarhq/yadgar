@@ -1,8 +1,8 @@
-//! `yadgar install`, `uninstall` and `verify` — the whole client surface (D76).
+//! `yaadgaar install`, `uninstall` and `verify` — the whole client surface (D76).
 //!
 //! Three files are touched and no others: the agent's user-level MCP config
 //! (`~/.claude.json`), its settings (`~/.claude/settings.json`), and a rules
-//! file yadgar owns outright, referenced from the first line of `CLAUDE.md`.
+//! file yadgar owns outright, referenced by one line in `CLAUDE.md`.
 //!
 //! **Almost every rule in this module is a scar.** The Python installer this
 //! replaces shipped a directory of hook scripts; nix's home-manager kept its own
@@ -14,7 +14,7 @@
 //! The three properties that keep this from breaking somebody's machine:
 //!
 //! * **Pre-flight, then write.** Everything that can refuse — an ephemeral
-//!   binary path, a symlinked `CLAUDE.md`, an unparseable config — refuses
+//!   binary path, an unwritable `CLAUDE.md`, an unparseable config — refuses
 //!   before the first byte is written. A refusal discovered halfway through
 //!   leaves a half-install on exactly the machine the refusal exists for.
 //! * **Foreign-preserving merges.** Never `hooks[event] = [...]`. Other tools
@@ -116,8 +116,15 @@ pub struct Summary {
     pub mcp_changed: bool,
     /// False when the owned rules file already held exactly this body.
     pub rules_changed: bool,
-    /// False when the reference line was already the first line of `CLAUDE.md`.
+    /// False when `CLAUDE.md` was not written: the reference line was already
+    /// in it somewhere, or the file is not this client's to write.
     pub claude_md_changed: bool,
+    /// Things the person has to do by hand, printed whatever else changed.
+    ///
+    /// Today only one kind: `CLAUDE.md` is a symlink (nix, most likely), so the
+    /// reference line has to be added to — or taken out of — whatever generates
+    /// it. That is not a failure: everything this client owns is in place.
+    pub notices: Vec<String>,
 }
 
 /// Install with this binary's own path as the registered command.
@@ -136,14 +143,19 @@ pub fn install_with(home: &Path, binary: &Path) -> anyhow::Result<Summary> {
 
     // ── Pre-flight ───────────────────────────────────────────────────────────
     //
-    // Nothing below this block writes, and nothing above it can. On a
-    // nix-managed machine `CLAUDE.md` is a store symlink and this install MUST
-    // stop — if the hooks and the MCP entry had already landed, stopping here
-    // would leave a half-install rather than an untouched machine.
-    rules::check_reference_target(&layout.claude_md())?;
+    // Nothing below this block writes, and nothing above it can. A refusal
+    // after the hooks and the MCP entry had landed would leave a half-install
+    // rather than an untouched machine.
+    //
+    // A SYMLINKED `CLAUDE.md` (nix) is not a refusal: it is never written, and
+    // when it lacks the reference the summary carries a notice naming the line
+    // to add to whatever generates it. See `rules::plan_reference`.
+    let reference = rules::reference_line(&layout.rules());
+    let plan = rules::plan_reference(&layout.claude_md(), &reference)?;
     rules::check_owned(&layout.rules())?;
     let mut settings = jsonfile::load(&layout.settings())?;
     let mut mcp = jsonfile::load(&layout.mcp_config())?;
+    mcp::check(&mcp, &layout.mcp_config())?;
 
     // ── Writes ───────────────────────────────────────────────────────────────
     //
@@ -153,8 +165,15 @@ pub fn install_with(home: &Path, binary: &Path) -> anyhow::Result<Summary> {
     // a second install printed "installed 12 hook(s)" over a `settings.json`
     // that `installing_twice_is_byte_identical` proves did not move a byte.
     let rules_changed = rules::write_body(&layout.rules())?;
-    let reference = rules::reference_line(&layout.rules());
-    let claude_md_changed = rules::ensure_reference(&layout.claude_md(), &reference)?;
+    let mut notices = Vec::new();
+    let claude_md_changed = match plan {
+        rules::ReferencePlan::Write => rules::ensure_reference(&layout.claude_md(), &reference)?,
+        rules::ReferencePlan::Present => false,
+        rules::ReferencePlan::Declared(notice) => {
+            notices.push(notice);
+            false
+        }
+    };
 
     let settings_changed = merged(&mut settings, |s| hooks::merge(s, binary));
     if settings_changed {
@@ -175,6 +194,7 @@ pub fn install_with(home: &Path, binary: &Path) -> anyhow::Result<Summary> {
         mcp_changed,
         rules_changed,
         claude_md_changed,
+        notices,
     })
 }
 
@@ -236,11 +256,26 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
     // symlink is never written through, because replacing it with a regular
     // file would drift the machine from its own declared configuration. It is
     // reported rather than pre-flighted.
+    //
+    // A SYMLINK holding the line is a notice, not an error: everything this
+    // client owns is already gone, and the line belongs to whatever generates
+    // the file. Exiting non-zero there made a complete uninstall on a nix
+    // machine look like a failed one.
     let reference = rules::reference_line(&layout.rules());
-    if rules::has_reference(&layout.claude_md(), &reference).unwrap_or(false) {
-        rules::check_reference_target(&layout.claude_md())?;
-    }
-    let claude_md_changed = rules::remove_reference(&layout.claude_md(), &reference)?;
+    let mut notices = Vec::new();
+    let claude_md_changed = if rules::is_symlink(&layout.claude_md()) {
+        match rules::has_reference(&layout.claude_md(), &reference) {
+            Ok(true) => notices.push(rules::undeclare_notice(&layout.claude_md(), &reference)),
+            Ok(false) => {}
+            Err(_) => notices.push(rules::unreadable_notice(&layout.claude_md(), &reference)),
+        }
+        false
+    } else {
+        if rules::has_reference(&layout.claude_md(), &reference).unwrap_or(false) {
+            rules::check_reference_target(&layout.claude_md())?;
+        }
+        rules::remove_reference(&layout.claude_md(), &reference)?
+    };
 
     Ok(Summary {
         hooks: removed,
@@ -251,6 +286,7 @@ pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
         mcp_changed,
         rules_changed,
         claude_md_changed,
+        notices,
     })
 }
 

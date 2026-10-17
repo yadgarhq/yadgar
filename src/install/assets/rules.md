@@ -1,25 +1,46 @@
-# Yadgar
+# Yaadgaar task ledger
 
 <!--
   This file is written by `yaadgaar install` and REPLACED WHOLE on every run.
-  Yadgar owns it outright: anything added here by hand is lost on the next
-  install. Put your own instructions in CLAUDE.md, which yadgar only ever
+  yaadgaar owns it outright: anything added here by hand is lost on the next
+  install. Put your own instructions in CLAUDE.md, which yaadgaar only ever
   writes one line into (D76).
 -->
 
-Yadgar is available as an MCP server in this session. It holds this project's
-task list. Use it to record work that the next session must be able to find.
+The `yaadgaar` MCP server is available in this session. Its tools appear as
+`mcp__yaadgaar__*`. It holds this project's task list on the yadgarhq gateway.
+Use it to record work that the next session must be able to find.
 
-**The project is chosen for you.** The client names the project once, from
-the directory the session was started in: the first `.yadgar/project-id` file
-found walking up from it, otherwise the repository's `origin` remote. You do
-not pass a project to any tool. The project does not follow a `cd` during the
-session; to work on another project, start a new session there. If a call is
-refused because no project was sent, tell the person to write the project key
-into `.yadgar/project-id` at the repository root.
+**Up to three task systems can be live in one session. They are separate.**
+
+- `mcp__yaadgaar__*` (this server): this project's shared task ledger on the
+  yadgarhq gateway. Use it for work that must outlive this session. The rest
+  of this file is about these tools only.
+- `TaskCreate`, `TaskList` and the other Claude Code task tools: a checklist
+  for this session only. Use them to track the steps of the work in hand. They
+  are not kept after the session ends.
+- `mcp__yadgar__task_*`, if present: a different product, the yadgar memory
+  engine, with its own task list and its own rules. Its tools require a
+  `project_id` argument; `project` there is only an optional override. Follow
+  that server's own instructions for its tools. Nothing in this file applies to
+  them.
+
+Do not file the same task in both ledgers. Do not copy tasks from one ledger to
+the other unless the person asks. If both ledgers are present and CLAUDE.md
+does not say which to use for deferred work, ask the person once.
+
+**For `mcp__yaadgaar__*` tools, the project is chosen for you.** The client
+names the project once, from the directory the session was started in: the
+first `.yadgar/project-id` file found walking up from it, otherwise the
+repository's `origin` remote. You do not pass a project to these tools. The
+project does not follow a `cd` during the session; to work on another project,
+start a new session there. If a call is refused because no project was sent,
+tell the person to write the project key into `.yadgar/project-id` at the
+repository root.
 
 **The tools.** The descriptions and argument schemas in the server's tool list
-are the authority; read them. Today the tools are task tools:
+are the authority; read them. Today the tools are task tools, named here
+without the `mcp__yaadgaar__` prefix:
 
 - `find_tasks` lists the project's tasks, newest first, one page at a time.
   When the answer carries a `next_page_token`, pass it as `page_token` to get

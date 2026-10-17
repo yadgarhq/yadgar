@@ -32,9 +32,15 @@ fn the_mcp_entry_names_the_binary_and_carries_no_token() {
     install_with(&home, Path::new(BINARY)).unwrap();
 
     let config = read_json(&layout.mcp_config());
-    assert_eq!(config["mcpServers"]["yadgar"]["command"], BINARY);
-    assert_eq!(config["mcpServers"]["yadgar"]["args"], json!(["serve"]));
-    assert!(config["mcpServers"]["yadgar"].get("headers").is_none());
+    assert_eq!(config["mcpServers"]["yaadgaar"]["command"], BINARY);
+    assert_eq!(config["mcpServers"]["yaadgaar"]["args"], json!(["serve"]));
+    assert!(config["mcpServers"]["yaadgaar"].get("headers").is_none());
+    // The foreign `yadgar` entry (the memory MCP) is not ours: byte-identical.
+    assert_eq!(
+        config["mcpServers"]["yadgar"],
+        json!({ "type": "http", "url": "http://127.0.0.1:8765/mcp",
+                "headers": { "Authorization": "Bearer a-real-token" } })
+    );
     // Foreign servers and unrelated keys survive, values included.
     assert_eq!(config["mcpServers"]["browsermcp"]["command"], "npx");
     assert_eq!(config["numStartups"], 41);
@@ -88,7 +94,7 @@ fn uninstall_removes_ours_and_keeps_everything_else() {
     assert_eq!(settings["model"], "opus");
 
     let config = read_json(&layout.mcp_config());
-    assert!(config["mcpServers"].get("yadgar").is_none());
+    assert!(config["mcpServers"].get("yaadgaar").is_none());
     assert_eq!(config["mcpServers"]["browsermcp"]["command"], "npx");
 
     assert!(
@@ -122,7 +128,7 @@ fn the_rules_file_is_owned_and_referenced_from_the_first_line() {
     assert_eq!(claude_md.lines().count(), 2);
     assert!(std::fs::read_to_string(layout.rules())
         .unwrap()
-        .contains("Yadgar"));
+        .contains("yaadgaar"));
 }
 
 #[test]
@@ -350,4 +356,129 @@ fn uninstall_leaves_every_file_that_holds_somebody_elses_content() {
         "# my own instructions\n",
         "somebody's own instructions were deleted"
     );
+}
+
+const FOREIGN_YADGAR: &str = r#"{"mcpServers":{"yadgar":{"type":"http","url":"http://127.0.0.1:8765/mcp","headers":{"Authorization":"Bearer x"}}}}"#;
+
+#[test]
+fn a_foreign_yadgar_entry_survives_install_and_uninstall_unchanged() {
+    // The failure this prevents: the memory MCP registered under `yadgar` was
+    // overwritten by install and deleted by uninstall. Compared as parsed JSON,
+    // not bytes: install rewrites the file pretty-printed by design, so the
+    // property is that the `yadgar` entry and every other key are unchanged.
+    // The not-written-at-all case is `coexistence.rs`.
+    let home = scratch("foreign-yadgar");
+    let layout = Layout::new(&home);
+    std::fs::write(layout.mcp_config(), FOREIGN_YADGAR).unwrap();
+
+    install_with(&home, Path::new(BINARY)).unwrap();
+    let mut config = read_json(&layout.mcp_config());
+    assert!(config["mcpServers"].get("yaadgaar").is_some());
+    config["mcpServers"]
+        .as_object_mut()
+        .unwrap()
+        .remove("yaadgaar");
+    assert_eq!(
+        config,
+        serde_json::from_str::<Value>(FOREIGN_YADGAR).unwrap()
+    );
+
+    install_with(&home, Path::new(BINARY)).unwrap();
+    uninstall(&home).unwrap();
+    let after = read_json(&layout.mcp_config());
+    assert_eq!(
+        after,
+        serde_json::from_str::<Value>(FOREIGN_YADGAR).unwrap()
+    );
+}
+
+#[test]
+fn a_foreign_yaadgaar_entry_makes_install_refuse_and_write_nothing() {
+    let home = scratch("foreign-yaadgaar");
+    let layout = Layout::new(&home);
+    let foreign = r#"{"mcpServers":{"yaadgaar":{"type":"http","url":"http://example.test/mcp"}}}"#;
+    std::fs::write(layout.mcp_config(), foreign).unwrap();
+
+    let err = install_with(&home, Path::new(BINARY))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("yaadgaar"), "{err}");
+    assert!(err.contains(".claude.json"), "{err}");
+    assert_eq!(
+        std::fs::read_to_string(layout.mcp_config()).unwrap(),
+        foreign
+    );
+    // Pre-flight: nothing else landed either.
+    assert!(!layout.settings().exists());
+    assert!(!layout.rules().exists());
+}
+
+#[test]
+fn uninstall_leaves_a_foreign_yaadgaar_entry() {
+    let home = scratch("uninstall-foreign-yaadgaar");
+    let layout = Layout::new(&home);
+    let foreign = r#"{"mcpServers":{"yaadgaar":{"type":"http","url":"http://example.test/mcp"}}}"#;
+    std::fs::write(layout.mcp_config(), foreign).unwrap();
+
+    uninstall(&home).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(layout.mcp_config()).unwrap(),
+        foreign
+    );
+}
+
+#[test]
+fn installing_over_our_own_entry_updates_it_in_place() {
+    let home = scratch("own-entry");
+    let layout = Layout::new(&home);
+    install_with(&home, Path::new("/opt/old/yaadgaar")).unwrap();
+    install_with(&home, Path::new(BINARY)).unwrap();
+    let config = read_json(&layout.mcp_config());
+    assert_eq!(config["mcpServers"]["yaadgaar"]["command"], BINARY);
+    let before = std::fs::read(layout.mcp_config()).unwrap();
+    install_with(&home, Path::new(BINARY)).unwrap();
+    assert_eq!(std::fs::read(layout.mcp_config()).unwrap(), before);
+}
+
+#[test]
+fn a_legacy_entry_we_wrote_under_yadgar_is_migrated_and_a_foreign_one_is_not() {
+    let own = json!({ "type": "stdio", "command": "/usr/local/bin/yaadgaar", "args": ["serve"] });
+
+    // Install moves our legacy entry to the new key.
+    let home = scratch("legacy-own-install");
+    let layout = Layout::new(&home);
+    std::fs::write(
+        layout.mcp_config(),
+        json!({ "numStartups": 1, "mcpServers": { "yadgar": own } }).to_string(),
+    )
+    .unwrap();
+    install_with(&home, Path::new(BINARY)).unwrap();
+    let config = read_json(&layout.mcp_config());
+    assert!(config["mcpServers"].get("yadgar").is_none(), "{config:#?}");
+    assert_eq!(config["mcpServers"]["yaadgaar"]["command"], BINARY);
+
+    // Uninstall removes our legacy entry, nothing else.
+    let home = scratch("legacy-own-uninstall");
+    let layout = Layout::new(&home);
+    std::fs::write(
+        layout.mcp_config(),
+        json!({ "numStartups": 1, "mcpServers": { "yadgar": own, "other": {} } }).to_string(),
+    )
+    .unwrap();
+    uninstall(&home).unwrap();
+    let config = read_json(&layout.mcp_config());
+    assert!(config["mcpServers"].get("yadgar").is_none(), "{config:#?}");
+    assert!(config["mcpServers"].get("other").is_some());
+
+    // A stdio entry running some other binary is not provably ours.
+    let home = scratch("legacy-foreign-stdio");
+    let layout = Layout::new(&home);
+    let other = json!({ "numStartups": 1, "mcpServers": { "yadgar": {
+        "type": "stdio", "command": "/usr/bin/yadgar-mcp", "args": ["serve"] } } });
+    std::fs::write(layout.mcp_config(), other.to_string()).unwrap();
+    install_with(&home, Path::new(BINARY)).unwrap();
+    uninstall(&home).unwrap();
+    assert_eq!(read_json(&layout.mcp_config()), other);
 }

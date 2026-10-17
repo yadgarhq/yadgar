@@ -101,10 +101,7 @@ impl fmt::Display for Drift {
             ),
             Self::RulesMissing { path } => write!(f, "the rules file {path} is missing"),
             Self::ReferenceMissing { path } => {
-                write!(
-                    f,
-                    "{path} does not reference the yadgar rules file on its first line"
-                )
+                write!(f, "{path} does not reference the yadgar rules file")
             }
         }
     }

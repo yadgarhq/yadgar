@@ -141,9 +141,17 @@ newer release, `pipx install --force yaadgaar==<version>`.
 
 2. **Install**, once per machine. This registers yadgar with Claude Code at
    user level: the hooks in `~/.claude/settings.json`, the MCP entry in
-   `~/.claude.json`, and the rules file `~/.claude/yadgar-rules.md`,
-   referenced from the first line of `~/.claude/CLAUDE.md`. If `claude` is not
-   on PATH it says so and registers anyway.
+   `~/.claude.json` under the key `yaadgaar` (tools appear as `mcp__yaadgaar__*`;
+   an existing entry under that key that this client did not write makes install
+   refuse, and the separate `yadgar` key is never touched), and the rules file
+   `~/.claude/yadgar-rules.md`, referenced from `~/.claude/CLAUDE.md` by the
+   line `@<home>/.claude/yadgar-rules.md` (absolute path, matched exactly). If
+   that line is already anywhere in `CLAUDE.md`, install leaves the file alone;
+   otherwise it adds the line at the top. If `CLAUDE.md` is a symlink (for
+   example nix-managed), install never edits it: when the line is missing it
+   prints the exact line to add to whatever generates the file, and finishes
+   the rest of the install. If `claude` is not on PATH it says so and registers
+   anyway.
 
    ```bash
    yaadgaar install

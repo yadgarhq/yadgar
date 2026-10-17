@@ -13,10 +13,22 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
+use super::hooks::binary_stem;
 use super::jsonfile::ensure_object;
 
-/// The key under `mcpServers` that yadgar owns.
-pub const SERVER_KEY: &str = "yadgar";
+/// The key under `mcpServers` that this client owns: the product's binary name.
+///
+/// It was `"yadgar"`, which is also the key the separate yadgar memory MCP
+/// registers itself under. Sharing it meant install overwrote that server and
+/// uninstall deleted it. The two are now disjoint, and the MCP tool prefix the
+/// agent sees is `mcp__yaadgaar__`.
+pub const SERVER_KEY: &str = "yaadgaar";
+
+/// The key older client versions wrote the same entry under.
+///
+/// Touched only when the entry there is provably ours ([`is_ours`]); otherwise
+/// it belongs to somebody else (the memory MCP) and is never read as ours.
+pub const LEGACY_SERVER_KEY: &str = "yadgar";
 
 /// The one key in `~/.claude.json` that yadgar creates itself.
 ///
@@ -38,14 +50,65 @@ pub const SERVE_VERB: &str = "serve";
 /// "headers":{"Authorization":"Bearer …"}}` — would leave the url and the live
 /// token sitting beside the new `command`, so an install whose entire purpose is
 /// to stop carrying tokens would have carried one forward.
+///
+/// Call [`check`] first: this assumes any entry under [`SERVER_KEY`] is ours.
+/// A legacy entry of ours under [`LEGACY_SERVER_KEY`] is moved, not duplicated.
 pub fn merge(config: &mut Value, binary: &Path) {
     let Some(servers) = ensure_object(config, SERVERS_KEY) else {
         return;
     };
+    if servers.get(LEGACY_SERVER_KEY).is_some_and(is_ours) {
+        // `shift_remove`, not `remove`: under `preserve_order` the latter is a
+        // swap_remove and reorders the keys of somebody else's servers.
+        servers.shift_remove(LEGACY_SERVER_KEY);
+    }
     servers.insert(SERVER_KEY.to_string(), entry_for(binary));
 }
 
-/// Remove yadgar's entry and nothing else.
+/// Refuse to install over an entry that is not ours.
+///
+/// Pre-flight: runs before anything is written, so a refusal leaves the machine
+/// untouched. Overwriting somebody else's registration is the defect this exists
+/// to prevent.
+pub fn check(config: &Value, path: &Path) -> anyhow::Result<()> {
+    match config.get(SERVERS_KEY).and_then(|s| s.get(SERVER_KEY)) {
+        Some(entry) if !is_ours(entry) => anyhow::bail!(
+            "refusing to overwrite the `{SERVERS_KEY}.{SERVER_KEY}` entry in {}: it was not \
+             written by this client (expected a stdio server running a `yaadgaar` binary \
+             with the argument `{SERVE_VERB}`). Rename or remove it, then run install again.",
+            path.display()
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Whether *entry* has the shape [`entry_for`] writes: stdio, `serve`, no url or
+/// headers, and a command whose file name is the `yaadgaar` binary.
+///
+/// The file name comes from [`binary_stem`], not `Path::file_stem`: the entry
+/// may have been written on another platform than the one reading it.
+pub fn is_ours(entry: &Value) -> bool {
+    let Some(obj) = entry.as_object() else {
+        return false;
+    };
+    let stdio = obj.get("type").and_then(Value::as_str) == Some("stdio");
+    let serve = obj
+        .get("args")
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.len() == 1 && a[0].as_str() == Some(SERVE_VERB));
+    let binary = obj
+        .get("command")
+        .and_then(Value::as_str)
+        .and_then(binary_stem)
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("yaadgaar"));
+    stdio && serve && binary && !obj.contains_key("url") && !obj.contains_key("headers")
+}
+
+/// Remove this client's entry and nothing else.
+///
+/// Only an entry that is ours goes: a foreign `yaadgaar` entry stays, and so
+/// does any `yadgar` entry that is not provably ours. `yadgar` is the memory
+/// MCP's key and is never touched unless it carries this client's own shape.
 ///
 /// An `mcpServers` object left empty is NOT removed, and the asymmetry with the
 /// hook events — where an emptied key is dropped — is deliberate. Claude Code
@@ -61,7 +124,11 @@ pub fn merge(config: &mut Value, binary: &Path) {
 /// keeping a file alive for on its own.
 pub fn strip(config: &mut Value) {
     if let Some(servers) = config.get_mut(SERVERS_KEY).and_then(Value::as_object_mut) {
-        servers.remove(SERVER_KEY);
+        for key in [SERVER_KEY, LEGACY_SERVER_KEY] {
+            if servers.get(key).is_some_and(is_ours) {
+                servers.shift_remove(key); // keeps the others' order
+            }
+        }
     }
 }
 
@@ -94,24 +161,16 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_http_entry_is_replaced_whole_not_merged() {
-        // The failure this prevents: the entry live on machines today carries a
-        // real bearer token. A field-wise merge leaves `headers` in place beside
-        // the new `command`, and the install that was supposed to remove the
-        // token preserves it instead.
-        let mut config = json!({
-            "mcpServers": {
-                "yadgar": {
-                    "type": "http",
-                    "url": "http://127.0.0.1:8765/mcp",
-                    "headers": { "Authorization": "Bearer a-real-token" }
-                }
-            }
+    fn an_entry_written_on_windows_is_ours_when_read_on_any_platform() {
+        // `Path::file_stem` splits on `\` only on a Windows build, so on Linux
+        // this whole string is one "file name" and the stem is not `yaadgaar`.
+        // A `.claude.json` read on WSL beside a Windows install would then make
+        // install refuse over its own entry and uninstall leave it behind.
+        let entry = json!({
+            "type": "stdio",
+            "command": "C:\\Program Files\\yaadgaar\\yaadgaar.exe",
+            "args": ["serve"],
         });
-        merge(&mut config, Path::new("/usr/local/bin/yadgar"));
-        let entry = &config["mcpServers"]["yadgar"];
-        assert_eq!(entry["type"], "stdio");
-        assert!(entry.get("headers").is_none(), "{entry}");
-        assert!(entry.get("url").is_none(), "{entry}");
+        assert!(is_ours(&entry), "{entry}");
     }
 }

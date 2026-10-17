@@ -1,6 +1,6 @@
 //! The hook registrations, and the merge that must not eat other tools' hooks.
 //!
-//! Every entry invokes `yadgar hook <name>` — one binary, no scripts on disk.
+//! Every entry invokes `yaadgaar hook <name>` — one binary, no scripts on disk.
 //! That is D76's central point: the Python version shipped a directory of hook
 //! scripts, nix's home-manager kept its own copies of the same handlers, the two
 //! diverged on `project_id`, and the capture pipeline was dead for six days
@@ -91,7 +91,7 @@ pub const MANAGED_HOOKS: &[HookSpec] = &[
     HookSpec {
         event: "PostToolUse",
         name: "block-reflect",
-        matcher: "mcp__yadgar__block_(create|update|delete|replace|append)",
+        matcher: "mcp__yaadgaar__block_(create|update|delete|replace|append)",
         fire_and_forget: false,
     },
     HookSpec {
@@ -177,7 +177,7 @@ pub fn is_managed(cmd: &str) -> bool {
 ///
 /// `Path::file_stem` still does the extension half, on a name with no
 /// separators left in it, where it means the same thing on every platform.
-fn binary_stem(argv0: &str) -> Option<&str> {
+pub(super) fn binary_stem(argv0: &str) -> Option<&str> {
     let name = argv0.rsplit(['/', '\\']).next()?;
     Path::new(name).file_stem()?.to_str()
 }
@@ -300,7 +300,8 @@ fn strip_managed(hooks: &mut serde_json::Map<String, Value>) -> usize {
         }
     }
     for event in emptied {
-        hooks.remove(&event);
+        // `shift_remove`: `remove` is a swap_remove under `preserve_order`.
+        hooks.shift_remove(&event);
     }
     removed
 }

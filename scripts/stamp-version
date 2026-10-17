@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Stamp VERSION into Cargo.toml and Cargo.lock, in the current directory.
+#
+# Run by `release.yaml` on a tag, and by `ci.yaml` on every pull request with a
+# dummy version (ledger 1521): before, these regexes ran ONLY on a real tag, so
+# a Cargo.lock format change broke the next release instead of a pull request.
+#
+# Cargo.lock moves with Cargo.toml because the build is `--locked`: a
+# root-package version the lock does not echo fails that flag. `\r?\n` because
+# the Windows legs check out with CRLF line endings. A version that is not plain
+# MAJOR.MINOR.PATCH is refused, not translated: Cargo wants SemVer and PyPI
+# wants PEP 440, and only the plain form is both.
+set -euo pipefail
+
+VERSION="${1:?usage: stamp-version MAJOR.MINOR.PATCH}"
+export VERSION
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "::error::$VERSION is not MAJOR.MINOR.PATCH; refusing to guess a version" >&2
+  exit 1
+fi
+perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m or die "Cargo.toml: no version line\n"' Cargo.toml
+perl -0pi -e 's/(\nname = "yaadgaar"\r?\nversion = ")[^"]*"/$1$ENV{VERSION}"/ or die "Cargo.lock: no yaadgaar entry\n"' Cargo.lock

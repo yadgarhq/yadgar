@@ -202,14 +202,5 @@ fn the_file_name_is_the_one_the_engine_reads() {
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "yaadgaar-policy-{name}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::testserver::scratch_dir(&format!("policy-{name}"))
 }

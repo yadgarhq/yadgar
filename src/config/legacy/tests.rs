@@ -4,14 +4,7 @@ use super::*;
 
 /// A 0.1.4-shaped `~/.config`: the engine's two files plus this client's old one.
 fn seeded() -> (PathBuf, PathBuf, PathBuf) {
-    let root = std::env::temp_dir().join(format!(
-        "yaadgaar-legacy-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let root = crate::testserver::scratch_dir("legacy");
     let legacy = root.join(LEGACY_DIR);
     std::fs::create_dir_all(&legacy).unwrap();
     std::fs::write(legacy.join("secrets.env"), "YADGAR_TOKEN=fake\n").unwrap();

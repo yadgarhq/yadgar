@@ -553,14 +553,5 @@ fn a_config_directory_owned_by_somebody_else_is_refused() {
 }
 
 fn tempdir() -> PathBuf {
-    let p = std::env::temp_dir().join(format!(
-        "yadgar-cfg-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+    crate::testserver::scratch_dir("cfg")
 }

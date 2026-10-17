@@ -75,17 +75,28 @@ fn the_guard_reads_disabled_guards_from_the_home_it_runs_in() {
 }
 
 #[test]
-fn with_no_exceptions_file_the_guard_refuses_and_says_nothing_on_stderr() {
+fn with_no_exceptions_file_the_guard_refuses_and_explains_on_stderr_only() {
     let home = scratch("guard-absent");
     let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload(BYPASS));
     assert_eq!(out.status.code(), Some(2), "{out:?}");
+    // Claude Code feeds STDERR to the model on exit 2. It is the whole reason.
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("\"deny\""),
-        "{out:?}"
+        stderr.contains("Hook failure is signal, not an obstacle"),
+        "{stderr}"
     );
-    // Missing is the normal state on a machine without the engine: no warning.
-    assert!(out.stderr.is_empty(), "{out:?}");
+    // One approach per hook: exit code plus stderr, no JSON on stdout.
+    assert!(out.stdout.is_empty(), "{out:?}");
     assert!(!exceptions(&home).exists(), "the guard created the file");
+}
+
+#[test]
+fn an_allowed_call_exits_zero_and_prints_nothing_on_either_stream() {
+    let home = scratch("guard-allow");
+    let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload("ls -la"));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
 }
 
 #[test]
@@ -103,12 +114,43 @@ fn a_malformed_exceptions_file_keeps_the_guard_on_and_logs_a_notice() {
         stderr.contains("yadgar-hook-exceptions.json") && stderr.contains("every guard stays on"),
         "{stderr}"
     );
-    // The notice is on stderr only; stdout carries exactly the refusal.
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The fail-closed path explains the refusal too, not only the notice.
     assert!(
-        serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok(),
-        "{stdout}"
+        stderr.contains("Hook failure is signal, not an obstacle"),
+        "{stderr}"
     );
+    assert!(out.stdout.is_empty(), "{out:?}");
+}
+
+#[test]
+fn with_no_home_directory_every_guard_stays_on_and_the_refusal_is_explained() {
+    // `dirs::home_dir()` is `None`: the exceptions file cannot be located, so
+    // every guard stays on. That path must still say why on stderr.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_yaadgaar"))
+        .args(["hook", "pre-tool-guard"])
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("YAADGAAR_CONFIG_DIR")
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary under test did not run");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(bash_payload(BYPASS).as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Hook failure is signal, not an obstacle"),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty(), "{out:?}");
 }
 
 #[test]

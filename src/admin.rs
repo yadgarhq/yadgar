@@ -23,8 +23,8 @@ pub enum AdminCommand {
     /// Issue an enrolment token for an existing user: their first enrolment,
     /// or a password reset.
     ///
-    /// The person redeems it with `yaadgaar enrol` and chooses their own
-    /// password; you never learn it. Calls the gateway's
+    /// The person redeems it with `yaadgaar enrol --token-file <file>` and
+    /// chooses their own password; you never learn it. Calls the gateway's
     /// `/admin/issue-enrolment` with YOUR credential, so you must be an
     /// administrator.
     ///
@@ -47,10 +47,12 @@ pub enum AdminCommand {
         #[arg(long)]
         stdout: bool,
 
-        /// Revoke every credential the user holds when they redeem this
+        /// Revoke every credential the user holds when they REDEEM this
         /// token: a password reset after a lost or leaked machine (ledger
-        /// 1569). Off by default, because it also logs out the user's other
-        /// machines. The bootstrap token may not ask for it.
+        /// 1569). Nothing is revoked when the token is issued, so the old
+        /// credentials keep working until the person runs `enrol`. Off by
+        /// default, because it also logs out the user's other machines. The
+        /// bootstrap token may not ask for it.
         #[arg(long = "revoke-existing")]
         revoke_existing: bool,
     },
@@ -68,9 +70,11 @@ pub enum AdminError {
     /// 401: the stored credential did not resolve.
     #[error("the gateway refused your credential; run `yaadgaar login` again")]
     Refused,
-    /// 403: the credential resolved, to someone who is not an administrator.
-    #[error("the gateway says you are not an administrator")]
-    NotAdmin,
+    /// 403: the credential resolved, to someone who may not do this. The
+    /// gateway's own text is kept: it says which rule refused (not an
+    /// administrator, or the bootstrap token asking to revoke).
+    #[error("the gateway refused this as not permitted for you: {0}")]
+    NotAdmin(String),
     #[error("the gateway answered {0}: {1}")]
     Rejected(reqwest::StatusCode, String),
     #[error("the gateway's answer was not an enrolment: {0}")]
@@ -87,6 +91,8 @@ pub enum AdminError {
     EmptyUserId,
     #[error("cannot write the token to {0}: {1}")]
     TokenFile(PathBuf, std::io::Error),
+    #[error("cannot write to the terminal: {0}")]
+    Output(#[from] std::io::Error),
 }
 
 /// What `/admin/issue-enrolment` answered.
@@ -101,30 +107,74 @@ pub struct Issued {
     pub revoke_existing_credentials: Option<bool>,
 }
 
+/// Where an administrative call goes, and as whom.
+pub struct Gateway<'a> {
+    pub url: &'a str,
+    /// The caller's own credential, sent as `Authorization: Bearer`.
+    pub bearer: &'a str,
+    pub instance: Option<&'a str>,
+}
+
 /// Run one `admin` subcommand against the logged-in gateway.
+///
+/// Bounded by the proxy's `REQUEST_TIMEOUT`: a gateway that never answers
+/// must not hang an administrator's terminal either.
 pub async fn run(command: AdminCommand) -> Result<(), AdminError> {
+    let config = Config::load()?;
+    let client = crate::trust::client(config.ca_pem(), Some(crate::proxy::REQUEST_TIMEOUT))?;
+    let gateway = Gateway {
+        url: config.gateway_url(),
+        bearer: config.token(),
+        instance: config.instance(),
+    };
+    execute(
+        command,
+        &client,
+        &gateway,
+        &mut std::io::stdout().lock(),
+        &mut std::io::stderr().lock(),
+    )
+    .await
+}
+
+/// [`run`], given its client, gateway and streams, so every path through a
+/// parsed command is reachable from a test.
+///
+/// THE RECEIPT NAMES THE ENROLMENT, NEVER THE USER. The operator typed the
+/// user id, and CodeQL's cleartext-logging rule flags it on stderr; the
+/// enrolment id is enough to find the row.
+async fn execute(
+    command: AdminCommand,
+    client: &reqwest::Client,
+    gateway: &Gateway<'_>,
+    stdout: &mut dyn std::io::Write,
+    stderr: &mut dyn std::io::Write,
+) -> Result<(), AdminError> {
     match command {
         AdminCommand::IssueEnrolment {
             user_id,
             out,
-            stdout,
+            stdout: _,
             revoke_existing,
         } => {
             let user_id = require_user_id(&user_id)?;
-            let config = Config::load()?;
-            let client = crate::trust::client(config.ca_pem(), None)?;
+            // PRE-FLIGHT: asking first would mint a token with nowhere to go.
+            // `write_token_file`'s `create_new` stays the real guard.
+            if let Some(path) = &out {
+                refuse_existing(path)?;
+            }
             let issued = request(
-                &client,
-                config.gateway_url(),
-                config.token(),
-                config.instance(),
+                client,
+                gateway.url,
+                gateway.bearer,
+                gateway.instance,
                 &user_id,
                 revoke_existing,
             )
             .await?;
             if let Some(warning) = check_echo(revoke_existing, issued.revoke_existing_credentials)?
             {
-                eprintln!("warning: {warning}");
+                writeln!(stderr, "warning: {warning}")?;
             }
             // The receipt goes to STDERR in both cases, so `--stdout` leaves
             // the token alone on stdout for whatever reads the pipe.
@@ -132,24 +182,36 @@ pub async fn run(command: AdminCommand) -> Result<(), AdminError> {
                 Some(path) => {
                     write_token_file(&path, &issued.token)
                         .map_err(|e| AdminError::TokenFile(path.clone(), e))?;
-                    eprintln!(
-                        "enrolment {} issued for user {user_id}; the token is in {}",
+                    writeln!(
+                        stderr,
+                        "enrolment {} issued; the token is in {}",
                         issued.enrolment_id,
                         path.display()
-                    );
+                    )?;
                 }
                 None => {
-                    debug_assert!(stdout, "clap requires --out or --stdout");
-                    println!("{}", issued.token);
-                    eprintln!(
-                        "enrolment {} issued for user {user_id}",
-                        issued.enrolment_id
-                    );
+                    writeln!(stdout, "{}", issued.token)?;
+                    writeln!(stderr, "enrolment {} issued", issued.enrolment_id)?;
                 }
             }
-            eprintln!("it is single-use and expires in 24 hours");
+            writeln!(stderr, "it is single-use and expires in 24 hours")?;
             Ok(())
         }
+    }
+}
+
+/// Refuse *path* if anything is there, a dangling symlink included.
+fn refuse_existing(path: &Path) -> Result<(), AdminError> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AdminError::TokenFile(path.to_path_buf(), e)),
+        Ok(_) => Err(AdminError::TokenFile(
+            path.to_path_buf(),
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "something is already there; it is never replaced",
+            ),
+        )),
     }
 }
 
@@ -199,7 +261,7 @@ async fn request(
             serde_json::from_str(&body).map_err(|e| AdminError::Malformed(e.to_string()))
         }
         reqwest::StatusCode::UNAUTHORIZED => Err(AdminError::Refused),
-        reqwest::StatusCode::FORBIDDEN => Err(AdminError::NotAdmin),
+        reqwest::StatusCode::FORBIDDEN => Err(AdminError::NotAdmin(gateway_error(&body))),
         _ => Err(AdminError::Rejected(status, gateway_error(&body))),
     }
 }

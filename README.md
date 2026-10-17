@@ -112,6 +112,32 @@ input from a file or a pipe.
 Nothing about the interactive path changes when none of these flags are
 given.
 
+### Resetting a password
+
+An administrator issues a new enrolment token; the person redeems it and
+chooses the new password. The administrator never learns it.
+
+1. Find the user's id. A new user gets one from the gateway's
+   `/admin/create-user`; the gateway has no lookup by username.
+2. Issue the token with your own administrator credential:
+
+   ```bash
+   yaadgaar admin issue-enrolment --user-id "$USER_ID" --out reset.token --revoke-existing
+   ```
+
+   `--out` writes a new 0600 file and refuses an existing one. Leave out
+   `--revoke-existing` to keep the user's other machines logged in.
+
+3. Hand `reset.token` over out of band. The person runs:
+
+   ```bash
+   yaadgaar enrol --token-file reset.token
+   ```
+
+**Revocation happens at redemption, not at issue.** The user's old
+credentials keep working until the person runs `enrol` with the token. The
+token is single-use and expires in 24 hours.
+
 ## Installing
 
 ```bash

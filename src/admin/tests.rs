@@ -85,7 +85,11 @@ async fn each_refusal_says_what_the_person_can_do_about_it() {
     assert!(matches!(result, Err(AdminError::Refused)), "{result:?}");
 
     let (result, _) = ask("403 Forbidden", r#"{"error":"x"}"#).await;
-    assert!(matches!(result, Err(AdminError::NotAdmin)), "{result:?}");
+    // The gateway's own words are kept: they say which rule refused.
+    assert!(
+        matches!(&result, Err(AdminError::NotAdmin(m)) if m == "x"),
+        "{result:?}"
+    );
 
     // The gateway's own words, because they name what was wrong.
     let (result, _) = ask("404 Not Found", r#"{"error":"no such user"}"#).await;
@@ -201,4 +205,114 @@ fn revoke_existing_is_an_opt_in_flag() {
     };
     assert!(!parse(&[]));
     assert!(parse(&["--revoke-existing"]));
+}
+
+/// Parse an `admin` command line the way the binary does.
+fn parse(args: &[&str]) -> AdminCommand {
+    use clap::Parser as _;
+    #[derive(clap::Parser)]
+    struct Probe {
+        #[command(subcommand)]
+        command: AdminCommand,
+    }
+    let mut all = vec!["probe"];
+    all.extend_from_slice(args);
+    Probe::try_parse_from(all).unwrap().command
+}
+
+/// Run a parsed command against a one-shot server, capturing both streams.
+async fn execute_against(
+    args: &[&str],
+    status: &'static str,
+    body: &'static str,
+) -> (Result<(), AdminError>, String, Vec<u8>, Vec<u8>) {
+    let (addr, served) = crate::testserver::answer_once(status, body).await;
+    let client = crate::trust::client(None, None).unwrap();
+    let url = format!("http://{addr}/");
+    let gateway = Gateway {
+        url: &url,
+        bearer: "adm1n-t0ken",
+        instance: None,
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let result = execute(parse(args), &client, &gateway, &mut out, &mut err).await;
+    let sent = tokio::time::timeout(std::time::Duration::from_secs(5), served)
+        .await
+        .map(|s| s.unwrap())
+        .unwrap_or_default();
+    (result, sent, out, err)
+}
+
+#[tokio::test]
+async fn an_echo_mismatch_writes_no_token_file_and_prints_nothing_on_stdout() {
+    // The enrolment the gateway issued does not do what was asked, so the
+    // token must not reach anyone: no file, and nothing on stdout.
+    let dir = crate::testserver::scratch_dir("admin-mismatch");
+    let file = dir.join("token");
+    let body = r#"{"token":"BLOB","enrolment_id":"e","revoke_existing_credentials":false}"#;
+    let path = file.to_str().unwrap();
+    let args = ["issue-enrolment", "--user-id", "u", "--revoke-existing"];
+    let (result, _, out, _) =
+        execute_against(&[&args[..], &["--out", path]].concat(), "200 OK", body).await;
+    assert!(
+        matches!(result, Err(AdminError::EchoMismatch { .. })),
+        "{result:?}"
+    );
+    assert!(!file.exists(), "the token file was written");
+    assert!(out.is_empty());
+
+    let (result, _, out, _) =
+        execute_against(&[&args[..], &["--stdout"]].concat(), "200 OK", body).await;
+    assert!(
+        matches!(result, Err(AdminError::EchoMismatch { .. })),
+        "{result:?}"
+    );
+    assert!(out.is_empty(), "{:?}", String::from_utf8_lossy(&out));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn the_parsed_revoke_existing_flag_is_what_goes_on_the_wire() {
+    let body = r#"{"token":"BLOB","enrolment_id":"e","revoke_existing_credentials":true}"#;
+    let args = [
+        "issue-enrolment",
+        "--user-id",
+        "u",
+        "--stdout",
+        "--revoke-existing",
+    ];
+    let (result, sent, out, err) = execute_against(&args, "200 OK", body).await;
+    result.unwrap();
+    assert!(
+        sent.contains(r#""revoke_existing_credentials":true"#),
+        "{sent}"
+    );
+    assert_eq!(String::from_utf8(out).unwrap(), "BLOB\n");
+    // The receipt names the enrolment, never the user id or the token.
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.contains("enrolment e issued"), "{err}");
+    assert!(!err.contains("BLOB") && !err.contains(" u "), "{err}");
+}
+
+#[tokio::test]
+async fn an_existing_out_path_is_refused_before_the_gateway_is_asked() {
+    // Asking first would mint a token with nowhere to go.
+    let dir = crate::testserver::scratch_dir("admin-preflight");
+    let file = dir.join("token");
+    std::fs::write(&file, "theirs").unwrap();
+    let args = [
+        "issue-enrolment",
+        "--user-id",
+        "u",
+        "--out",
+        file.to_str().unwrap(),
+    ];
+    let (result, sent, _, _) = execute_against(&args, "200 OK", "{}").await;
+    assert!(
+        matches!(result, Err(AdminError::TokenFile(..))),
+        "{result:?}"
+    );
+    assert!(sent.is_empty(), "the gateway was asked: {sent}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "theirs");
+    std::fs::remove_dir_all(&dir).ok();
 }

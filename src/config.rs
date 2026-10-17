@@ -287,8 +287,8 @@ impl Config {
     /// The credential.
     ///
     /// A method rather than a public field, so `grep -n 'token()'` finds every
-    /// place it is read. There are two: the proxy attaches it, and login writes
-    /// it.
+    /// place it is read. There are three: the proxy attaches it, `admin`
+    /// sends it as the caller's own credential, and login writes it.
     pub fn token(&self) -> &str {
         &self.token
     }

@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 mod legacy;
+mod private;
 
 pub use legacy::{hint as legacy_hint, legacy_dir};
+use private::write_private;
 
 /// `yaadgaar`, NOT `yadgar`. Up to 0.1.4 this was `yadgar`, the directory the
 /// yadgar memory engine keeps its `config.yaml` and `secrets.env` in. Sharing it
@@ -272,15 +274,9 @@ impl Config {
     /// A half-written config is worse than none: it fails later, somewhere else,
     /// with an error about the gateway rather than about the file.
     pub fn save(&self) -> Result<(), ConfigError> {
-        let dir = &self.dir;
-        ensure_private_dir(dir).map_err(|e| ConfigError::Unwritable(dir.into(), e))?;
-        let path = dir.join(FILE);
-        let tmp = dir.join(format!(".{FILE}.tmp"));
         let body = serde_json::to_string_pretty(self).expect("config serialises");
-        std::fs::write(&tmp, body).map_err(|e| ConfigError::Unwritable(tmp.clone(), e))?;
-        restrict(&tmp);
-        std::fs::rename(&tmp, &path).map_err(|e| ConfigError::Unwritable(path, e))?;
-        Ok(())
+        write_private(&self.dir, FILE, body.as_bytes())
+            .map_err(|(path, e)| ConfigError::Unwritable(path, e))
     }
 
     pub fn gateway_url(&self) -> &str {
@@ -323,81 +319,9 @@ impl Config {
     /// Best effort. A cache that cannot be written must never fail the request
     /// that produced it — the answer is already correct and already going back.
     pub fn write_tool_cache(&self, body: &str) -> std::io::Result<()> {
-        let dir = &self.dir;
-        ensure_private_dir(dir)?;
-        let tmp = dir.join(format!(".{TOOL_CACHE}.tmp"));
-        std::fs::write(&tmp, body)?;
-        std::fs::rename(tmp, dir.join(TOOL_CACHE))
+        write_private(&self.dir, TOOL_CACHE, body.as_bytes()).map_err(|(_, e)| e)
     }
 }
-
-/// Make *dir* exist, owner-only (ledger 1547).
-///
-/// The file inside is 0600, and that protects nothing while the DIRECTORY is
-/// group-writable: anyone who can write the directory can replace the file. It
-/// followed the umask before — 0775 under umask 002.
-///
-/// **A DIRECTORY THIS CREATES is made 0700 whatever it is called**: nobody
-/// else's permissions can be changed by creating it. **AN EXISTING ONE is
-/// tightened only when its leaf is `yaadgaar`** — the leaf [`base_dir`] builds,
-/// which covers the `./yaadgaar` fallback for an OS that names no config
-/// directory and a `YAADGAAR_CONFIG_DIR` that happens to end in `yaadgaar`. An
-/// override under any other name keeps the permissions somebody gave it — and
-/// that now includes `~/.config/yadgar`, the memory engine's directory.
-/// **A SYMLINK IS NEVER TIGHTENED**: `set_permissions` follows the link, and
-/// its target belongs to whatever declared it (home-manager, for one). Only
-/// the leaf: the parents are created with the default mode, because a missing
-/// `~/.config` made 0700 here would be a surprise to every other program that
-/// uses it.
-#[cfg(unix)]
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    if !dir.exists() {
-        if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)?;
-        }
-        match std::fs::DirBuilder::new().mode(0o700).create(dir) {
-            Ok(()) => {}
-            // Lost a race with another `serve`: fall through to the tighten.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-    }
-    if dir.file_name().is_some_and(|n| n == DIR) {
-        let meta = std::fs::symlink_metadata(dir)?;
-        if meta.file_type().is_symlink() {
-            return Ok(());
-        }
-        let mode = meta.permissions().mode();
-        if mode & 0o077 != 0 {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-    }
-    Ok(())
-}
-
-/// No mode bits on Windows — the same gap [`restrict`] records below.
-#[cfg(not(unix))]
-fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
-}
-
-/// Owner-only. The file holds a bearer credential.
-#[cfg(unix)]
-fn restrict(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-}
-
-/// No-op on Windows, and that is a real gap rather than a shrug.
-///
-/// There is no chmod; the equivalent is an ACL, which needs a Windows-specific
-/// crate this client does not carry. The file lands under the user's profile
-/// directory, which is not world-readable by default — so the property holds by
-/// where it sits rather than by what this sets, and that is a weaker guarantee.
-/// Stated here so nobody later reads the empty function as "nothing to do".
-#[cfg(not(unix))]
-fn restrict(_path: &Path) {}
 
 #[cfg(test)]
 mod tests;

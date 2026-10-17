@@ -81,7 +81,8 @@ jobs:
   # THE RELEASE STAMP, RUN ON EVERY PULL REQUEST (ledger 1521). On a tag,
   # `release.yaml` rewrites the version in Cargo.toml and Cargo.lock; before,
   # nothing ran those rewrites until a real tag. `cargo metadata --locked`
-  # fails unless both files agree on the stamped version.
+  # fails unless both files agree on the stamped version. NOT `--no-deps`:
+  # with it, a Cargo.toml/Cargo.lock root-version mismatch exits 0.
   stamp:
     if: github.event_name == 'pull_request' && github.event.action != 'edited'
     runs-on: ubuntu-latest
@@ -95,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           scripts/stamp-version 0.0.1
-          cargo metadata --locked --no-deps --format-version 1 \
+          cargo metadata --locked --format-version 1 \
             | jq -e '.packages[] | select(.name == "yaadgaar") | .version == "0.0.1"'
 
   # THE WINDOWS ARMS COMPILE ON EVERY PULL REQUEST (ledger 1551). Every
@@ -112,3 +113,12 @@ jobs:
           persist-credentials: false
       - name: cargo check for Windows
         run: cargo check --locked --all-targets
+      # The checkout here has CRLF line endings, so this exercises the stamp's
+      # `\r?\n` branch that the Windows wheel legs depend on. AFTER the check:
+      # the stamp rewrites the version, and the check is of the real tree.
+      - name: stamp a dummy version on CRLF files
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/stamp-version 0.0.1
+          cargo metadata --locked --format-version 1 > /dev/null

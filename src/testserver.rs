@@ -101,9 +101,12 @@ fn content_length(head: &str) -> Option<usize> {
 /// A COUNTER, NOT THE CLOCK (ledger 1195). Every test in one binary shares the
 /// pid, and two threads reading the same nanosecond got the same path:
 /// `create_dir_all` succeeded for both, and the two tests silently shared one
-/// directory. The pid keeps parallel test binaries apart, the counter keeps
-/// this binary's calls apart, and the leaf is made with `create_dir`, so a
-/// collision that somehow remains panics instead of being shared.
+/// directory. The pid keeps parallel test binaries apart and the counter keeps
+/// this binary's calls apart, so within one pid namespace no two live calls
+/// can get the same path. A leftover from an earlier process that had the same
+/// pid is removed first; `create_dir` then makes the leaf. Across pid
+/// namespaces sharing one temp directory (containers), a collision would
+/// delete or share a directory silently, not panic.
 pub fn scratch_dir(label: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static NEXT: AtomicUsize = AtomicUsize::new(0);

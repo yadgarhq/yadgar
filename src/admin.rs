@@ -56,6 +56,22 @@ pub enum AdminCommand {
         #[arg(long = "revoke-existing")]
         revoke_existing: bool,
     },
+
+    /// Revoke EVERY live credential a user holds, now (ADR-0945): a leaked
+    /// token, or a lost machine, killed at once rather than at the person's
+    /// next redemption.
+    ///
+    /// Calls the gateway's `/admin/revoke-credentials` with YOUR credential,
+    /// so you must be an administrator. It logs the user out of every
+    /// machine. It does NOT change their password and does NOT lock the
+    /// account: they can log in again. You may not revoke your own
+    /// credentials. It asks no confirmation, so it can run unattended.
+    RevokeCredentials {
+        /// The user's id, `yadgar:user:<uuidv7>`, as `/admin/create-user`
+        /// answered it. The gateway has no lookup by username.
+        #[arg(long = "user-id")]
+        user_id: String,
+    },
 }
 
 /// Why an administrative call failed.
@@ -89,6 +105,30 @@ pub enum AdminError {
     EchoMismatch { sent: bool, echoed: bool },
     #[error("--user-id must not be empty")]
     EmptyUserId,
+    #[error("--user-id must look like yadgar:user:<lowercase uuidv7>; nothing was sent")]
+    NotCanonicalUserId,
+    /// 403 from `/admin/revoke-credentials`: not an admin, the bootstrap token,
+    /// or the caller targeting themselves (ADR-0945).
+    #[error(
+        "the gateway refused the revocation: {0} (only an administrator may revoke, the \
+         bootstrap token may not, and you cannot revoke your own credentials)"
+    )]
+    RevokeForbidden(String),
+    /// 404 from `/admin/revoke-credentials`.
+    #[error("the gateway has no such user: {0}")]
+    NoSuchUser(String),
+    /// 400 from `/admin/revoke-credentials`.
+    #[error("the gateway rejected the request as malformed: {0}")]
+    BadRequest(String),
+    /// 404 with any body but the gateway's "no such user": the route is absent.
+    #[error("this gateway does not serve /admin/revoke-credentials (gateway older than #120?)")]
+    RouteNotServed,
+    #[error("the gateway's answer was not a revocation receipt: {0}")]
+    MalformedRevocation(String),
+    /// The gateway answered about a different user than the one named. Someone
+    /// else's credentials may have been revoked, so it is never a success.
+    #[error("the gateway answered for a different user than the one named; check who was revoked")]
+    RevokeEchoMismatch,
     #[error("cannot write the token to {0}: {1}")]
     TokenFile(PathBuf, std::io::Error),
     #[error("cannot write to the terminal: {0}")]
@@ -105,6 +145,13 @@ pub struct Issued {
     /// a gateway older than the echo.
     #[serde(default)]
     pub revoke_existing_credentials: Option<bool>,
+}
+
+/// What `/admin/revoke-credentials` answered.
+#[derive(Debug, Deserialize)]
+pub struct Revoked {
+    pub user_id: String,
+    pub revoked: u64,
 }
 
 /// Where an administrative call goes, and as whom.
@@ -197,6 +244,30 @@ async fn execute(
             writeln!(stderr, "it is single-use and expires in 24 hours")?;
             Ok(())
         }
+        AdminCommand::RevokeCredentials { user_id } => {
+            let user_id = canonical_user_id(&user_id)?;
+            let receipt = revoke_request(client, gateway, &user_id).await?;
+            // REFUSED, NOT WARNED: an answer about someone else means someone
+            // else's credentials may be gone.
+            if receipt.user_id != user_id {
+                return Err(AdminError::RevokeEchoMismatch);
+            }
+            // The receipt carries the count, never the user id (see `execute`).
+            let noun = if receipt.revoked == 1 {
+                "credential"
+            } else {
+                "credentials"
+            };
+            writeln!(stdout, "revoked {} {noun}", receipt.revoked)?;
+            if receipt.revoked == 0 {
+                writeln!(
+                    stderr,
+                    "warning: nothing was live; the user held no live credentials, or \
+                     this is a retry of a revocation that already happened"
+                )?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -222,6 +293,74 @@ fn require_user_id(raw: &str) -> Result<String, AdminError> {
         return Err(AdminError::EmptyUserId);
     }
     Ok(id.to_string())
+}
+
+/// The id, trimmed, and proven canonical (`yadgar:user:<lowercase uuidv7>`).
+///
+/// The gateway answers 400 for any other form (ADR-0945); refusing here says
+/// so before a request is made. The message never repeats the id.
+fn canonical_user_id(raw: &str) -> Result<String, AdminError> {
+    let id = require_user_id(raw)?;
+    let canonical = id
+        .strip_prefix("yadgar:user:")
+        .and_then(|rest| uuid::Uuid::parse_str(rest).ok().map(|u| (rest, u)))
+        // `parse_str` also takes uppercase, braced, simple and URN forms; only
+        // the lowercase hyphenated text round-trips to itself.
+        .is_some_and(|(rest, u)| {
+            u.get_version_num() == 7
+                && u.get_variant() == uuid::Variant::RFC4122
+                && u.hyphenated().to_string() == rest
+        });
+    if canonical {
+        Ok(id)
+    } else {
+        Err(AdminError::NotCanonicalUserId)
+    }
+}
+
+/// `POST <gateway>admin/revoke-credentials`, as *bearer*, with `{"user_id"}`
+/// and nothing else: the route rejects unknown keys (ADR-0945).
+async fn revoke_request(
+    client: &reqwest::Client,
+    gateway: &Gateway<'_>,
+    user_id: &str,
+) -> Result<Revoked, AdminError> {
+    let url = format!(
+        "{}admin/revoke-credentials",
+        crate::login::normalise(gateway.url)
+    );
+    let mut builder = client
+        .post(&url)
+        .bearer_auth(gateway.bearer)
+        .json(&serde_json::json!({ "user_id": user_id }));
+    if let Some(instance) = gateway.instance {
+        builder = builder.header("x-yadgar-instance", instance);
+    }
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| AdminError::Unreachable(url, e))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    match status {
+        s if s.is_success() => {
+            serde_json::from_str(&body).map_err(|e| AdminError::MalformedRevocation(e.to_string()))
+        }
+        reqwest::StatusCode::UNAUTHORIZED => Err(AdminError::Refused),
+        reqwest::StatusCode::FORBIDDEN => Err(AdminError::RevokeForbidden(gateway_error(&body))),
+        reqwest::StatusCode::NOT_FOUND => {
+            // ONLY THE GATEWAY'S OWN WORDS mean a missing user: a gateway
+            // without the route also answers 404, with some other body.
+            let text = gateway_error(&body);
+            if text == "no such user" {
+                Err(AdminError::NoSuchUser(text))
+            } else {
+                Err(AdminError::RouteNotServed)
+            }
+        }
+        reqwest::StatusCode::BAD_REQUEST => Err(AdminError::BadRequest(gateway_error(&body))),
+        _ => Err(AdminError::Rejected(status, gateway_error(&body))),
+    }
 }
 
 /// `POST <gateway>admin/issue-enrolment`, as *bearer*.

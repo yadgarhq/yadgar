@@ -201,6 +201,7 @@ fn revoke_existing_is_an_opt_in_flag() {
             AdminCommand::IssueEnrolment {
                 revoke_existing, ..
             } => revoke_existing,
+            AdminCommand::RevokeCredentials { .. } => unreachable!("parsed issue-enrolment"),
         }
     };
     assert!(!parse(&[]));
@@ -315,4 +316,219 @@ async fn an_existing_out_path_is_refused_before_the_gateway_is_asked() {
     assert!(sent.is_empty(), "the gateway was asked: {sent}");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "theirs");
     std::fs::remove_dir_all(&dir).ok();
+}
+
+// ---- revoke-credentials (ADR-0945) ----
+
+const ID: &str = "yadgar:user:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f";
+const ID_JSON: &str =
+    r#"{"user_id":"yadgar:user:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f","revoked":2}"#;
+const BEARER: &str = "adm1n-t0ken";
+
+async fn revoke_against(
+    status: &'static str,
+    body: &'static str,
+) -> (Result<(), AdminError>, String, String, String) {
+    let (result, sent, out, err) =
+        execute_against(&["revoke-credentials", "--user-id", ID], status, body).await;
+    (
+        result,
+        sent,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(err).unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn the_revoke_request_is_exactly_the_user_id_with_the_callers_bearer() {
+    let (result, sent, _, _) = revoke_against("200 OK", ID_JSON).await;
+    assert!(result.is_ok(), "the revocation should succeed");
+    assert!(
+        sent.starts_with("POST /admin/revoke-credentials "),
+        "wrong method or path"
+    );
+    assert!(
+        sent.to_ascii_lowercase()
+            .contains("authorization: bearer adm1n-t0ken"),
+        "the bearer header is missing"
+    );
+    let body = &sent[sent.find("\r\n\r\n").unwrap() + 4..];
+    assert_eq!(
+        body,
+        format!(r#"{{"user_id":"{ID}"}}"#),
+        "the body must hold user_id and nothing else"
+    );
+}
+
+#[test]
+fn a_non_canonical_user_id_is_refused() {
+    for bad in [
+        "u-42",
+        "018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f",
+        "yadgar:user:018F3A52-7C1E-7B2A-9D4E-5A6B7C8D9E0F",
+        "yadgar:user:018f3a52-7c1e-4b2a-9d4e-5a6b7c8d9e0f",
+        "yadgar:user:018f3a52-7c1e-7b2a-cd4e-5a6b7c8d9e0f",
+        "yadgar:user:018f3a52-7c1e-7b2a-0d4e-5a6b7c8d9e0f",
+        "yadgar:user:018f3a527c1e7b2a9d4e5a6b7c8d9e0f",
+        "yadgar:user:{018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f}",
+        "yadgar:user:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f/x",
+        "yadgar:team:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f",
+        "yadgar:user:",
+    ] {
+        assert!(
+            matches!(canonical_user_id(bad), Err(AdminError::NotCanonicalUserId)),
+            "a non-canonical id was accepted"
+        );
+    }
+    assert!(
+        matches!(canonical_user_id("  "), Err(AdminError::EmptyUserId)),
+        "an empty id must reuse the empty-id refusal"
+    );
+    assert_eq!(
+        canonical_user_id(&format!("  {ID} ")).unwrap(),
+        ID,
+        "a canonical id is accepted after trimming"
+    );
+}
+
+#[tokio::test]
+async fn a_non_canonical_user_id_sends_no_request() {
+    let (result, sent, _, _) =
+        execute_against(&["revoke-credentials", "--user-id", "u-42"], "200 OK", "{}").await;
+    assert!(
+        matches!(result, Err(AdminError::NotCanonicalUserId)),
+        "the id should be refused client-side"
+    );
+    assert!(sent.is_empty(), "a request reached the gateway");
+}
+
+#[tokio::test]
+async fn an_echo_for_a_different_user_is_refused() {
+    let (result, _, out, _) = revoke_against(
+        "200 OK",
+        r#"{"user_id":"yadgar:user:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e00","revoked":2}"#,
+    )
+    .await;
+    assert!(
+        matches!(result, Err(AdminError::RevokeEchoMismatch)),
+        "a mismatched echo was accepted"
+    );
+    assert!(out.is_empty(), "a mismatch must not print a success line");
+}
+
+#[tokio::test]
+async fn an_answer_without_a_count_is_refused() {
+    let (result, _, _, _) = revoke_against("200 OK", r#"{"user_id":"x"}"#).await;
+    assert!(
+        matches!(result, Err(AdminError::MalformedRevocation(_))),
+        "a receipt without a count was accepted"
+    );
+}
+
+#[tokio::test]
+async fn the_revoked_count_is_printed() {
+    let (result, _, out, err) = revoke_against("200 OK", ID_JSON).await;
+    assert!(result.is_ok(), "the revocation should succeed");
+    assert!(
+        out.contains("revoked 2 credentials"),
+        "the count is missing"
+    );
+    assert!(!err.contains("warning"), "a non-zero count must not warn");
+}
+
+#[tokio::test]
+async fn zero_revoked_warns_that_nothing_was_live() {
+    let (result, _, _, err) = revoke_against(
+        "200 OK",
+        r#"{"user_id":"yadgar:user:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f","revoked":0}"#,
+    )
+    .await;
+    assert!(result.is_ok(), "zero revoked is still a success");
+    assert!(
+        err.contains("warning") && err.contains("nothing was live") && err.contains("retry"),
+        "the zero-count warning is missing"
+    );
+}
+
+#[tokio::test]
+async fn forbidden_not_found_and_bad_request_are_distinct_and_actionable() {
+    let (forbidden, _, _, _) = revoke_against("403 Forbidden", r#"{"error":"self"}"#).await;
+    let forbidden = forbidden.unwrap_err();
+    assert!(
+        matches!(forbidden, AdminError::RevokeForbidden(_)),
+        "403 has the wrong variant"
+    );
+    assert!(
+        forbidden.to_string().contains("your own credentials"),
+        "403 must mention that self-revocation is refused"
+    );
+
+    let (missing, _, _, _) = revoke_against("404 Not Found", r#"{"error":"no such user"}"#).await;
+    let missing = missing.unwrap_err();
+    assert!(
+        matches!(missing, AdminError::NoSuchUser(_)),
+        "404 has the wrong variant"
+    );
+    assert!(
+        missing.to_string().contains("no such user"),
+        "404 must say the user does not exist"
+    );
+
+    // Any other 404 is a gateway without the route, not a missing user.
+    let (absent, _, _, _) = revoke_against("404 Not Found", r#"{"error":"not found"}"#).await;
+    let absent = absent.unwrap_err();
+    assert!(
+        matches!(absent, AdminError::RouteNotServed),
+        "a generic 404 must not claim the user is missing"
+    );
+    assert!(
+        absent.to_string().contains("older than"),
+        "a generic 404 must point at an older gateway"
+    );
+
+    let (bad, _, _, _) = revoke_against("400 Bad Request", r#"{"error":"bad body"}"#).await;
+    assert!(
+        matches!(bad.unwrap_err(), AdminError::BadRequest(_)),
+        "400 has the wrong variant"
+    );
+}
+
+#[tokio::test]
+async fn no_secret_reaches_the_output_or_an_error() {
+    let mut seen = Vec::new();
+    for (status, body) in [
+        ("200 OK", ID_JSON),
+        ("401 Unauthorized", r#"{"error":"x"}"#),
+        ("403 Forbidden", r#"{"error":"x"}"#),
+        ("404 Not Found", r#"{"error":"x"}"#),
+        ("400 Bad Request", r#"{"error":"x"}"#),
+        ("503 Service Unavailable", r#"{"error":"x"}"#),
+        ("429 Too Many Requests", r#"{"error":"x"}"#),
+        ("200 OK", "not json"),
+    ] {
+        let (result, _, out, err) = revoke_against(status, body).await;
+        seen.push(out);
+        seen.push(err);
+        if let Err(e) = result {
+            seen.push(format!("{e} {e:?}"));
+        }
+    }
+    for text in seen {
+        assert!(!text.contains(BEARER), "the bearer leaked");
+        assert!(!text.contains(ID), "the user id was printed");
+    }
+}
+
+#[test]
+fn revoke_credentials_needs_a_user_id() {
+    use clap::Parser as _;
+    #[derive(clap::Parser)]
+    struct Probe {
+        #[command(subcommand)]
+        command: AdminCommand,
+    }
+    assert!(
+        Probe::try_parse_from(["probe", "revoke-credentials"]).is_err(),
+        "--user-id is required"
+    );
 }

@@ -39,9 +39,16 @@ const MUST_BE_ALLOWED: &[&str] = &[
     // and the destination is a different file.
     "cp ~/.claude/yadgar-hook-exceptions.json /tmp/exceptions-backup.json",
     "cp -p ~/.claude/yadgar-hook-exceptions.json ./backup.json",
-    "install -m 600 ~/.claude/yadgar-hook-exceptions.json /tmp/x.json",
-    "ln -s ~/.claude/yadgar-hook-exceptions.json /tmp/link-to-it",
+    "cp $HOME/.claude/yadgar-hook-exceptions.json /tmp/b.json",
+    // Into a directory: it writes a file of the same name there, but with the
+    // REAL file as the source the content is the file's own, and a directory
+    // that is (or links to) ~/.claude makes cp refuse "the same file".
+    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/",
+    "cp -t /tmp ~/.claude/yadgar-hook-exceptions.json",
     "dd if=/home/x/.claude/yadgar-hook-exceptions.json of=/tmp/copy.json",
+    // Globs and searches nowhere near the file.
+    "rm -f target/*.tmp",
+    "find . -name '*.rs'",
     // Searching the documentation for the word.
     "grep -r 'terraform ' docs/",
     "cat docs/terraform-notes.md",
@@ -114,11 +121,41 @@ const MUST_BE_DENIED: &[&str] = &[
     "cp /tmp/yadgar-hook-exceptions.json /home/x/.claude",
     "cp -t /home/x/.claude /tmp/yadgar-hook-exceptions.json",
     "cp -vt ~/.claude /tmp/yadgar-hook-exceptions.json",
-    // KNOWN OVER-REFUSAL, kept on purpose: copying the file INTO a directory
-    // writes a file of the same name there, and the guard protects the name.
-    // Copy it to an explicit file name instead (see MUST_BE_ALLOWED).
-    "cp --target-directory=/tmp ./x ~/.claude/yadgar-hook-exceptions.json",
-    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/",
+    // A source NAMED like the file but not the real one, into a destination
+    // that may be a directory (or a symlink to ~/.claude): refused, because
+    // whether `~/cl` or `backup` is a directory cannot be known from the line.
+    "cp /tmp/yadgar-hook-exceptions.json ~/cl",
+    "cp /tmp/.claude/yadgar-hook-exceptions.json ~/cl",
+    "cp ./yadgar-hook-exceptions.json backup",
+    // The real file as source, but an option that links or removes instead of
+    // copying content.
+    "cp -s ~/.claude/yadgar-hook-exceptions.json ~/cl",
+    "cp -l ~/.claude/yadgar-hook-exceptions.json ~/cl",
+    "cp --remove-destination ~/.claude/yadgar-hook-exceptions.json ~/cl",
+    // Wrappers and indirections that reach a writer (security review of the
+    // 1590 change).
+    "busybox cp /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "toybox cp /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "echo `cp /tmp/x ~/.claude/yadgar-hook-exceptions.json`",
+    r#"echo "$(cp /tmp/x ~/.claude/yadgar-hook-exceptions.json)""#,
+    r#"eval "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json""#,
+    "rsync /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "xargs cp /tmp/x <<< ~/.claude/yadgar-hook-exceptions.json",
+    "find /tmp -name x -exec cp {} ~/.claude/yadgar-hook-exceptions.json ;",
+    // A destination the shell expands: a variable, a glob, ANSI-C quoting or a
+    // brace list in a writer's operand under .claude, or a leaf that starts
+    // like the file, cannot be ruled out, so it refuses.
+    "cp /tmp/x ~/.claude/$F",
+    "cp /tmp/x ~/.claude/yadgar-hook-*.json",
+    "cp /tmp/x ~/.claude/$'yadgar-hook-exceptions.json'",
+    "cp /tmp/x ~/.claude/{yadgar-hook-exceptions.json,}",
+    "cp /tmp/x yadgar-hook-exception?.json",
+    // KNOWN OVER-REFUSALS, kept on purpose: `install` and `ln` name the file
+    // either way and are not worth parsing, and a search for the file by
+    // name is indistinguishable from a find that acts on it.
+    "install -m 600 ~/.claude/yadgar-hook-exceptions.json /tmp/x.json",
+    "ln -s ~/.claude/yadgar-hook-exceptions.json /tmp/link-to-it",
+    "find ~/.claude -name yadgar-hook-exceptions.json",
 ];
 
 #[test]

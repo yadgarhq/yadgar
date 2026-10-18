@@ -51,7 +51,7 @@ use super::{Decision, Policy};
 use crate::install::shellword::{shell_commands, SimpleCommand};
 
 mod tamper;
-use tamper::{is_the_exceptions_file, writes_the_exceptions_file};
+use tamper::{is_the_exceptions_file, line_names_the_file, writes_the_exceptions_file, INDIRECT};
 
 /// Refuse a tool call that the standing rules forbid.
 ///
@@ -115,6 +115,18 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
         return Decision::Deny(DIGGER.into());
     }
 
+    // A command substitution runs a command. The scanner reads an unquoted
+    // `$(...)` as though typed in place, but not a quoted one or a backtick
+    // pair, so each is judged here as its own line (security review of the
+    // 1590 change): `echo "$(cp x ~/.claude/<file>)"` writes the file.
+    if depth < MAX_NESTING {
+        for inner in substitutions(line) {
+            if let Decision::Deny(reason) = bash(&inner, depth + 1, policy) {
+                return Decision::Deny(reason);
+            }
+        }
+    }
+
     for command in &commands {
         let Some((program, args)) = executed(command) else {
             continue;
@@ -129,6 +141,18 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
             && writes_the_exceptions_file(program, args, &command.writes_to)
         {
             return Decision::Deny(EXCEPTIONS.into());
+        }
+        // `xargs` and `find -exec` run another command on arguments this line
+        // does not show in full, so naming the file anywhere refuses.
+        if policy.hook_config_tamper && INDIRECT.contains(&program) && line_names_the_file(line) {
+            return Decision::Deny(EXCEPTIONS.into());
+        }
+        // `eval` runs its arguments as a line, exactly as `sh -c` runs its
+        // script.
+        if program == "eval" && depth < MAX_NESTING {
+            if let Decision::Deny(reason) = bash(&args.join(" "), depth + 1, policy) {
+                return Decision::Deny(reason);
+            }
         }
         // A `-c` script is part of the command, so it is read. The rule is about
         // what runs, and `sh -c 'terraform apply'` runs terraform.
@@ -177,6 +201,46 @@ fn executed(command: &SimpleCommand) -> Option<(&str, &[String])> {
     }
 }
 
+/// The text of every `$(...)` and backtick substitution in *line*, quoted or
+/// not, nested ones included as part of their outer text.
+///
+/// Inside single quotes these are literal text to a shell; they are taken
+/// anyway, because reading too much here can only refuse more.
+fn substitutions(line: &str) -> Vec<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && chars.get(i + 1) == Some(&'(') {
+            let start = i + 2;
+            let mut depth = 1;
+            let mut j = start;
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let end = if depth == 0 { j - 1 } else { j };
+            found.push(chars[start..end].iter().collect());
+            i = start;
+        } else if chars[i] == '`' {
+            let start = i + 1;
+            let end = chars[start..]
+                .iter()
+                .position(|&c| c == '`')
+                .map_or(chars.len(), |n| start + n);
+            found.push(chars[start..end].iter().collect());
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    found
+}
+
 /// Does this wrapper's option consume the word after it?
 ///
 /// Per wrapper, because the same letter means different things: `env -i`
@@ -216,7 +280,9 @@ fn value_of<'a>(args: &'a [String], option: &str) -> Option<&'a str> {
 
 /// Wrappers that run something else without changing what it is.
 const TRANSPARENT: &[&str] = &[
-    "sudo", "doas", "env", "nohup", "time", "command", "nice", "ionice", "stdbuf", "setsid", "exec",
+    "sudo", "doas", "env", "nohup", "time", "command", "nice", "ionice", "stdbuf", "setsid",
+    "exec", // Multi-call binaries: `busybox cp` runs cp.
+    "busybox", "toybox",
 ];
 
 const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];

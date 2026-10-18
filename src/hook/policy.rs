@@ -19,7 +19,8 @@
 //!   command posted to a forge. The engine files digger-on-PR under this id too;
 //!   it has no separate one.
 //! * `git_commit_flags` — a commit that skips hooks or signing.
-//! * `hook_config_tamper` — a write to the exceptions file itself.
+//! * `hook_config_tamper` — an edit of the exceptions file, and any Bash
+//!   command that names it, a read included (#64).
 //!
 //! Every other id — the engine's `git_push_default` and `db_lockdown`, which this
 //! client does not implement, a misspelling, a different case — changes nothing.
@@ -42,6 +43,10 @@ pub const EXCEPTIONS_FILE: &str = "yadgar-hook-exceptions.json";
 
 /// The key holding the list of switched-off guard ids.
 const DISABLED_KEY: &str = "disabled_guards";
+
+/// The engine's push allowlist. Not used here, but shape-checked as the engine
+/// checks it, so a file the engine ignores is ignored here too.
+const PUSH_ALLOWLIST_KEY: &str = "push_default_allowlist";
 
 /// The most of the file that is ever read. A real one is a few hundred bytes.
 ///
@@ -78,6 +83,16 @@ impl Policy {
             return Err("the top level is not a JSON object".to_string());
         };
         let mut policy = Self::ALL_ON;
+        // PARITY WITH THE ENGINE (m-agahi/yadgar#77): a push allowlist of the
+        // wrong shape makes the whole file malformed there, so here too.
+        if let Some(allow) = root.get(PUSH_ALLOWLIST_KEY) {
+            let strings = allow
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string));
+            if !strings {
+                return Err(format!("`{PUSH_ALLOWLIST_KEY}` is not a list of strings"));
+            }
+        }
         let Some(disabled) = root.get(DISABLED_KEY) else {
             return Ok(policy);
         };

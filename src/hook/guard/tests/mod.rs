@@ -54,6 +54,14 @@ const MUST_BE_ALLOWED: &[&str] = &[
     "ls terraforming/",
     "gh pr comment 12 --body 'see the digger notes'",
     "grep digger docs/",
+    // Globs and variables that cannot reach the file under `.claude` (opus
+    // review of #64: these were refused for merely mentioning a fragment).
+    "rg 'yadgar.*' .",
+    "grep -rn 'Exception.*' src/",
+    "find . -name '*hook*'",
+    "echo $YADGAR_URL",
+    "ls ~/.claude/*.md",
+    "cat ~/.claude/rules/*.md",
     // Naming the command without posting it. Nothing here reaches a forge,
     // and refusing this refuses reading the rule that forbids it.
     "grep 'digger apply' docs/",
@@ -135,7 +143,6 @@ const MUST_BE_DENIED: &[&str] = &[
     "cp /tmp/x ~/.claude/yadgar-hook-*.json",
     "cp /tmp/x ~/.claude/$'yadgar-hook-exceptions.json'",
     "cp /tmp/x ~/.claude/{yadgar-hook-exceptions.json,}",
-    "cp /tmp/x yadgar-hook-exception?.json",
     // KNOWN OVER-REFUSALS, kept on purpose: `install` and `ln` name the file
     // either way and are not worth parsing, and a search for the file by
     // name is indistinguishable from a find that acts on it.
@@ -203,8 +210,15 @@ const MUST_BE_DENIED: &[&str] = &[
     "cp ~/.claude/yadgar-hook-exceptions.json /tmp/",
     "dd if=/home/x/.claude/yadgar-hook-exceptions.json of=/tmp/copy.json",
     "jq . < ~/.claude/yadgar-hook-exceptions.json",
-    // A glob or variable that may expand to the file from another directory.
-    "rm *-hook-exceptions.json",
+    // Opus review of #64: a backslash-newline continuation splits the name,
+    // and a glob or brace list can match `.claude` and the file name.
+    "echo x > ~/.claude/yadgar-hook-exc\\\neptions.json",
+    "rm ~/.c*/y*",
+    "cat ~/.c[l]aude/*.json",
+    "rm ~/.claud?/*.json",
+    "rm ~/{.claude,}/*.json",
+    "rm ~/.c{l,}aude/y*.json",
+    "D=~/.claude; rm $D/$a$b",
     "install -m 600 ~/.claude/yadgar-hook-exceptions.json /tmp/x.json",
     "ln -s ~/.claude/yadgar-hook-exceptions.json /tmp/link-to-it",
     "find ~/.claude -name yadgar-hook-exceptions.json",
@@ -479,4 +493,21 @@ fn a_bash_command_too_long_to_check_quickly_is_refused() {
     let started = std::time::Instant::now();
     let _ = guard(&bash_call(&nested));
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn an_edit_with_no_path_is_refused_without_naming_bash_fields() {
+    // The reason is read by the model: an Edit refused for a missing path
+    // must not talk about a Bash `command`.
+    let Decision::Deny(reason) = guard(&json!({"tool_name": "Edit", "tool_input": {}})) else {
+        panic!("allowed an edit with no path");
+    };
+    assert!(reason.contains("file_path"), "{reason}");
+    assert!(!reason.contains("command"), "{reason}");
+}
+
+#[test]
+fn the_exceptions_refusal_says_to_use_the_read_tool() {
+    let reason = reason_for(&bash_call("cat ~/.claude/yadgar-hook-exceptions.json"));
+    assert!(reason.contains("Read tool"), "{reason}");
 }

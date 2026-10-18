@@ -10,8 +10,7 @@
 //! `grep -r 'terraform ' docs/`, which runs grep. It refused a `Write` of
 //! `MIGRATION_NOTES.md` containing the words `digger apply` — which is precisely
 //! what the standing rule instructs a person to do instead of posting one, so
-//! the guard forbade its own remedy. It refused
-//! `cat ~/.claude/yadgar-hook-exceptions.json`, a read. And it allowed
+//! the guard forbade its own remedy. And it allowed
 //! `git commit -n -m x`, `git -c core.hooksPath=/dev/null commit`,
 //! `cd infra && terraform`, a bare `terraform` at the end of a line,
 //! `docker exec tf-local-plan tofu`, and
@@ -37,13 +36,15 @@
 //!   the working directory at hook time.
 //! * `make apply`, `just plan`, a shell alias, `eval "$CMD"`. All reach the same
 //!   binaries through a name this cannot resolve.
-//! * Bash-level mutation of the exceptions file is a NAMED set of writing
-//!   commands plus redirection targets, not a proof. `Edit`, `Write` and
-//!   `NotebookEdit` on that path are exact, and they are where the incident was.
 //!
-//! Everything in that list fails OPEN, which is the right direction: this runs
-//! on the critical path of somebody's session, and a guard that refuses what it
-//! cannot understand is a guard that gets switched off.
+//! Everything in that list fails OPEN for the terraform, commit and digger
+//! rules: this runs on the critical path of somebody's session, and a guard
+//! that refuses what it cannot understand is a guard that gets switched off.
+//!
+//! **The exceptions file is the exception** (#64): any Bash command that names
+//! it refuses, read or write, because every attempt to let a read through was
+//! bypassed. `Edit`, `Write` and `NotebookEdit` on that path are exact. What a
+//! text check cannot see is listed in `guard/tamper.rs`.
 
 use serde_json::Value;
 
@@ -97,7 +98,7 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
                 .iter()
                 .any(|k| input.get(*k).is_some_and(Value::is_string));
             if !placed {
-                return Decision::Deny(UNREADABLE.into());
+                return Decision::Deny(UNPLACED.into());
             }
             let path = [field("file_path"), field("notebook_path")].join("\n");
             if policy.hook_config_tamper && is_the_exceptions_file(&path) {
@@ -141,6 +142,11 @@ fn env_split_string(words: &[String]) -> Option<&str> {
 const MAX_NESTING: usize = 2; // ADR-0569-EXCEPTION(CB): bound on recursive -c unwrapping, not a per-install knob.
 
 fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
+    // A BACKSLASH-NEWLINE IS A LINE CONTINUATION: the shell deletes the pair
+    // before it reads words, so `exc\<newline>eptions` is one word. Removed
+    // here, before any check reads the line.
+    let joined = line.replace("\\\n", "");
+    let line = joined.as_str();
     let commands = shell_commands(line);
     let inner = substitutions(line);
 
@@ -391,6 +397,10 @@ const UNREADABLE: &str = "refused: the hook payload is not a tool call this guar
      (no string `tool_name`, or a Bash call with no string `command`), so this \
      tool call was not checked. Retry it; if this repeats, run `yaadgaar verify`.";
 
+const UNPLACED: &str = "refused: this edit carries no string `file_path` or `notebook_path`, \
+     so the guard cannot tell which file it changes, and it was not checked. \
+     Retry it; if this repeats, run `yaadgaar verify`.";
+
 const HOOK_BYPASS: &str = "A commit that skips hooks is a commit whose checks did not run. \
      Hook failure is signal, not an obstacle — fix the cause and re-run.";
 
@@ -404,8 +414,8 @@ const DIGGER: &str = "A digger comment runs terraform against remote state throu
 
 const EXCEPTIONS: &str = "The hook exceptions file is a durable, human-only decision. An agent \
      once edited it to allow its own push, then reverted the file to conceal \
-     that — which is why this refuses the write rather than trusting the \
-     intent behind it.";
+     that. So the guard refuses any Bash command naming the file, a read \
+     included, and any edit of it. To read it, use the Read tool.";
 
 #[cfg(test)]
 mod tests;

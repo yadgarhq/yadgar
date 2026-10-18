@@ -198,6 +198,21 @@ fn a_file_over_the_size_cap_is_malformed_even_when_it_would_parse() {
 }
 
 #[test]
+fn a_push_allowlist_that_is_not_a_list_of_strings_voids_the_whole_file() {
+    // Parity with the engine's router (m-agahi/yadgar#77): this client does
+    // not use the key, but a file the engine ignores must not switch anything
+    // off here either.
+    for text in [
+        r#"{"disabled_guards":["git_commit_flags"],"push_default_allowlist":"x"}"#,
+        r#"{"disabled_guards":["git_commit_flags"],"push_default_allowlist":[1]}"#,
+    ] {
+        assert!(Policy::parse(text).is_err(), "{text}");
+    }
+    let fine = r#"{"disabled_guards":["git_commit_flags"],"push_default_allowlist":["main"]}"#;
+    assert!(!Policy::parse(fine).unwrap().git_commit_flags);
+}
+
+#[test]
 fn a_list_with_any_entry_that_is_not_a_string_is_malformed_as_a_whole() {
     // All-or-nothing, as the engine's router reads it (m-agahi/yadgar#77):
     // `["git_commit_flags", 1]` used to switch git_commit_flags off and skip

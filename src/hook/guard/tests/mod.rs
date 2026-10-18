@@ -213,14 +213,6 @@ fn the_exceptions_file_is_protected_from_edit_not_just_bash() {
 }
 
 #[test]
-fn an_unreadable_payload_allows_rather_than_denying() {
-    // Fail OPEN. A guard that denied on a payload it could not parse would
-    // block the session on its own bug.
-    assert_eq!(guard(&Value::Null), Decision::Allow);
-    assert_eq!(guard(&json!({"tool_name": "Bash"})), Decision::Allow);
-}
-
-#[test]
 fn a_tool_the_guard_does_not_cover_is_allowed() {
     let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/etc/passwd"}});
     assert_eq!(guard(&read), Decision::Allow);
@@ -341,4 +333,28 @@ fn a_refusal_names_the_rule_the_call_actually_broke() {
             .count();
         assert_eq!(carriers, 1, "{needle:?} no longer names one rule only");
     }
+}
+
+#[test]
+fn a_payload_of_the_wrong_shape_is_refused_and_never_judged_as_empty() {
+    // Ledger 1589 (b): JSON that is not a tool call used to read as tool ""
+    // with command "", which allows. A call the guard cannot read is a call
+    // it cannot judge, so it refuses, as an unparseable one does.
+    for payload in [
+        json!([]),
+        json!("Bash"),
+        json!({}),
+        json!({"tool_name": 5}),
+        json!({"tool_name": "Bash"}),
+        json!({"tool_name": "Bash", "tool_input": {"command": 7}}),
+        json!({"tool_name": "Bash", "tool_input": "terraform apply"}),
+    ] {
+        let Decision::Deny(reason) = guard(&payload) else {
+            panic!("allowed a payload it could not read: {payload}");
+        };
+        assert!(reason.contains("payload"), "{reason}");
+    }
+    // A well-formed call of a tool the guard does not judge still allows.
+    let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/tmp/x"}});
+    assert_eq!(guard(&read), Decision::Allow);
 }

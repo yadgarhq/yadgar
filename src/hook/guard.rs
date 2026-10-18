@@ -60,11 +60,16 @@ use tamper::{is_the_exceptions_file, writes_the_exceptions_file};
 /// allowlist, pushed to master, then reverted the file to conceal it — and a
 /// Bash-only matcher never even routed the call to the guard.
 pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
-    let tool = payload
-        .get("tool_name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    // A PAYLOAD OF THE WRONG SHAPE REFUSES (ledger 1589). It used to read as
+    // tool "" with command "", which allows: JSON that is not a tool call is a
+    // call the guard cannot judge, exactly like JSON that does not parse.
+    let Some(tool) = payload.get("tool_name").and_then(Value::as_str) else {
+        return Decision::Deny(UNREADABLE.into());
+    };
     let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+    if tool == "Bash" && !input.get("command").is_some_and(Value::is_string) {
+        return Decision::Deny(UNREADABLE.into());
+    }
     let field = |key: &str| {
         input
             .get(key)
@@ -383,6 +388,10 @@ fn mentions_a_digger_command(text: &str) -> bool {
 }
 
 // ── the reasons, which a person reads ────────────────────────────────────────
+
+const UNREADABLE: &str = "refused: the hook payload is not a tool call this guard can read \
+     (no string `tool_name`, or a Bash call with no string `command`), so this \
+     tool call was not checked. Retry it; if this repeats, run `yaadgaar verify`.";
 
 const HOOK_BYPASS: &str = "A commit that skips hooks is a commit whose checks did not run. \
      Hook failure is signal, not an obstacle — fix the cause and re-run.";

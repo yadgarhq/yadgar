@@ -72,3 +72,53 @@ jobs:
     secrets:
       RELEASE_APP_CLIENT_ID: ${{ secrets.RELEASE_APP_CLIENT_ID }}
       RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+  # TWO REPOSITORY-LOCAL CHECKS, for the reason `release.yaml` gives for being
+  # local: they guard the wheel release, which only this repository has (D62).
+  # NEITHER IS PART OF `ci / passed`, so neither gates the merge on its own; the
+  # ruleset would have to name them for that. Skipped on a body-only edit.
+
+  # THE RELEASE STAMP, RUN ON EVERY PULL REQUEST (ledger 1521). On a tag,
+  # `release.yaml` rewrites the version in Cargo.toml and Cargo.lock; before,
+  # nothing ran those rewrites until a real tag. `cargo metadata --locked`
+  # fails unless both files agree on the stamped version. NOT `--no-deps`:
+  # with it, a Cargo.toml/Cargo.lock root-version mismatch exits 0.
+  stamp:
+    if: github.event_name == 'pull_request' && github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: stamp a dummy version and read it back
+        run: |
+          set -euo pipefail
+          scripts/stamp-version 0.0.1
+          cargo metadata --locked --format-version 1 \
+            | jq -e '.packages[] | select(.name == "yaadgaar") | .version == "0.0.1"'
+
+  # THE WINDOWS ARMS COMPILE ON EVERY PULL REQUEST (ledger 1551). Every
+  # `cfg(not(unix))` branch was first compiled by the Windows wheel jobs on
+  # the release tag, the worst moment to learn it does not build.
+  windows:
+    if: github.event_name == 'pull_request' && github.event.action != 'edited'
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo check for Windows
+        run: cargo check --locked --all-targets
+      # The checkout here has CRLF line endings, so this exercises the stamp's
+      # `\r?\n` branch that the Windows wheel legs depend on. AFTER the check:
+      # the stamp rewrites the version, and the check is of the real tree.
+      - name: stamp a dummy version on CRLF files
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/stamp-version 0.0.1
+          cargo metadata --locked --format-version 1 > /dev/null

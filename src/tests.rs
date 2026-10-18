@@ -117,16 +117,7 @@ fn a_run_that_changed_everything_names_every_file_by_path() {
 
 #[cfg(unix)]
 fn scratch_path_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "yadgar-path-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::testserver::scratch_dir(&format!("path-{label}"))
 }
 
 #[cfg(unix)]

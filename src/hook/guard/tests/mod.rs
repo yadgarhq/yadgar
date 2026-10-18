@@ -35,6 +35,13 @@ const MUST_BE_ALLOWED: &[&str] = &[
     // A read of the exceptions file. Reading a human's decisions is how an
     // agent honours them.
     "cat ~/.claude/yadgar-hook-exceptions.json",
+    // Copying it ELSEWHERE reads it (ledger 1590): the file is the source,
+    // and the destination is a different file.
+    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/exceptions-backup.json",
+    "cp -p ~/.claude/yadgar-hook-exceptions.json ./backup.json",
+    "install -m 600 ~/.claude/yadgar-hook-exceptions.json /tmp/x.json",
+    "ln -s ~/.claude/yadgar-hook-exceptions.json /tmp/link-to-it",
+    "dd if=/home/x/.claude/yadgar-hook-exceptions.json of=/tmp/copy.json",
     // Searching the documentation for the word.
     "grep -r 'terraform ' docs/",
     "cat docs/terraform-notes.md",
@@ -92,6 +99,26 @@ const MUST_BE_DENIED: &[&str] = &[
     // Writing the exceptions file, as opposed to reading it.
     "echo '{}' > ~/.claude/yadgar-hook-exceptions.json",
     "tee ~/.claude/yadgar-hook-exceptions.json",
+    // Copying ONTO it, moving it, deleting it (ledger 1590 keeps these).
+    "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "cp -f /tmp/x /home/x/.claude/yadgar-hook-exceptions.json",
+    "mv ~/.claude/yadgar-hook-exceptions.json /tmp/gone.json",
+    "mv /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "rm ~/.claude/yadgar-hook-exceptions.json",
+    "rm -f /home/x/.claude/yadgar-hook-exceptions.json",
+    "ln -sf /tmp/evil ~/.claude/yadgar-hook-exceptions.json",
+    "dd if=/tmp/x of=/home/x/.claude/yadgar-hook-exceptions.json",
+    // A copy INTO a directory keeps the source's name, so a source named
+    // like the file lands on it.
+    "cp /tmp/yadgar-hook-exceptions.json ~/.claude/",
+    "cp /tmp/yadgar-hook-exceptions.json /home/x/.claude",
+    "cp -t /home/x/.claude /tmp/yadgar-hook-exceptions.json",
+    "cp -vt ~/.claude /tmp/yadgar-hook-exceptions.json",
+    // KNOWN OVER-REFUSAL, kept on purpose: copying the file INTO a directory
+    // writes a file of the same name there, and the guard protects the name.
+    // Copy it to an explicit file name instead (see MUST_BE_ALLOWED).
+    "cp --target-directory=/tmp ./x ~/.claude/yadgar-hook-exceptions.json",
+    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/",
 ];
 
 #[test]

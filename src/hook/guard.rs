@@ -47,8 +47,11 @@
 
 use serde_json::Value;
 
-use super::{Decision, Policy, EXCEPTIONS_FILE};
+use super::{Decision, Policy};
 use crate::install::shellword::{shell_commands, SimpleCommand};
+
+mod tamper;
+use tamper::{is_the_exceptions_file, writes_the_exceptions_file};
 
 /// Refuse a tool call that the standing rules forbid.
 ///
@@ -377,34 +380,6 @@ fn mentions_a_digger_command(text: &str) -> bool {
     words
         .windows(2)
         .any(|pair| pair[0] == "digger" && DIGGER_VERBS.contains(&pair[1].as_str()))
-}
-
-// ── the exceptions file ──────────────────────────────────────────────────────
-
-/// Commands that write a file named on their command line.
-///
-/// A NAMED SET, and therefore an incomplete one — said plainly rather than
-/// implied. Bash can reach a file by a hundred routes and this covers the ones
-/// an agent actually uses; `Edit`, `Write` and `NotebookEdit` are exact, and
-/// that is where the incident happened.
-const WRITERS: &[&str] = &[
-    "tee", "sed", "cp", "mv", "rm", "dd", "truncate", "install", "ln", "chmod", "chown", "shred",
-    "patch", "sponge", "python", "python3", "perl", "ruby", "node", "jq",
-    // Not writers of bytes, but of a FIFO or device node in the file's place:
-    // a reader that blocked on one would hang until the hook timed out.
-    "mkfifo", "mknod",
-];
-
-fn writes_the_exceptions_file(program: &str, args: &[String], writes_to: &[String]) -> bool {
-    if writes_to.iter().any(|f| is_the_exceptions_file(f)) {
-        return true;
-    }
-    WRITERS.contains(&program) && args.iter().any(|a| is_the_exceptions_file(a))
-}
-
-fn is_the_exceptions_file(word: &str) -> bool {
-    word.split(['/', '\\', '\n'])
-        .any(|part| part == EXCEPTIONS_FILE)
 }
 
 // ── the reasons, which a person reads ────────────────────────────────────────

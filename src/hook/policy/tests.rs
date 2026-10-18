@@ -47,9 +47,10 @@ fn all_three_ids_together_switch_off_all_three() {
 
 #[test]
 fn ids_this_client_does_not_implement_change_nothing() {
-    // The engine's own two other ids, a misspelling, a different case and a
-    // non-string item. None of them names a refusal this guard makes.
-    let text = r#"{"disabled_guards":["git_push_default","db_lockdown","terraform","Terraform_Family","TERRAFORM_FAMILY"," git_commit_flags",7,null,{"id":"terraform_family"}]}"#;
+    // The engine's own two other ids, a misspelling and a different case.
+    // None of them names a refusal this guard makes. (A non-string item makes
+    // the whole list malformed; see the all-or-nothing test.)
+    let text = r#"{"disabled_guards":["git_push_default","db_lockdown","terraform","Terraform_Family","TERRAFORM_FAMILY"," git_commit_flags"]}"#;
     assert_eq!(Policy::parse(text), Ok(Policy::ALL_ON));
 }
 
@@ -193,6 +194,35 @@ fn a_file_over_the_size_cap_is_malformed_even_when_it_would_parse() {
             ..Policy::ALL_ON
         })
     );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_list_with_any_entry_that_is_not_a_string_is_malformed_as_a_whole() {
+    // All-or-nothing, as the engine's router reads it (m-agahi/yadgar#77):
+    // `["git_commit_flags", 1]` used to switch git_commit_flags off and skip
+    // the 1. A list the engine ignores must not switch anything off here.
+    for text in [
+        r#"{"disabled_guards":["git_commit_flags",1]}"#,
+        r#"{"disabled_guards":["git_commit_flags",null]}"#,
+        r#"{"disabled_guards":[["git_commit_flags"]]}"#,
+        r#"{"disabled_guards":["git_commit_flags",{"id":"x"}]}"#,
+    ] {
+        assert!(Policy::parse(text).is_err(), "{text}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_in_place_of_the_file_is_refused_even_to_a_valid_file() {
+    // O_NOFOLLOW, as the engine opens it: the two guards read one file and
+    // must reach one decision, and the engine ignores a symlinked file.
+    let dir = scratch("symlink-valid");
+    let real = dir.join("real.json");
+    std::fs::write(&real, r#"{"disabled_guards":["git_commit_flags"]}"#).unwrap();
+    let link = dir.join(EXCEPTIONS_FILE);
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    assert_eq!(Policy::load(Some(&link)), Policy::ALL_ON);
     std::fs::remove_dir_all(&dir).ok();
 }
 

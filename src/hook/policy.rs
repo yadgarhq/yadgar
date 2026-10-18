@@ -84,9 +84,16 @@ impl Policy {
         let Some(ids) = disabled.as_array() else {
             return Err(format!("`{DISABLED_KEY}` is not a list"));
         };
+        // ALL OR NOTHING (ledger 1589): one entry that is not a string makes
+        // the whole list malformed, as the engine's router reads it
+        // (m-agahi/yadgar#77). Skipping it and honouring the rest would switch
+        // off here what the engine, ignoring the file, keeps on.
+        let Some(ids) = ids.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+            return Err(format!("`{DISABLED_KEY}` is not a list of strings"));
+        };
         // Exact, case-sensitive matches only. Anything else names no refusal
         // this guard makes, and is left for the engine to read.
-        for id in ids.iter().filter_map(Value::as_str) {
+        for id in ids {
             match id {
                 "terraform_family" => policy.terraform_family = false,
                 "git_commit_flags" => policy.git_commit_flags = false,
@@ -145,13 +152,18 @@ impl Policy {
 /// read: a read of one can block or never end, and Claude Code treats a hook it
 /// timed out as no decision at all — every guarded call would then run.
 /// `O_NONBLOCK` has no effect on a regular file's reads.
+///
+/// `O_NOFOLLOW` (ledger 1589): a symlink in the file's place is refused, even
+/// to a valid file, because the engine's router opens it the same way
+/// (m-agahi/yadgar#77). Two guards reading one decision file must reach one
+/// decision, and a symlink both follows would be a second route to the file.
 fn read_bounded(path: &Path) -> std::io::Result<String> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {

@@ -100,6 +100,34 @@ fn an_allowed_call_exits_zero_and_prints_nothing_on_either_stream() {
 }
 
 #[test]
+fn a_symlinked_exceptions_file_is_ignored_with_a_notice_and_every_guard_on() {
+    // Ledger 1589: opened O_NOFOLLOW, as the engine's router opens it. A link
+    // to a file that would switch the commit guard off switches nothing off.
+    let home = scratch("guard-symlinked");
+    let real = home.join("elsewhere.json");
+    std::fs::write(&real, r#"{"disabled_guards":["git_commit_flags"]}"#).unwrap();
+    std::os::unix::fs::symlink(&real, exceptions(&home)).unwrap();
+    let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload(BYPASS));
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("every guard stays on"), "{stderr}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+}
+
+#[test]
+fn copying_the_exceptions_file_elsewhere_refuses_through_the_binary() {
+    // Ledger 1590, won't fix in the guard (#64): a Bash command naming the
+    // file refuses even as a read. Read it with the Read tool.
+    let home = scratch("guard-cp-source");
+    let read = "cp ~/.claude/yadgar-hook-exceptions.json /tmp/backup.json";
+    let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload(read));
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let write = "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json";
+    let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload(write));
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+}
+
+#[test]
 fn a_malformed_exceptions_file_keeps_the_guard_on_and_logs_a_notice() {
     let home = scratch("guard-malformed");
     std::fs::write(

@@ -19,7 +19,8 @@
 //!   command posted to a forge. The engine files digger-on-PR under this id too;
 //!   it has no separate one.
 //! * `git_commit_flags` — a commit that skips hooks or signing.
-//! * `hook_config_tamper` — a write to the exceptions file itself.
+//! * `hook_config_tamper` — an edit of the exceptions file, and any Bash
+//!   command that names it, a read included (#64).
 //!
 //! Every other id — the engine's `git_push_default` and `db_lockdown`, which this
 //! client does not implement, a misspelling, a different case — changes nothing.
@@ -42,6 +43,10 @@ pub const EXCEPTIONS_FILE: &str = "yadgar-hook-exceptions.json";
 
 /// The key holding the list of switched-off guard ids.
 const DISABLED_KEY: &str = "disabled_guards";
+
+/// The engine's push allowlist. Not used here, but shape-checked as the engine
+/// checks it, so a file the engine ignores is ignored here too.
+const PUSH_ALLOWLIST_KEY: &str = "push_default_allowlist";
 
 /// The most of the file that is ever read. A real one is a few hundred bytes.
 ///
@@ -78,15 +83,32 @@ impl Policy {
             return Err("the top level is not a JSON object".to_string());
         };
         let mut policy = Self::ALL_ON;
+        // PARITY WITH THE ENGINE (m-agahi/yadgar#77): a push allowlist of the
+        // wrong shape makes the whole file malformed there, so here too.
+        if let Some(allow) = root.get(PUSH_ALLOWLIST_KEY) {
+            let strings = allow
+                .as_array()
+                .is_some_and(|items| items.iter().all(Value::is_string));
+            if !strings {
+                return Err(format!("`{PUSH_ALLOWLIST_KEY}` is not a list of strings"));
+            }
+        }
         let Some(disabled) = root.get(DISABLED_KEY) else {
             return Ok(policy);
         };
         let Some(ids) = disabled.as_array() else {
             return Err(format!("`{DISABLED_KEY}` is not a list"));
         };
+        // ALL OR NOTHING (ledger 1589): one entry that is not a string makes
+        // the whole list malformed, as the engine's router reads it
+        // (m-agahi/yadgar#77). Skipping it and honouring the rest would switch
+        // off here what the engine, ignoring the file, keeps on.
+        let Some(ids) = ids.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else {
+            return Err(format!("`{DISABLED_KEY}` is not a list of strings"));
+        };
         // Exact, case-sensitive matches only. Anything else names no refusal
         // this guard makes, and is left for the engine to read.
-        for id in ids.iter().filter_map(Value::as_str) {
+        for id in ids {
             match id {
                 "terraform_family" => policy.terraform_family = false,
                 "git_commit_flags" => policy.git_commit_flags = false,
@@ -145,13 +167,18 @@ impl Policy {
 /// read: a read of one can block or never end, and Claude Code treats a hook it
 /// timed out as no decision at all — every guarded call would then run.
 /// `O_NONBLOCK` has no effect on a regular file's reads.
+///
+/// `O_NOFOLLOW` (ledger 1589): a symlink in the file's place is refused, even
+/// to a valid file, because the engine's router opens it the same way
+/// (m-agahi/yadgar#77). Two guards reading one decision file must reach one
+/// decision, and a symlink both follows would be a second route to the file.
 fn read_bounded(path: &Path) -> std::io::Result<String> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NONBLOCK);
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {

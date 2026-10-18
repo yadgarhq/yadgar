@@ -18,6 +18,7 @@
 //! `None` is the ordinary case and not a degraded one: an absent `ca_pem` means
 //! the deployment uses a publicly-trusted certificate and system trust applies.
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Why a CA could not be trusted.
@@ -40,6 +41,28 @@ pub enum TrustError {
          be verified against system trust alone. Ask for a new token."
     )]
     NoCertificate,
+    /// A `login --ca-file` that cannot be used, named by its PATH (ledger
+    /// 1549). The two arms above speak of the enrolment token, which a person
+    /// passing a file never had.
+    #[error("--ca-file {0}: {1}")]
+    CaFile(PathBuf, String),
+}
+
+/// Read the CA `login --ca-file` names, refusing it unless it holds a usable
+/// certificate.
+///
+/// Checked through [`client`] itself, so a file is accepted by exactly the rule
+/// a token's `ca_pem` is — and refused BEFORE any prompt, rather than as a
+/// handshake failure after the password was typed.
+pub fn read_ca_file(path: &Path) -> Result<String, TrustError> {
+    let fail = |why: String| TrustError::CaFile(path.to_path_buf(), why);
+    let pem = std::fs::read_to_string(path).map_err(|e| fail(e.to_string()))?;
+    match client(Some(&pem), None) {
+        Ok(_) => Ok(pem),
+        Err(TrustError::NoCertificate) => Err(fail("contains no PEM CERTIFICATE section".into())),
+        Err(TrustError::Unreadable(e)) => Err(fail(format!("not a readable certificate: {e}"))),
+        Err(e @ TrustError::CaFile(..)) => Err(e),
+    }
 }
 
 /// Build a client that trusts *ca_pem* in addition to the system roots.
@@ -146,5 +169,41 @@ mod tests {
                 "a ca_pem carrying no certificate was accepted: {empty:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_ca_file_holding_a_real_certificate_is_read_whole() {
+        let dir = crate::testserver::scratch_dir("trust-ca-file");
+        let pem = rcgen::generate_simple_self_signed(vec!["gw.test".into()])
+            .unwrap()
+            .cert
+            .pem();
+        let path = dir.join("ca.pem");
+        std::fs::write(&path, &pem).unwrap();
+        assert_eq!(read_ca_file(&path).unwrap(), pem);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_ca_file_that_is_missing_or_holds_no_certificate_is_refused_by_its_path() {
+        // Refused before any prompt, and named as the FILE: the token-shaped
+        // messages above would send a person looking for a token they never had.
+        let dir = crate::testserver::scratch_dir("trust-ca-file-bad");
+        let missing = dir.join("absent.pem");
+        let err = read_ca_file(&missing).unwrap_err().to_string();
+        assert!(
+            err.contains("--ca-file") && err.contains("absent.pem"),
+            "{err}"
+        );
+
+        let empty = dir.join("empty.pem");
+        std::fs::write(&empty, "no certificate here").unwrap();
+        let err = read_ca_file(&empty).unwrap_err().to_string();
+        assert!(
+            err.contains("empty.pem") && err.contains("no PEM CERTIFICATE"),
+            "{err}"
+        );
+        assert!(!err.contains("enrolment token"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

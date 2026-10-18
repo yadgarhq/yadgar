@@ -97,15 +97,42 @@ fn content_length(head: &str) -> Option<usize> {
 }
 
 /// A directory no test shares with another, and none shares with a real install.
+///
+/// A COUNTER, NOT THE CLOCK (ledger 1195). Every test in one binary shares the
+/// pid, and two threads reading the same nanosecond got the same path:
+/// `create_dir_all` succeeded for both, and the two tests silently shared one
+/// directory. The pid keeps parallel test binaries apart and the counter keeps
+/// this binary's calls apart, so within one pid namespace no two live calls
+/// can get the same path. A leftover from an earlier process that had the same
+/// pid is removed first; `create_dir` then makes the leaf. Across pid
+/// namespaces sharing one temp directory (containers), a collision would
+/// delete or share a directory silently, not panic.
 pub fn scratch_dir(label: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "yadgar-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("a clock after 1970")
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&path).expect("a scratch directory");
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("yadgar-{label}-{}-{n}", std::process::id()));
+    // A leftover from an earlier run with the same pid is not a collision
+    // between two live tests, so it is cleared rather than refused.
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir(&path).expect("a scratch directory nobody else holds");
     path
+}
+
+#[test]
+fn scratch_dirs_never_repeat_under_one_label_across_threads() {
+    let dirs: Vec<std::path::PathBuf> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| s.spawn(|| (0..100).map(|_| scratch_dir("same")).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+    let unique: std::collections::HashSet<_> = dirs.iter().collect();
+    assert_eq!(unique.len(), dirs.len());
+    for dir in &dirs {
+        let _ = std::fs::remove_dir(dir);
+    }
 }

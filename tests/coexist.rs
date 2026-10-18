@@ -75,17 +75,56 @@ fn the_guard_reads_disabled_guards_from_the_home_it_runs_in() {
 }
 
 #[test]
-fn with_no_exceptions_file_the_guard_refuses_and_says_nothing_on_stderr() {
+fn with_no_exceptions_file_the_guard_refuses_and_explains_on_stderr_only() {
     let home = scratch("guard-absent");
     let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload(BYPASS));
     assert_eq!(out.status.code(), Some(2), "{out:?}");
+    // Claude Code feeds STDERR to the model on exit 2. It is the whole reason.
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("\"deny\""),
-        "{out:?}"
+        stderr.contains("Hook failure is signal, not an obstacle"),
+        "{stderr}"
     );
-    // Missing is the normal state on a machine without the engine: no warning.
-    assert!(out.stderr.is_empty(), "{out:?}");
+    // One approach per hook: exit code plus stderr, no JSON on stdout.
+    assert!(out.stdout.is_empty(), "{out:?}");
     assert!(!exceptions(&home).exists(), "the guard created the file");
+}
+
+#[test]
+fn an_allowed_call_exits_zero_and_prints_nothing_on_either_stream() {
+    let home = scratch("guard-allow");
+    let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload("ls -la"));
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+}
+
+#[test]
+fn a_symlinked_exceptions_file_is_ignored_with_a_notice_and_every_guard_on() {
+    // Ledger 1589: opened O_NOFOLLOW, as the engine's router opens it. A link
+    // to a file that would switch the commit guard off switches nothing off.
+    let home = scratch("guard-symlinked");
+    let real = home.join("elsewhere.json");
+    std::fs::write(&real, r#"{"disabled_guards":["git_commit_flags"]}"#).unwrap();
+    std::os::unix::fs::symlink(&real, exceptions(&home)).unwrap();
+    let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload(BYPASS));
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("every guard stays on"), "{stderr}");
+    assert!(out.stdout.is_empty(), "{out:?}");
+}
+
+#[test]
+fn copying_the_exceptions_file_elsewhere_refuses_through_the_binary() {
+    // Ledger 1590, won't fix in the guard (#64): a Bash command naming the
+    // file refuses even as a read. Read it with the Read tool.
+    let home = scratch("guard-cp-source");
+    let read = "cp ~/.claude/yadgar-hook-exceptions.json /tmp/backup.json";
+    let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload(read));
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let write = "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json";
+    let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload(write));
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
 }
 
 #[test]
@@ -103,12 +142,83 @@ fn a_malformed_exceptions_file_keeps_the_guard_on_and_logs_a_notice() {
         stderr.contains("yadgar-hook-exceptions.json") && stderr.contains("every guard stays on"),
         "{stderr}"
     );
-    // The notice is on stderr only; stdout carries exactly the refusal.
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // The fail-closed path explains the refusal too, not only the notice.
     assert!(
-        serde_json::from_str::<serde_json::Value>(stdout.trim()).is_ok(),
-        "{stdout}"
+        stderr.contains("Hook failure is signal, not an obstacle"),
+        "{stderr}"
     );
+    assert!(out.stdout.is_empty(), "{out:?}");
+}
+
+#[test]
+fn with_no_home_directory_every_guard_stays_on_and_the_refusal_is_explained() {
+    // `dirs::home_dir()` is `None`: the exceptions file cannot be located, so
+    // every guard stays on. That path must still say why on stderr.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_yaadgaar"))
+        .args(["hook", "pre-tool-guard"])
+        .env_remove("HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("YAADGAAR_CONFIG_DIR")
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the binary under test did not run");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(bash_payload(BYPASS).as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("Hook failure is signal, not an obstacle"),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty(), "{out:?}");
+}
+
+#[test]
+fn an_unparseable_payload_is_refused_with_a_reason_and_not_let_through() {
+    // Fail CLOSED (ledger 1570). Exit 0 here let a tool call the guard never
+    // inspected run, because a payload it cannot read is a call it cannot judge.
+    let home = scratch("guard-unparseable");
+    for payload in ["not json at all", "", "{\"tool_name\": \"Bash\""] {
+        let out = yaadgaar(&home, &["hook", "pre-tool-guard"], payload);
+        assert_eq!(out.status.code(), Some(2), "{payload:?}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("yaadgaar pre-tool-guard:") && stderr.contains("payload"),
+            "{payload:?}: {stderr}"
+        );
+        assert!(out.stdout.is_empty(), "{payload:?}: {out:?}");
+    }
+}
+
+#[test]
+fn hook_stderr_carries_no_terminal_colour_codes() {
+    // Claude Code feeds stderr to the model on exit 2. ANSI escapes from the
+    // tracing notice reach it as noise around the reason.
+    let home = scratch("guard-no-ansi");
+    std::fs::write(exceptions(&home), "{not json").unwrap();
+    let out = yaadgaar(&home, &["hook", "pre-tool-guard"], &bash_payload(BYPASS));
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("every guard stays on"), "{stderr}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
+}
+
+#[test]
+fn an_older_entry_with_an_unparseable_payload_still_exits_cleanly() {
+    // Fail-closed is the GUARD's rule. A retired handler judges nothing, so
+    // refusing on its behalf would block a session over a no-op.
+    let home = scratch("stale-unparseable");
+    let out = yaadgaar(&home, &["hook", "stop-checkpoint"], "not json");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stdout.is_empty(), "{out:?}");
 }
 
 #[test]

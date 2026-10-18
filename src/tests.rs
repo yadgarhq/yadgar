@@ -117,16 +117,7 @@ fn a_run_that_changed_everything_names_every_file_by_path() {
 
 #[cfg(unix)]
 fn scratch_path_dir(label: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "yadgar-path-{label}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::testserver::scratch_dir(&format!("path-{label}"))
 }
 
 #[cfg(unix)]
@@ -193,4 +184,16 @@ fn a_notice_is_printed_and_replaces_the_nothing_to_do_line() {
     assert_eq!(lines.len(), 2, "{lines:#?}");
     assert!(lines[0].contains("the rules file"), "{lines:#?}");
     assert!(lines[1].contains("add this line"), "{lines:#?}");
+}
+
+#[test]
+fn issue_enrolment_never_prints_the_token_unless_asked_where_to_put_it() {
+    // Ledger 1552: the token is a single-use secret. With neither sink named
+    // the command is a usage error, before anything is sent or minted.
+    let parse = |args: &[&str]| Cli::try_parse_from(args).map(|_| ());
+    let base = ["yaadgaar", "admin", "issue-enrolment", "--user-id", "u-1"];
+    assert!(parse(&base).is_err());
+    assert!(parse(&[&base[..], &["--stdout"]].concat()).is_ok());
+    assert!(parse(&[&base[..], &["--out", "/tmp/t"]].concat()).is_ok());
+    assert!(parse(&[&base[..], &["--out", "/tmp/t", "--stdout"]].concat()).is_err());
 }

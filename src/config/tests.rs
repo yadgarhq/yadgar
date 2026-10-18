@@ -405,15 +405,153 @@ fn the_override_is_yaadgaar_config_dir_and_wins() {
     );
 }
 
+/// Plant a symlink at *name*'s temporary path pointing at a file outside the
+/// directory, and give back that file.
+#[cfg(unix)]
+fn plant_tmp_link(dir: &Path, name: &str) -> PathBuf {
+    let victim = dir.join("victim");
+    std::fs::write(&victim, "untouched").unwrap();
+    std::os::unix::fs::symlink(&victim, dir.join(format!(".{name}.tmp"))).unwrap();
+    victim
+}
+
+#[cfg(unix)]
+#[test]
+fn the_temporary_file_is_created_exclusively_and_never_through_a_link() {
+    let dir = tempdir();
+    let victim = plant_tmp_link(&dir, "x");
+    assert!(
+        private::create_exclusive(&dir.join(".x.tmp")).is_err(),
+        "followed a link"
+    );
+    assert!(
+        private::create_exclusive(&victim).is_err(),
+        "opened an existing file"
+    );
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_at_config_json_itself_is_replaced_and_not_written_through() {
+    let dir = tempdir();
+    let victim = dir.join("victim");
+    std::fs::write(&victim, "untouched").unwrap();
+    std::os::unix::fs::symlink(&victim, dir.join(FILE)).unwrap();
+    Config::new(&dir, "https://gw".into(), "secret".into())
+        .save()
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+    let meta = std::fs::symlink_metadata(dir.join(FILE)).unwrap();
+    assert!(meta.file_type().is_file(), "config.json is still a link");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn concurrent_writes_all_land_and_leave_no_temporary_file_behind() {
+    // Several `serve` processes write the tool cache at once. With one fixed
+    // temporary name, one writer unlinked or renamed another's file and that
+    // writer's rename then failed.
+    let dir = tempdir();
+    let config = Config::new(&dir, "https://gw".into(), "secret".into());
+    std::thread::scope(|s| {
+        for t in 0..8 {
+            let config = &config;
+            s.spawn(move || {
+                for i in 0..25 {
+                    config.write_tool_cache(&format!("[{t},{i}]")).unwrap();
+                    config.save().unwrap();
+                }
+            });
+        }
+    });
+    let left: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Two temporary names handed to `write_private_at`: *taken* is planted with
+/// something by the test, *free* is not. Injected rather than predicted, so the
+/// planted name is EXACTLY the one the write tries first (review of #60: tests
+/// planting at a name the code never uses passed against a link-following
+/// create).
+fn temp_names(dir: &Path) -> (PathBuf, PathBuf) {
+    (dir.join(".taken.tmp"), dir.join(".free.tmp"))
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_at_the_next_temporary_name_is_skipped_and_never_written_through() {
+    // Ledger 1553: `fs::write` followed a symlink at the temporary name, so the
+    // link received the bearer token and the rename made config.json the link.
+    let dir = tempdir();
+    let victim = dir.join("victim");
+    std::fs::write(&victim, "untouched").unwrap();
+    let (taken, free) = temp_names(&dir);
+    std::os::unix::fs::symlink(&victim, &taken).unwrap();
+
+    private::write_private_at(&dir, FILE, b"secret", [taken.clone(), free]).unwrap();
+
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+    let meta = std::fs::symlink_metadata(dir.join(FILE)).unwrap();
+    assert!(
+        meta.file_type().is_file(),
+        "config.json is not a plain file"
+    );
+    assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), "secret");
+    assert!(std::fs::symlink_metadata(&taken)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_leftover_at_the_next_temporary_name_does_not_block_the_write() {
+    // A crash leftover plus a reused pid (containers, short CLI runs) used to
+    // make the first save fail on `AlreadyExists`. The write moves on to the
+    // next name and leaves the leftover alone.
+    let dir = tempdir();
+    let (taken, free) = temp_names(&dir);
+    std::fs::write(&taken, "leftover").unwrap();
+
+    private::write_private_at(&dir, FILE, b"secret", [taken.clone(), free]).unwrap();
+
+    assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap(), "secret");
+    assert_eq!(std::fs::read_to_string(&taken).unwrap(), "leftover");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn when_every_temporary_name_is_taken_the_write_fails_and_writes_nothing() {
+    let dir = tempdir();
+    let (taken, _) = temp_names(&dir);
+    std::fs::write(&taken, "leftover").unwrap();
+    let err = private::write_private_at(&dir, FILE, b"secret", [taken]).unwrap_err();
+    assert_eq!(err.1.kind(), std::io::ErrorKind::AlreadyExists, "{err:?}");
+    assert!(!dir.join(FILE).exists());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_config_directory_owned_by_somebody_else_is_refused() {
+    // Ledger 1553: an existing directory kept its owner, so a directory another
+    // user created (and can therefore replace files in) took the credential.
+    // Two uids cannot be arranged without root, so the decision is tested here
+    // and the wiring by the same-owner tests above.
+    let dir = PathBuf::from("/somewhere/yaadgaar");
+    let err = private::refuse_foreign_owner(&dir, 0, 1000).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(err.to_string().contains("/somewhere/yaadgaar"), "{err}");
+    assert!(private::refuse_foreign_owner(&dir, 1000, 1000).is_ok());
+}
+
 fn tempdir() -> PathBuf {
-    let p = std::env::temp_dir().join(format!(
-        "yadgar-cfg-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&p).unwrap();
-    p
+    crate::testserver::scratch_dir("cfg")
 }

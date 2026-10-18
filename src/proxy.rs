@@ -65,7 +65,15 @@ use replies::{gateway_message, parse_error, rejected_error, retarget, unreachabl
 /// Short, deliberately. The agent is blocked on this: a request that hangs for a
 /// minute is worse for the person than one that fails in thirty seconds and says
 /// why, because the agent can report a failure and carry on.
-const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30); // ADR-0569-EXCEPTION(CC): bounds one gateway round trip; coupled to the gateway's own upstream bound (dial REQUEST_TIMEOUT 30s) plus AUTH_DEADLINE 10s.
+pub(crate) const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30); // ADR-0569-EXCEPTION(CC): bounds one gateway round trip; coupled to the gateway's worst tools/call wait, stated below.
+
+// THE GATEWAY'S WORST `tools/call` WAIT MUST STAY BELOW THIS (ledger 1284,
+// ADR-0928): attestation on a cache miss 5 s, the task dial (connect 2 s plus
+// TLS 2 s) 4 s, and the task `requestTimeoutSeconds` at its schema maximum of
+// 18 s, plus a 2 s margin: 29 s < 30 s. The gateway's `chart/values.yaml`
+// states that sum and cites this line by number, so the constant stays on it.
+// The gateway's `AUTH_DEADLINE` (10 s) is not on this path: login and admin
+// never call task.
 
 /// Methods whose answer is cached so the agent can start while offline.
 ///

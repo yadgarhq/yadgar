@@ -588,9 +588,10 @@ fn login_with_password_stdin_reaches_a_real_gateway_with_no_terminal_and_prompts
     let gateway = format!("https://127.0.0.1:{port}/");
 
     // SEEDED BY HAND, matching `Config`'s own JSON shape (`src/config.rs`):
-    // `login` has no CA source of its own, and `ca_for` only reuses a stored
-    // CA for the exact gateway it was issued for — so the trust anchor for
-    // THIS gateway has to already be on file before `login` runs at all.
+    // without `--ca-file`, `login`'s only CA source is a stored one, and
+    // `ca_for` reuses it only for the exact gateway it was issued for — so
+    // this exercises the stored-CA path. The `--ca-file` path, with nothing
+    // seeded, is the test below.
     let seeded = serde_json::json!({
         "gateway": gateway,
         "token": "old-token",
@@ -639,6 +640,53 @@ fn login_with_password_stdin_reaches_a_real_gateway_with_no_terminal_and_prompts
         written.contains("tok-login-e2e"),
         "the token the fake gateway issued was never written: {written}"
     );
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn login_with_ca_file_reaches_a_private_ca_gateway_on_a_machine_that_never_enrolled() {
+    // Ledger 1549: NOTHING IS SEEDED. A machine that never enrolled has no
+    // config.json, so `--ca-file` is the only trust anchor for this
+    // private-CA gateway. Without it the TLS handshake fails `UnknownIssuer`.
+    let home = scratch("login-ca-file-e2e");
+    let config_dir = home.join("yadgar-config");
+
+    let (ca_pem, leaf_der, key_der) = generate_ca_and_leaf();
+    let ca_file = home.join("ca.pem");
+    std::fs::write(&ca_file, &ca_pem).unwrap();
+    let (port, served) = serve_one_tls_with(leaf_der, key_der, r#"{"token":"tok-ca-file"}"#);
+    let gateway = format!("https://127.0.0.1:{port}/");
+
+    let (status, stdout, stderr) = run_detached(
+        &home,
+        &[
+            "login",
+            "--gateway",
+            &gateway,
+            "--username",
+            "sentinel-person",
+            "--password-stdin",
+            "--ca-file",
+            ca_file.to_str().expect("a UTF-8 path"),
+        ],
+        &[(
+            "YAADGAAR_CONFIG_DIR",
+            config_dir.to_str().expect("a UTF-8 path"),
+        )],
+        "hunter2\n",
+    );
+
+    assert!(status.success(), "stdout={stdout:?} stderr={stderr:?}");
+    let sent = served.join().expect("the server thread did not panic");
+    assert!(sent.starts_with("POST /auth/login "), "{sent}");
+
+    // STORED, so `serve` later trusts the same anchor `login` just did.
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config_dir.join("config.json")).unwrap())
+            .unwrap();
+    assert_eq!(written["token"], "tok-ca-file", "{written}");
+    assert_eq!(written["ca_pem"], ca_pem.as_str(), "{written}");
     let _ = std::fs::remove_dir_all(&home);
 }
 

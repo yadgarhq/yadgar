@@ -32,9 +32,9 @@ fn reason_for(call: &Value) -> String {
 /// matcher this replaces refused all three, and one of them is the remedy
 /// the standing rule itself prescribes.
 const MUST_BE_ALLOWED: &[&str] = &[
-    // A read of the exceptions file. Reading a human's decisions is how an
-    // agent honours them.
-    "cat ~/.claude/yadgar-hook-exceptions.json",
+    // Globs and searches nowhere near the file.
+    "rm -f target/*.tmp",
+    "find . -name '*.rs'",
     // Searching the documentation for the word.
     "grep -r 'terraform ' docs/",
     "cat docs/terraform-notes.md",
@@ -54,6 +54,14 @@ const MUST_BE_ALLOWED: &[&str] = &[
     "ls terraforming/",
     "gh pr comment 12 --body 'see the digger notes'",
     "grep digger docs/",
+    // Globs and variables that cannot reach the file under `.claude` (opus
+    // review of #64: these were refused for merely mentioning a fragment).
+    "rg 'yadgar.*' .",
+    "grep -rn 'Exception.*' src/",
+    "find . -name '*hook*'",
+    "echo $YADGAR_URL",
+    "ls ~/.claude/*.md",
+    "cat ~/.claude/rules/*.md",
     // Naming the command without posting it. Nothing here reaches a forge,
     // and refusing this refuses reading the rule that forbids it.
     "grep 'digger apply' docs/",
@@ -92,6 +100,128 @@ const MUST_BE_DENIED: &[&str] = &[
     // Writing the exceptions file, as opposed to reading it.
     "echo '{}' > ~/.claude/yadgar-hook-exceptions.json",
     "tee ~/.claude/yadgar-hook-exceptions.json",
+    // Copying ONTO it, moving it, deleting it (ledger 1590 keeps these).
+    "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "cp -f /tmp/x /home/x/.claude/yadgar-hook-exceptions.json",
+    "mv ~/.claude/yadgar-hook-exceptions.json /tmp/gone.json",
+    "mv /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "rm ~/.claude/yadgar-hook-exceptions.json",
+    "rm -f /home/x/.claude/yadgar-hook-exceptions.json",
+    "ln -sf /tmp/evil ~/.claude/yadgar-hook-exceptions.json",
+    "dd if=/tmp/x of=/home/x/.claude/yadgar-hook-exceptions.json",
+    // A copy INTO a directory keeps the source's name, so a source named
+    // like the file lands on it.
+    "cp /tmp/yadgar-hook-exceptions.json ~/.claude/",
+    "cp /tmp/yadgar-hook-exceptions.json /home/x/.claude",
+    "cp -t /home/x/.claude /tmp/yadgar-hook-exceptions.json",
+    "cp -vt ~/.claude /tmp/yadgar-hook-exceptions.json",
+    // A source NAMED like the file but not the real one, into a destination
+    // that may be a directory (or a symlink to ~/.claude): refused, because
+    // whether `~/cl` or `backup` is a directory cannot be known from the line.
+    "cp /tmp/yadgar-hook-exceptions.json ~/cl",
+    "cp /tmp/.claude/yadgar-hook-exceptions.json ~/cl",
+    "cp ./yadgar-hook-exceptions.json backup",
+    // The real file as source, but an option that links or removes instead of
+    // copying content.
+    "cp -s ~/.claude/yadgar-hook-exceptions.json ~/cl",
+    "cp -l ~/.claude/yadgar-hook-exceptions.json ~/cl",
+    "cp --remove-destination ~/.claude/yadgar-hook-exceptions.json ~/cl",
+    // Wrappers and indirections that reach a writer (security review of the
+    // 1590 change).
+    "busybox cp /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "toybox cp /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "echo `cp /tmp/x ~/.claude/yadgar-hook-exceptions.json`",
+    r#"echo "$(cp /tmp/x ~/.claude/yadgar-hook-exceptions.json)""#,
+    r#"eval "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json""#,
+    "rsync /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "xargs cp /tmp/x <<< ~/.claude/yadgar-hook-exceptions.json",
+    "find /tmp -name x -exec cp {} ~/.claude/yadgar-hook-exceptions.json ;",
+    // A destination the shell expands: a variable, a glob, ANSI-C quoting or a
+    // brace list in a writer's operand under .claude, or a leaf that starts
+    // like the file, cannot be ruled out, so it refuses.
+    "cp /tmp/x ~/.claude/$F",
+    "cp /tmp/x ~/.claude/yadgar-hook-*.json",
+    "cp /tmp/x ~/.claude/$'yadgar-hook-exceptions.json'",
+    "cp /tmp/x ~/.claude/{yadgar-hook-exceptions.json,}",
+    // KNOWN OVER-REFUSALS, kept on purpose: `install` and `ln` name the file
+    // either way and are not worth parsing, and a search for the file by
+    // name is indistinguishable from a find that acts on it.
+    // Second security review. HOME reassigned earlier on the line makes the
+    // "canonical" source an attacker's file: the cp-from read is only taken on
+    // a line that is that one command.
+    "HOME=/tmp/fake; cp ~/.claude/yadgar-hook-exceptions.json /home/x/.claude/",
+    "export HOME=/tmp/fake && cp $HOME/.claude/yadgar-hook-exceptions.json /home/x/.claude",
+    "HOME=/tmp/fake cp ~/.claude/yadgar-hook-exceptions.json /home/x/.claude/",
+    // A case-insensitive filesystem (macOS, Windows) reaches the file by any
+    // case; Windows also ignores trailing dots and spaces and writes the main
+    // stream through `::$DATA`.
+    "cp /tmp/x ~/.claude/YADGAR-HOOK-EXCEPTIONS.JSON",
+    "rm ~/.claude/Yadgar-Hook-Exceptions.json",
+    "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json.",
+    "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json::$DATA",
+    // Nesting past the bound used to fail open.
+    r#"sh -c "sh -c 'sh -c \"cp /tmp/x ~/.claude/yadgar-hook-exceptions.json\"'""#,
+    r#"echo "$(echo "$(echo "$(cp /tmp/x ~/.claude/yadgar-hook-exceptions.json)")")""#,
+    // Third security review: paths through guard.rs that allowed.
+    // A wrapper the guard does not know, with a writer after it.
+    "timeout 10 cp /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "flock /tmp/lock rm ~/.claude/yadgar-hook-exceptions.json",
+    "watch -n 1 rm ~/.claude/yadgar-hook-exceptions.json",
+    "strace -f mv /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    // `env -S` splits its value into the command it runs.
+    r#"env -S "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json""#,
+    "env --split-string='rm ~/.claude/yadgar-hook-exceptions.json'",
+    // A shell or interpreter fed the command on stdin.
+    "echo 'cp /tmp/x ~/.claude/yadgar-hook-exceptions.json' | bash",
+    "bash <<< 'rm ~/.claude/yadgar-hook-exceptions.json'",
+    r#"echo "open('/home/x/.claude/yadgar-hook-exceptions.json','w')" | python3"#,
+    // Code strings: the path is not a whole word in the argument.
+    r#"python3 -c "open('/home/x/.claude/yadgar-hook-exceptions.json','w').write('{}')""#,
+    r#"awk 'BEGIN{print "x" > "/home/x/.claude/yadgar-hook-exceptions.json"}'"#,
+    r#"perl -e 'open(F, ">", "/home/x/.claude/yadgar-hook-exceptions.json")'"#,
+    // Editors and `sudo -e`.
+    "sudo -e ~/.claude/yadgar-hook-exceptions.json",
+    "sudoedit ~/.claude/yadgar-hook-exceptions.json",
+    "ed ~/.claude/yadgar-hook-exceptions.json",
+    "vim -c wq ~/.claude/yadgar-hook-exceptions.json",
+    // An option whose value is the file it writes.
+    "curl -o ~/.claude/yadgar-hook-exceptions.json https://example.invalid/x",
+    "wget -O ~/.claude/yadgar-hook-exceptions.json https://example.invalid/x",
+    "sort -o ~/.claude/yadgar-hook-exceptions.json /tmp/x",
+    "time -o ~/.claude/yadgar-hook-exceptions.json true",
+    "curl --output=/home/x/.claude/yadgar-hook-exceptions.json https://example.invalid/x",
+    // A redirection with no program, or one the scanner splits: `>|`, `>&`
+    // and `&>` scan as a separator, and a command with no program used to be
+    // skipped as allowed.
+    "> ~/.claude/yadgar-hook-exceptions.json",
+    "exec >~/.claude/yadgar-hook-exceptions.json",
+    "echo x >| ~/.claude/yadgar-hook-exceptions.json",
+    "echo x &> ~/.claude/yadgar-hook-exceptions.json",
+    "echo x >& ~/.claude/yadgar-hook-exceptions.json",
+    "echo x 2>|~/.claude/yadgar-hook-exceptions.json",
+    // DELIBERATE OVER-REFUSAL (#64): a READ of the file through Bash refuses
+    // too. Ledger 1590 asked for these; every allowance tried was bypassable.
+    // Read the file with the Read tool instead.
+    "cat ~/.claude/yadgar-hook-exceptions.json",
+    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/x",
+    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/exceptions-backup.json",
+    "cp -p ~/.claude/yadgar-hook-exceptions.json ./backup.json",
+    "cp $HOME/.claude/yadgar-hook-exceptions.json /tmp/b.json",
+    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/",
+    "dd if=/home/x/.claude/yadgar-hook-exceptions.json of=/tmp/copy.json",
+    "jq . < ~/.claude/yadgar-hook-exceptions.json",
+    // Opus review of #64: a backslash-newline continuation splits the name,
+    // and a glob or brace list can match `.claude` and the file name.
+    "echo x > ~/.claude/yadgar-hook-exc\\\neptions.json",
+    "rm ~/.c*/y*",
+    "cat ~/.c[l]aude/*.json",
+    "rm ~/.claud?/*.json",
+    "rm ~/{.claude,}/*.json",
+    "rm ~/.c{l,}aude/y*.json",
+    "D=~/.claude; rm $D/$a$b",
+    "install -m 600 ~/.claude/yadgar-hook-exceptions.json /tmp/x.json",
+    "ln -s ~/.claude/yadgar-hook-exceptions.json /tmp/link-to-it",
+    "find ~/.claude -name yadgar-hook-exceptions.json",
 ];
 
 #[test]
@@ -183,14 +313,6 @@ fn the_exceptions_file_is_protected_from_edit_not_just_bash() {
             "{tool} was allowed to write the exceptions file"
         );
     }
-}
-
-#[test]
-fn an_unreadable_payload_allows_rather_than_denying() {
-    // Fail OPEN. A guard that denied on a payload it could not parse would
-    // block the session on its own bug.
-    assert_eq!(guard(&Value::Null), Decision::Allow);
-    assert_eq!(guard(&json!({"tool_name": "Bash"})), Decision::Allow);
 }
 
 #[test]
@@ -314,4 +436,78 @@ fn a_refusal_names_the_rule_the_call_actually_broke() {
             .count();
         assert_eq!(carriers, 1, "{needle:?} no longer names one rule only");
     }
+}
+
+#[test]
+fn a_payload_of_the_wrong_shape_is_refused_and_never_judged_as_empty() {
+    // Ledger 1589 (b): JSON that is not a tool call used to read as tool ""
+    // with command "", which allows. A call the guard cannot read is a call
+    // it cannot judge, so it refuses, as an unparseable one does.
+    for payload in [
+        json!([]),
+        json!("Bash"),
+        json!({}),
+        json!({"tool_name": 5}),
+        json!({"tool_name": "Bash"}),
+        json!({"tool_name": "Bash", "tool_input": {"command": 7}}),
+        json!({"tool_name": "Bash", "tool_input": "terraform apply"}),
+    ] {
+        let Decision::Deny(reason) = guard(&payload) else {
+            panic!("allowed a payload it could not read: {payload}");
+        };
+        assert!(reason.contains("payload"), "{reason}");
+    }
+    // A well-formed call of a tool the guard does not judge still allows.
+    let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/tmp/x"}});
+    assert_eq!(guard(&read), Decision::Allow);
+}
+
+#[test]
+fn an_edit_with_no_readable_path_is_refused_and_not_judged_as_no_path() {
+    // Second security review: a missing, non-string or non-object path read
+    // as "" and allowed. An edit the guard cannot place is one it cannot judge.
+    for payload in [
+        json!({"tool_name": "Edit"}),
+        json!({"tool_name": "Write", "tool_input": "x"}),
+        json!({"tool_name": "Edit", "tool_input": {"file_path": 7}}),
+        json!({"tool_name": "NotebookEdit", "tool_input": {"path": "/tmp/x"}}),
+    ] {
+        assert!(
+            matches!(guard(&payload), Decision::Deny(_)),
+            "allowed an edit it could not place: {payload}"
+        );
+    }
+    let fine = json!({"tool_name": "Write", "tool_input": {"file_path": "/tmp/x", "content": ""}});
+    assert_eq!(guard(&fine), Decision::Allow);
+}
+
+#[test]
+fn a_bash_command_too_long_to_check_quickly_is_refused() {
+    // A hook that times out is no decision at all, so the call would run.
+    let long = format!("echo {}", "$(".repeat(300_000));
+    let started = std::time::Instant::now();
+    assert!(denies(&long));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // Under the cap, deeply nested substitutions are scanned in linear time.
+    let nested = format!("echo {}", "$(".repeat(30_000));
+    let started = std::time::Instant::now();
+    let _ = guard(&bash_call(&nested));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn an_edit_with_no_path_is_refused_without_naming_bash_fields() {
+    // The reason is read by the model: an Edit refused for a missing path
+    // must not talk about a Bash `command`.
+    let Decision::Deny(reason) = guard(&json!({"tool_name": "Edit", "tool_input": {}})) else {
+        panic!("allowed an edit with no path");
+    };
+    assert!(reason.contains("file_path"), "{reason}");
+    assert!(!reason.contains("command"), "{reason}");
+}
+
+#[test]
+fn the_exceptions_refusal_says_to_use_the_read_tool() {
+    let reason = reason_for(&bash_call("cat ~/.claude/yadgar-hook-exceptions.json"));
+    assert!(reason.contains("Read tool"), "{reason}");
 }

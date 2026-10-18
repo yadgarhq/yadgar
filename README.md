@@ -35,15 +35,16 @@ lose its tasks with nothing to report.
 
 ## Commands
 
-| Command                 | What it does                                                                                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `yaadgaar login`        | Asks for the gateway address and your credentials once and stores both together. It registers nothing — `install` owns every file the agent client reads.           |
-| `yaadgaar enrol`        | Redeems an admin's enrolment token: sets your password, prints your username, and stores the gateway address and credential. Replaces `login` on the first machine. |
-| `yaadgaar serve`        | The stdio MCP server the agent spawns. Not run by hand.                                                                                                             |
-| `yaadgaar install`      | Registers the hooks, the rules reference and the MCP entry, in the agent client's **user-level** config — once per machine, never per repository.                   |
-| `yaadgaar uninstall`    | Removes what `install` added, and nothing else.                                                                                                                     |
-| `yaadgaar verify`       | Reports drift in the installed environment. Scheduled, not remembered — the daemon cannot see `~/.claude/settings.json`, so nothing server-side can ever notice.    |
-| `yaadgaar hook <event>` | What `settings.json` invokes. A hook is a dispatch, not a program.                                                                                                  |
+| Command                          | What it does                                                                                                                                                                                                                                                                                                                                    |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `yaadgaar login`                 | Asks for the gateway address and your credentials once and stores both together. It registers nothing — `install` owns every file the agent client reads.                                                                                                                                                                                       |
+| `yaadgaar enrol`                 | Redeems an admin's enrolment token: sets your password, prints your username, and stores the gateway address and credential. Replaces `login` on the first machine.                                                                                                                                                                             |
+| `yaadgaar serve`                 | The stdio MCP server the agent spawns. Not run by hand.                                                                                                                                                                                                                                                                                         |
+| `yaadgaar install`               | Registers the hooks, the rules reference and the MCP entry, in the agent client's **user-level** config — once per machine, never per repository.                                                                                                                                                                                               |
+| `yaadgaar uninstall`             | Removes what `install` added, and nothing else.                                                                                                                                                                                                                                                                                                 |
+| `yaadgaar verify`                | Reports drift in the installed environment. Scheduled, not remembered — the daemon cannot see `~/.claude/settings.json`, so nothing server-side can ever notice.                                                                                                                                                                                |
+| `yaadgaar hook <event>`          | What `settings.json` invokes. A hook is a dispatch, not a program.                                                                                                                                                                                                                                                                              |
+| `yaadgaar admin issue-enrolment` | Issues an enrolment token for an existing user (`--user-id`): a first enrolment or a password reset, sent with your own administrator credential. Writes the token only where you name, with `--out <new file>` (0600) or `--stdout`. `--revoke-existing` revokes the user's existing credentials on redemption (a reset after a lost machine). |
 
 `enrol` (first machine) or `login` (any other), then `install`, is the whole
 setup, and `verify` is the one to schedule. The project key is read once, from
@@ -72,6 +73,10 @@ A fully unattended login:
 printf '%s\n' "$PASSWORD" | yaadgaar login --gateway https://gateway.yadgar.internal:18443 \
   --username someone --password-stdin
 ```
+
+Add `--ca-file /path/to/ca.pem` when the deployment uses a private CA and this
+machine never enrolled. The CA is trusted in addition to the system roots and
+stored with the credential.
 
 A fully unattended enrolment:
 
@@ -107,6 +112,32 @@ input from a file or a pipe.
 Nothing about the interactive path changes when none of these flags are
 given.
 
+### Resetting a password
+
+An administrator issues a new enrolment token; the person redeems it and
+chooses the new password. The administrator never learns it.
+
+1. Find the user's id. A new user gets one from the gateway's
+   `/admin/create-user`; the gateway has no lookup by username.
+2. Issue the token with your own administrator credential:
+
+   ```bash
+   yaadgaar admin issue-enrolment --user-id "$USER_ID" --out reset.token --revoke-existing
+   ```
+
+   `--out` writes a new 0600 file and refuses an existing one. Leave out
+   `--revoke-existing` to keep the user's other machines logged in.
+
+3. Hand `reset.token` over out of band. The person runs:
+
+   ```bash
+   yaadgaar enrol --token-file reset.token
+   ```
+
+**Revocation happens at redemption, not at issue.** The user's old
+credentials keep working until the person runs `enrol` with the token. The
+token is single-use and expires in 24 hours.
+
 ## Installing
 
 ```bash
@@ -134,10 +165,10 @@ newer release, `pipx install --force yaadgaar==<version>`.
    printf '%s\n' "$NEW_PASSWORD" | yaadgaar enrol --token-file /path/to/token --password-stdin
    ```
 
-   On any further machine, `yaadgaar login` with that username and password —
-   but only against a gateway whose certificate is publicly trusted. `login`
-   has no way to receive a private CA, so for a deployment with one, ask the
-   admin for a new enrolment token for that machine instead.
+   On any further machine, `yaadgaar login` with that username and password.
+   For a deployment with a private CA, pass the CA's PEM file with
+   `--ca-file /path/to/ca.pem`; `login` stores it with the credential, as
+   `enrol` stores the CA its token carries.
 
 2. **Install**, once per machine. This registers yadgar with Claude Code at
    user level: one hook in `~/.claude/settings.json` (the `PreToolUse` guard,

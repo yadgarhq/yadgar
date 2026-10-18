@@ -10,8 +10,7 @@
 //! `grep -r 'terraform ' docs/`, which runs grep. It refused a `Write` of
 //! `MIGRATION_NOTES.md` containing the words `digger apply` — which is precisely
 //! what the standing rule instructs a person to do instead of posting one, so
-//! the guard forbade its own remedy. It refused
-//! `cat ~/.claude/yadgar-hook-exceptions.json`, a read. And it allowed
+//! the guard forbade its own remedy. And it allowed
 //! `git commit -n -m x`, `git -c core.hooksPath=/dev/null commit`,
 //! `cd infra && terraform`, a bare `terraform` at the end of a line,
 //! `docker exec tf-local-plan tofu`, and
@@ -37,18 +36,25 @@
 //!   the working directory at hook time.
 //! * `make apply`, `just plan`, a shell alias, `eval "$CMD"`. All reach the same
 //!   binaries through a name this cannot resolve.
-//! * Bash-level mutation of the exceptions file is a NAMED set of writing
-//!   commands plus redirection targets, not a proof. `Edit`, `Write` and
-//!   `NotebookEdit` on that path are exact, and they are where the incident was.
 //!
-//! Everything in that list fails OPEN, which is the right direction: this runs
-//! on the critical path of somebody's session, and a guard that refuses what it
-//! cannot understand is a guard that gets switched off.
+//! Everything in that list fails OPEN for the terraform, commit and digger
+//! rules: this runs on the critical path of somebody's session, and a guard
+//! that refuses what it cannot understand is a guard that gets switched off.
+//!
+//! **The exceptions file is the exception** (#64): any Bash command that names
+//! it refuses, read or write, because every attempt to let a read through was
+//! bypassed. `Edit`, `Write` and `NotebookEdit` on that path are exact. What a
+//! text check cannot see is listed in `guard/tamper.rs`.
 
 use serde_json::Value;
 
-use super::{Decision, Policy, EXCEPTIONS_FILE};
+use super::{Decision, Policy};
 use crate::install::shellword::{shell_commands, SimpleCommand};
+
+mod runs;
+mod tamper;
+use runs::{executed, substitutions, value_of, SHELLS};
+use tamper::{is_the_exceptions_file, names_the_exceptions_file};
 
 /// Refuse a tool call that the standing rules forbid.
 ///
@@ -57,11 +63,16 @@ use crate::install::shellword::{shell_commands, SimpleCommand};
 /// allowlist, pushed to master, then reverted the file to conceal it — and a
 /// Bash-only matcher never even routed the call to the guard.
 pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
-    let tool = payload
-        .get("tool_name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    // A PAYLOAD OF THE WRONG SHAPE REFUSES (ledger 1589). It used to read as
+    // tool "" with command "", which allows: JSON that is not a tool call is a
+    // call the guard cannot judge, exactly like JSON that does not parse.
+    let Some(tool) = payload.get("tool_name").and_then(Value::as_str) else {
+        return Decision::Deny(UNREADABLE.into());
+    };
     let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+    if tool == "Bash" && !input.get("command").is_some_and(Value::is_string) {
+        return Decision::Deny(UNREADABLE.into());
+    }
     let field = |key: &str| {
         input
             .get(key)
@@ -71,6 +82,9 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
     };
 
     match tool {
+        // TOO LONG TO CHECK QUICKLY refuses: a hook that times out is no
+        // decision at all, so the call would run unchecked.
+        "Bash" if field("command").len() > MAX_COMMAND_BYTES => Decision::Deny(TOO_LONG.into()),
         "Bash" => bash(&field("command"), 0, policy),
 
         // ONLY THE PATH. An edit executes nothing, so its CONTENT is text a
@@ -78,6 +92,14 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
         // what made the guard refuse writing a digger command into
         // MIGRATION_NOTES.md — the exact action the rule it enforces asks for.
         "Edit" | "Write" | "NotebookEdit" => {
+            // AN EDIT THE GUARD CANNOT PLACE REFUSES: no string `file_path` or
+            // `notebook_path` used to read as "" and allow.
+            let placed = ["file_path", "notebook_path"]
+                .iter()
+                .any(|k| input.get(*k).is_some_and(Value::is_string));
+            if !placed {
+                return Decision::Deny(UNPLACED.into());
+            }
             let path = [field("file_path"), field("notebook_path")].join("\n");
             if policy.hook_config_tamper && is_the_exceptions_file(&path) {
                 return Decision::Deny(EXCEPTIONS.into());
@@ -89,15 +111,52 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
     }
 }
 
+/// The value of `env -S` / `env --split-string`, when *words* carry one.
+fn env_split_string(words: &[String]) -> Option<&str> {
+    let at = words.iter().position(|w| w == "env")?;
+    let mut rest = words[at + 1..].iter();
+    while let Some(word) = rest.next() {
+        if word == "-S" || word == "--split-string" {
+            return rest.next().map(String::as_str);
+        }
+        if let Some(value) = word.strip_prefix("--split-string=") {
+            return Some(value);
+        }
+        if let Some(value) = word.strip_prefix("-S").filter(|v| !v.is_empty()) {
+            return Some(value);
+        }
+        if !word.starts_with('-') {
+            return None;
+        }
+    }
+    None
+}
+
 /// How many nested `-c` scripts to follow.
 ///
 /// Bounded rather than trusted: a payload can nest `sh -c` inside `sh -c` as
 /// deeply as it likes, and a guard that recurses on it hangs the session it
-/// exists to protect. Two is every real case seen; deeper fails open.
+/// exists to protect. Two is every real case seen; deeper fails open for the
+/// terraform and commit rules. The exceptions-file rule needs no recursion: it
+/// refuses on the whole line's text.
 const MAX_NESTING: usize = 2; // ADR-0569-EXCEPTION(CB): bound on recursive -c unwrapping, not a per-install knob.
 
 fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
+    // A BACKSLASH-NEWLINE IS A LINE CONTINUATION: the shell deletes the pair
+    // before it reads words, so `exc\<newline>eptions` is one word. Removed
+    // here, before any check reads the line.
+    let joined = line.replace("\\\n", "");
+    let line = joined.as_str();
     let commands = shell_commands(line);
+    let inner = substitutions(line);
+
+    // THE EXCEPTIONS FILE: ANY MENTION REFUSES, READ OR WRITE. A text
+    // denylist cannot safely let through a command that names the file:
+    // every allowance (a `cp` from it, a read with `cat`) was a parsing
+    // question the shell could answer differently. See `tamper.rs`.
+    if policy.hook_config_tamper && names_the_exceptions_file(line, &commands) {
+        return Decision::Deny(EXCEPTIONS.into());
+    }
 
     // Asked over the WHOLE line, because this is the one rule where mentioning
     // is the act. It is still gated on something in the line doing the posting.
@@ -107,7 +166,28 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
         return Decision::Deny(DIGGER.into());
     }
 
+    // A command substitution runs a command. The scanner reads an unquoted
+    // `$(...)` as though typed in place, but not a quoted one or a backtick
+    // pair, so each is judged here as its own line (security review of the
+    // 1590 change): `echo "$(cp x ~/.claude/<file>)"` writes the file.
+    if depth < MAX_NESTING {
+        for inner in &inner {
+            if let Decision::Deny(reason) = bash(inner, depth + 1, policy) {
+                return Decision::Deny(reason);
+            }
+        }
+    }
+
     for command in &commands {
+        // BEFORE resolving the program: `env -S '<command>'` resolves to no
+        // program at all, and used to be skipped as allowed.
+        if depth < MAX_NESTING {
+            if let Some(split) = env_split_string(&command.words) {
+                if let Decision::Deny(reason) = bash(split, depth + 1, policy) {
+                    return Decision::Deny(reason);
+                }
+            }
+        }
         let Some((program, args)) = executed(command) else {
             continue;
         };
@@ -117,10 +197,12 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
         if policy.git_commit_flags && skips_hooks(program, args) {
             return Decision::Deny(HOOK_BYPASS.into());
         }
-        if policy.hook_config_tamper
-            && writes_the_exceptions_file(program, args, &command.writes_to)
-        {
-            return Decision::Deny(EXCEPTIONS.into());
+        // `eval` runs its arguments as a line, exactly as `sh -c` runs its
+        // script.
+        if program == "eval" && depth < MAX_NESTING {
+            if let Decision::Deny(reason) = bash(&args.join(" "), depth + 1, policy) {
+                return Decision::Deny(reason);
+            }
         }
         // A `-c` script is part of the command, so it is read. The rule is about
         // what runs, and `sh -c 'terraform apply'` runs terraform.
@@ -134,84 +216,6 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
     }
     Decision::Allow
 }
-
-// ── What actually runs ───────────────────────────────────────────────────────
-
-/// The program a simple command runs, and the arguments it gets.
-///
-/// `sudo`, `env` and friends are stripped because they do not change what runs
-/// — `sudo terraform apply` is terraform — and a leading `FOO=1` is an
-/// assignment rather than a program.
-fn executed(command: &SimpleCommand) -> Option<(&str, &[String])> {
-    let mut rest = command.words.as_slice();
-    loop {
-        // Environment assignments precede the program: `TF_LOG=trace terraform`.
-        while rest
-            .first()
-            .is_some_and(|w| w.contains('=') && !w.starts_with('-'))
-        {
-            rest = &rest[1..];
-        }
-        let wrapper = program_name(rest.first()?);
-        if !TRANSPARENT.contains(&wrapper) {
-            return Some((wrapper, &rest[1..]));
-        }
-        rest = &rest[1..];
-        // The wrapper's own options. A value-taking one consumes the word after
-        // it, and skipping that word is the difference between reading
-        // `sudo -u ops terraform` as terraform and reading it as `ops`.
-        while let Some(flag) = rest.first().filter(|w| w.starts_with('-')).cloned() {
-            rest = &rest[1..];
-            if takes_a_value(wrapper, &flag) && !flag.contains('=') {
-                rest = rest.get(1..).unwrap_or(&[]);
-            }
-        }
-    }
-}
-
-/// Does this wrapper's option consume the word after it?
-///
-/// Per wrapper, because the same letter means different things: `env -i`
-/// ignores the environment and takes nothing, while `env -u` names a variable
-/// to unset. Getting that backwards eats the program name and the guard sees
-/// something harmless where terraform was about to run.
-fn takes_a_value(wrapper: &str, flag: &str) -> bool {
-    match wrapper {
-        "sudo" | "doas" => matches!(flag, "-u" | "-g" | "-p" | "-C" | "-h" | "-r" | "-t" | "-U"),
-        "env" => matches!(flag, "-u" | "-S" | "-C"),
-        "nice" | "ionice" => matches!(flag, "-n" | "-c" | "-p"),
-        "stdbuf" => matches!(flag, "-i" | "-o" | "-e"),
-        "time" => matches!(flag, "-f" | "-o"),
-        _ => false,
-    }
-}
-
-/// The name a shell would resolve, without its directory or its extension.
-///
-/// BOTH SEPARATORS, because this client ships to Windows and
-/// `C:\tools\terraform.exe` spells its path the other way.
-fn program_name(word: &str) -> &str {
-    let base = word.rsplit(['/', '\\']).next().unwrap_or(word);
-    base.strip_suffix(".exe").unwrap_or(base)
-}
-
-/// The value of an option given either as `-c script` or as `-cscript`.
-fn value_of<'a>(args: &'a [String], option: &str) -> Option<&'a str> {
-    args.iter().enumerate().find_map(|(i, arg)| {
-        if arg == option {
-            args.get(i + 1).map(String::as_str)
-        } else {
-            arg.strip_prefix(option).filter(|v| !v.is_empty())
-        }
-    })
-}
-
-/// Wrappers that run something else without changing what it is.
-const TRANSPARENT: &[&str] = &[
-    "sudo", "doas", "env", "nohup", "time", "command", "nice", "ionice", "stdbuf", "setsid", "exec",
-];
-
-const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
 
 // ── terraform, by any route ──────────────────────────────────────────────────
 
@@ -379,35 +383,23 @@ fn mentions_a_digger_command(text: &str) -> bool {
         .any(|pair| pair[0] == "digger" && DIGGER_VERBS.contains(&pair[1].as_str()))
 }
 
-// ── the exceptions file ──────────────────────────────────────────────────────
-
-/// Commands that write a file named on their command line.
-///
-/// A NAMED SET, and therefore an incomplete one — said plainly rather than
-/// implied. Bash can reach a file by a hundred routes and this covers the ones
-/// an agent actually uses; `Edit`, `Write` and `NotebookEdit` are exact, and
-/// that is where the incident happened.
-const WRITERS: &[&str] = &[
-    "tee", "sed", "cp", "mv", "rm", "dd", "truncate", "install", "ln", "chmod", "chown", "shred",
-    "patch", "sponge", "python", "python3", "perl", "ruby", "node", "jq",
-    // Not writers of bytes, but of a FIFO or device node in the file's place:
-    // a reader that blocked on one would hang until the hook timed out.
-    "mkfifo", "mknod",
-];
-
-fn writes_the_exceptions_file(program: &str, args: &[String], writes_to: &[String]) -> bool {
-    if writes_to.iter().any(|f| is_the_exceptions_file(f)) {
-        return true;
-    }
-    WRITERS.contains(&program) && args.iter().any(|a| is_the_exceptions_file(a))
-}
-
-fn is_the_exceptions_file(word: &str) -> bool {
-    word.split(['/', '\\', '\n'])
-        .any(|part| part == EXCEPTIONS_FILE)
-}
-
 // ── the reasons, which a person reads ────────────────────────────────────────
+
+/// The longest Bash command judged, in bytes. A BOUND, not a knob: a real
+/// command is a few hundred bytes, and one this long is refused rather than
+/// risk the hook timing out.
+const MAX_COMMAND_BYTES: usize = 64 * 1024; // ADR-0569-EXCEPTION(CB): bound on parsing untrusted input, not a per-install knob.
+
+const TOO_LONG: &str = "refused: this Bash command is too long for the guard to check \
+     in time, so it was not checked. Split it, or put it in a script file.";
+
+const UNREADABLE: &str = "refused: the hook payload is not a tool call this guard can read \
+     (no string `tool_name`, or a Bash call with no string `command`), so this \
+     tool call was not checked. Retry it; if this repeats, run `yaadgaar verify`.";
+
+const UNPLACED: &str = "refused: this edit carries no string `file_path` or `notebook_path`, \
+     so the guard cannot tell which file it changes, and it was not checked. \
+     Retry it; if this repeats, run `yaadgaar verify`.";
 
 const HOOK_BYPASS: &str = "A commit that skips hooks is a commit whose checks did not run. \
      Hook failure is signal, not an obstacle — fix the cause and re-run.";
@@ -422,8 +414,8 @@ const DIGGER: &str = "A digger comment runs terraform against remote state throu
 
 const EXCEPTIONS: &str = "The hook exceptions file is a durable, human-only decision. An agent \
      once edited it to allow its own push, then reverted the file to conceal \
-     that — which is why this refuses the write rather than trusting the \
-     intent behind it.";
+     that. So the guard refuses any Bash command naming the file, a read \
+     included, and any edit of it. To read it, use the Read tool.";
 
 #[cfg(test)]
 mod tests;

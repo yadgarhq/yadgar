@@ -367,6 +367,8 @@ fn a_non_canonical_user_id_is_refused() {
         "018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f",
         "yadgar:user:018F3A52-7C1E-7B2A-9D4E-5A6B7C8D9E0F",
         "yadgar:user:018f3a52-7c1e-4b2a-9d4e-5a6b7c8d9e0f",
+        "yadgar:user:018f3a52-7c1e-7b2a-cd4e-5a6b7c8d9e0f",
+        "yadgar:user:018f3a52-7c1e-7b2a-0d4e-5a6b7c8d9e0f",
         "yadgar:user:018f3a527c1e7b2a9d4e5a6b7c8d9e0f",
         "yadgar:user:{018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f}",
         "yadgar:user:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f/x",
@@ -461,7 +463,7 @@ async fn forbidden_not_found_and_bad_request_are_distinct_and_actionable() {
         "403 must mention that self-revocation is refused"
     );
 
-    let (missing, _, _, _) = revoke_against("404 Not Found", r#"{"error":"no user"}"#).await;
+    let (missing, _, _, _) = revoke_against("404 Not Found", r#"{"error":"no such user"}"#).await;
     let missing = missing.unwrap_err();
     assert!(
         matches!(missing, AdminError::NoSuchUser(_)),
@@ -470,6 +472,18 @@ async fn forbidden_not_found_and_bad_request_are_distinct_and_actionable() {
     assert!(
         missing.to_string().contains("no such user"),
         "404 must say the user does not exist"
+    );
+
+    // Any other 404 is a gateway without the route, not a missing user.
+    let (absent, _, _, _) = revoke_against("404 Not Found", r#"{"error":"not found"}"#).await;
+    let absent = absent.unwrap_err();
+    assert!(
+        matches!(absent, AdminError::RouteNotServed),
+        "a generic 404 must not claim the user is missing"
+    );
+    assert!(
+        absent.to_string().contains("older than"),
+        "a generic 404 must point at an older gateway"
     );
 
     let (bad, _, _, _) = revoke_against("400 Bad Request", r#"{"error":"bad body"}"#).await;
@@ -501,6 +515,7 @@ async fn no_secret_reaches_the_output_or_an_error() {
     }
     for text in seen {
         assert!(!text.contains(BEARER), "the bearer leaked");
+        assert!(!text.contains(ID), "the user id was printed");
     }
 }
 

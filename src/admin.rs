@@ -120,6 +120,9 @@ pub enum AdminError {
     /// 400 from `/admin/revoke-credentials`.
     #[error("the gateway rejected the request as malformed: {0}")]
     BadRequest(String),
+    /// 404 with any body but the gateway's "no such user": the route is absent.
+    #[error("this gateway does not serve /admin/revoke-credentials (gateway older than #120?)")]
+    RouteNotServed,
     #[error("the gateway's answer was not a revocation receipt: {0}")]
     MalformedRevocation(String),
     /// The gateway answered about a different user than the one named. Someone
@@ -303,7 +306,11 @@ fn canonical_user_id(raw: &str) -> Result<String, AdminError> {
         .and_then(|rest| uuid::Uuid::parse_str(rest).ok().map(|u| (rest, u)))
         // `parse_str` also takes uppercase, braced, simple and URN forms; only
         // the lowercase hyphenated text round-trips to itself.
-        .is_some_and(|(rest, u)| u.get_version_num() == 7 && u.hyphenated().to_string() == rest);
+        .is_some_and(|(rest, u)| {
+            u.get_version_num() == 7
+                && u.get_variant() == uuid::Variant::RFC4122
+                && u.hyphenated().to_string() == rest
+        });
     if canonical {
         Ok(id)
     } else {
@@ -341,7 +348,16 @@ async fn revoke_request(
         }
         reqwest::StatusCode::UNAUTHORIZED => Err(AdminError::Refused),
         reqwest::StatusCode::FORBIDDEN => Err(AdminError::RevokeForbidden(gateway_error(&body))),
-        reqwest::StatusCode::NOT_FOUND => Err(AdminError::NoSuchUser(gateway_error(&body))),
+        reqwest::StatusCode::NOT_FOUND => {
+            // ONLY THE GATEWAY'S OWN WORDS mean a missing user: a gateway
+            // without the route also answers 404, with some other body.
+            let text = gateway_error(&body);
+            if text == "no such user" {
+                Err(AdminError::NoSuchUser(text))
+            } else {
+                Err(AdminError::RouteNotServed)
+            }
+        }
         reqwest::StatusCode::BAD_REQUEST => Err(AdminError::BadRequest(gateway_error(&body))),
         _ => Err(AdminError::Rejected(status, gateway_error(&body))),
     }

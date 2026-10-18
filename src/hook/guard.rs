@@ -53,10 +53,7 @@ use crate::install::shellword::{shell_commands, SimpleCommand};
 mod runs;
 mod tamper;
 use runs::{executed, substitutions, value_of, SHELLS};
-use tamper::{
-    is_the_exceptions_file, line_names_the_file, may_be_the_exceptions_file,
-    redirected_into_the_file, tampers, INDIRECT,
-};
+use tamper::{is_the_exceptions_file, names_the_exceptions_file};
 
 /// Refuse a tool call that the standing rules forbid.
 ///
@@ -138,32 +135,22 @@ fn env_split_string(words: &[String]) -> Option<&str> {
 ///
 /// Bounded rather than trusted: a payload can nest `sh -c` inside `sh -c` as
 /// deeply as it likes, and a guard that recurses on it hangs the session it
-/// exists to protect. Two is every real case seen; deeper refuses when the line names the exceptions file.
+/// exists to protect. Two is every real case seen; deeper fails open for the
+/// terraform and commit rules. The exceptions-file rule needs no recursion: it
+/// refuses on the whole line's text.
 const MAX_NESTING: usize = 2; // ADR-0569-EXCEPTION(CB): bound on recursive -c unwrapping, not a per-install knob.
 
 fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
     let commands = shell_commands(line);
     let inner = substitutions(line);
 
-    // PAST THE NESTING BOUND, a line that still nests and names the file
-    // refuses: what it would run is not read, and it used to allow.
-    if depth >= MAX_NESTING
-        && policy.hook_config_tamper
-        && line_names_the_file(line)
-        && (!inner.is_empty() || line.contains("-c") || line.contains("eval"))
-    {
+    // THE EXCEPTIONS FILE: ANY MENTION REFUSES, READ OR WRITE. A text
+    // denylist cannot safely let through a command that names the file:
+    // every allowance (a `cp` from it, a read with `cat`) was a parsing
+    // question the shell could answer differently. See `tamper.rs`.
+    if policy.hook_config_tamper && names_the_exceptions_file(line, &commands) {
         return Decision::Deny(EXCEPTIONS.into());
     }
-
-    // A REDIRECTION INTO THE FILE, read off the line itself: the scanner
-    // splits `>|`, `>&` and `&>` at the `|` or `&` and loses the target.
-    if policy.hook_config_tamper && redirected_into_the_file(line) {
-        return Decision::Deny(EXCEPTIONS.into());
-    }
-
-    // THE cp-FROM READ IS TAKEN ONLY ON A LINE THAT IS THAT ONE COMMAND: an
-    // earlier `HOME=...` would make `~/.claude/<file>` someone else's file.
-    let lone = commands.len() == 1 && inner.is_empty();
 
     // Asked over the WHOLE line, because this is the one rule where mentioning
     // is the act. It is still gated on something in the line doing the posting.
@@ -195,16 +182,6 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
                 }
             }
         }
-        // A redirection needs no program: `> <file>` and `exec > <file>`
-        // truncate the file, and a command with no program used to be skipped.
-        if policy.hook_config_tamper
-            && command
-                .writes_to
-                .iter()
-                .any(|f| may_be_the_exceptions_file(f))
-        {
-            return Decision::Deny(EXCEPTIONS.into());
-        }
         let Some((program, args)) = executed(command) else {
             continue;
         };
@@ -213,23 +190,6 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
         }
         if policy.git_commit_flags && skips_hooks(program, args) {
             return Decision::Deny(HOOK_BYPASS.into());
-        }
-        if policy.hook_config_tamper
-            && tampers(
-                &command.words,
-                program,
-                args,
-                &command.writes_to,
-                line,
-                lone && !command.words.first().is_some_and(|w| w.contains('=')),
-            )
-        {
-            return Decision::Deny(EXCEPTIONS.into());
-        }
-        // `xargs` and `find -exec` run another command on arguments this line
-        // does not show in full, so naming the file anywhere refuses.
-        if policy.hook_config_tamper && INDIRECT.contains(&program) && line_names_the_file(line) {
-            return Decision::Deny(EXCEPTIONS.into());
         }
         // `eval` runs its arguments as a line, exactly as `sh -c` runs its
         // script.

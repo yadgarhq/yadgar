@@ -32,20 +32,6 @@ fn reason_for(call: &Value) -> String {
 /// matcher this replaces refused all three, and one of them is the remedy
 /// the standing rule itself prescribes.
 const MUST_BE_ALLOWED: &[&str] = &[
-    // A read of the exceptions file. Reading a human's decisions is how an
-    // agent honours them.
-    "cat ~/.claude/yadgar-hook-exceptions.json",
-    // Copying it ELSEWHERE reads it (ledger 1590): the file is the source,
-    // and the destination is a different file.
-    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/exceptions-backup.json",
-    "cp -p ~/.claude/yadgar-hook-exceptions.json ./backup.json",
-    "cp $HOME/.claude/yadgar-hook-exceptions.json /tmp/b.json",
-    // Into a directory: it writes a file of the same name there, but with the
-    // REAL file as the source the content is the file's own, and a directory
-    // that is (or links to) ~/.claude makes cp refuse "the same file".
-    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/",
-    "cp -t /tmp ~/.claude/yadgar-hook-exceptions.json",
-    "dd if=/home/x/.claude/yadgar-hook-exceptions.json of=/tmp/copy.json",
     // Globs and searches nowhere near the file.
     "rm -f target/*.tmp",
     "find . -name '*.rs'",
@@ -206,6 +192,19 @@ const MUST_BE_DENIED: &[&str] = &[
     "echo x &> ~/.claude/yadgar-hook-exceptions.json",
     "echo x >& ~/.claude/yadgar-hook-exceptions.json",
     "echo x 2>|~/.claude/yadgar-hook-exceptions.json",
+    // DELIBERATE OVER-REFUSAL (#64): a READ of the file through Bash refuses
+    // too. Ledger 1590 asked for these; every allowance tried was bypassable.
+    // Read the file with the Read tool instead.
+    "cat ~/.claude/yadgar-hook-exceptions.json",
+    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/x",
+    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/exceptions-backup.json",
+    "cp -p ~/.claude/yadgar-hook-exceptions.json ./backup.json",
+    "cp $HOME/.claude/yadgar-hook-exceptions.json /tmp/b.json",
+    "cp ~/.claude/yadgar-hook-exceptions.json /tmp/",
+    "dd if=/home/x/.claude/yadgar-hook-exceptions.json of=/tmp/copy.json",
+    "jq . < ~/.claude/yadgar-hook-exceptions.json",
+    // A glob or variable that may expand to the file from another directory.
+    "rm *-hook-exceptions.json",
     "install -m 600 ~/.claude/yadgar-hook-exceptions.json /tmp/x.json",
     "ln -s ~/.claude/yadgar-hook-exceptions.json /tmp/link-to-it",
     "find ~/.claude -name yadgar-hook-exceptions.json",

@@ -169,6 +169,43 @@ const MUST_BE_DENIED: &[&str] = &[
     // Nesting past the bound used to fail open.
     r#"sh -c "sh -c 'sh -c \"cp /tmp/x ~/.claude/yadgar-hook-exceptions.json\"'""#,
     r#"echo "$(echo "$(echo "$(cp /tmp/x ~/.claude/yadgar-hook-exceptions.json)")")""#,
+    // Third security review: paths through guard.rs that allowed.
+    // A wrapper the guard does not know, with a writer after it.
+    "timeout 10 cp /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    "flock /tmp/lock rm ~/.claude/yadgar-hook-exceptions.json",
+    "watch -n 1 rm ~/.claude/yadgar-hook-exceptions.json",
+    "strace -f mv /tmp/x ~/.claude/yadgar-hook-exceptions.json",
+    // `env -S` splits its value into the command it runs.
+    r#"env -S "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json""#,
+    "env --split-string='rm ~/.claude/yadgar-hook-exceptions.json'",
+    // A shell or interpreter fed the command on stdin.
+    "echo 'cp /tmp/x ~/.claude/yadgar-hook-exceptions.json' | bash",
+    "bash <<< 'rm ~/.claude/yadgar-hook-exceptions.json'",
+    r#"echo "open('/home/x/.claude/yadgar-hook-exceptions.json','w')" | python3"#,
+    // Code strings: the path is not a whole word in the argument.
+    r#"python3 -c "open('/home/x/.claude/yadgar-hook-exceptions.json','w').write('{}')""#,
+    r#"awk 'BEGIN{print "x" > "/home/x/.claude/yadgar-hook-exceptions.json"}'"#,
+    r#"perl -e 'open(F, ">", "/home/x/.claude/yadgar-hook-exceptions.json")'"#,
+    // Editors and `sudo -e`.
+    "sudo -e ~/.claude/yadgar-hook-exceptions.json",
+    "sudoedit ~/.claude/yadgar-hook-exceptions.json",
+    "ed ~/.claude/yadgar-hook-exceptions.json",
+    "vim -c wq ~/.claude/yadgar-hook-exceptions.json",
+    // An option whose value is the file it writes.
+    "curl -o ~/.claude/yadgar-hook-exceptions.json https://example.invalid/x",
+    "wget -O ~/.claude/yadgar-hook-exceptions.json https://example.invalid/x",
+    "sort -o ~/.claude/yadgar-hook-exceptions.json /tmp/x",
+    "time -o ~/.claude/yadgar-hook-exceptions.json true",
+    "curl --output=/home/x/.claude/yadgar-hook-exceptions.json https://example.invalid/x",
+    // A redirection with no program, or one the scanner splits: `>|`, `>&`
+    // and `&>` scan as a separator, and a command with no program used to be
+    // skipped as allowed.
+    "> ~/.claude/yadgar-hook-exceptions.json",
+    "exec >~/.claude/yadgar-hook-exceptions.json",
+    "echo x >| ~/.claude/yadgar-hook-exceptions.json",
+    "echo x &> ~/.claude/yadgar-hook-exceptions.json",
+    "echo x >& ~/.claude/yadgar-hook-exceptions.json",
+    "echo x 2>|~/.claude/yadgar-hook-exceptions.json",
     "install -m 600 ~/.claude/yadgar-hook-exceptions.json /tmp/x.json",
     "ln -s ~/.claude/yadgar-hook-exceptions.json /tmp/link-to-it",
     "find ~/.claude -name yadgar-hook-exceptions.json",

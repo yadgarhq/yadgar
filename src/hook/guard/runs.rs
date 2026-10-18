@@ -125,3 +125,8 @@ const TRANSPARENT: &[&str] = &[
 ];
 
 pub(super) const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];
+
+/// Whether *name* is one of the [`SHELLS`].
+pub(super) fn is_shell(name: &str) -> bool {
+    SHELLS.contains(&name)
+}

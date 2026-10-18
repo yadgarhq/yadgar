@@ -53,7 +53,10 @@ use crate::install::shellword::{shell_commands, SimpleCommand};
 mod runs;
 mod tamper;
 use runs::{executed, substitutions, value_of, SHELLS};
-use tamper::{is_the_exceptions_file, line_names_the_file, writes_the_exceptions_file, INDIRECT};
+use tamper::{
+    is_the_exceptions_file, line_names_the_file, may_be_the_exceptions_file,
+    redirected_into_the_file, tampers, INDIRECT,
+};
 
 /// Refuse a tool call that the standing rules forbid.
 ///
@@ -110,11 +113,32 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
     }
 }
 
+/// The value of `env -S` / `env --split-string`, when *words* carry one.
+fn env_split_string(words: &[String]) -> Option<&str> {
+    let at = words.iter().position(|w| w == "env")?;
+    let mut rest = words[at + 1..].iter();
+    while let Some(word) = rest.next() {
+        if word == "-S" || word == "--split-string" {
+            return rest.next().map(String::as_str);
+        }
+        if let Some(value) = word.strip_prefix("--split-string=") {
+            return Some(value);
+        }
+        if let Some(value) = word.strip_prefix("-S").filter(|v| !v.is_empty()) {
+            return Some(value);
+        }
+        if !word.starts_with('-') {
+            return None;
+        }
+    }
+    None
+}
+
 /// How many nested `-c` scripts to follow.
 ///
 /// Bounded rather than trusted: a payload can nest `sh -c` inside `sh -c` as
 /// deeply as it likes, and a guard that recurses on it hangs the session it
-/// exists to protect. Two is every real case seen; deeper fails open.
+/// exists to protect. Two is every real case seen; deeper refuses when the line names the exceptions file.
 const MAX_NESTING: usize = 2; // ADR-0569-EXCEPTION(CB): bound on recursive -c unwrapping, not a per-install knob.
 
 fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
@@ -128,6 +152,12 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
         && line_names_the_file(line)
         && (!inner.is_empty() || line.contains("-c") || line.contains("eval"))
     {
+        return Decision::Deny(EXCEPTIONS.into());
+    }
+
+    // A REDIRECTION INTO THE FILE, read off the line itself: the scanner
+    // splits `>|`, `>&` and `&>` at the `|` or `&` and loses the target.
+    if policy.hook_config_tamper && redirected_into_the_file(line) {
         return Decision::Deny(EXCEPTIONS.into());
     }
 
@@ -156,6 +186,25 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
     }
 
     for command in &commands {
+        // BEFORE resolving the program: `env -S '<command>'` resolves to no
+        // program at all, and used to be skipped as allowed.
+        if depth < MAX_NESTING {
+            if let Some(split) = env_split_string(&command.words) {
+                if let Decision::Deny(reason) = bash(split, depth + 1, policy) {
+                    return Decision::Deny(reason);
+                }
+            }
+        }
+        // A redirection needs no program: `> <file>` and `exec > <file>`
+        // truncate the file, and a command with no program used to be skipped.
+        if policy.hook_config_tamper
+            && command
+                .writes_to
+                .iter()
+                .any(|f| may_be_the_exceptions_file(f))
+        {
+            return Decision::Deny(EXCEPTIONS.into());
+        }
         let Some((program, args)) = executed(command) else {
             continue;
         };
@@ -166,10 +215,12 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
             return Decision::Deny(HOOK_BYPASS.into());
         }
         if policy.hook_config_tamper
-            && writes_the_exceptions_file(
+            && tampers(
+                &command.words,
                 program,
                 args,
                 &command.writes_to,
+                line,
                 lone && !command.words.first().is_some_and(|w| w.contains('=')),
             )
         {

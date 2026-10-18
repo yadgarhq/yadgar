@@ -47,16 +47,19 @@ const CP_VALUE_LONG: &[&str] = &["--target-directory", "--suffix"];
 /// A source named like the file anywhere else may be anybody's content.
 const CANONICAL: &[&str] = &["~/.claude/", "$HOME/.claude/", "${HOME}/.claude/"];
 
+/// *lone* is whether the line is this one command and nothing else: the
+/// cp-from read is only taken then (see [`copy_writes_the_exceptions_file`]).
 pub(super) fn writes_the_exceptions_file(
     program: &str,
     args: &[String],
     writes_to: &[String],
+    lone: bool,
 ) -> bool {
     if writes_to.iter().any(|f| may_be_the_exceptions_file(f)) {
         return true;
     }
     if program == "cp" {
-        return copy_writes_the_exceptions_file(args);
+        return copy_writes_the_exceptions_file(args, lone);
     }
     if program == "dd" {
         // `if=` is read; only `of=` is written.
@@ -75,7 +78,11 @@ pub(super) fn writes_the_exceptions_file(
 /// is a plain copy option: copying the real file anywhere writes the file's own
 /// content, and into ~/.claude (or a link to it) cp refuses "the same file".
 /// Whether a destination is a directory is never guessed.
-fn copy_writes_the_exceptions_file(args: &[String]) -> bool {
+///
+/// ONLY ON A LONE COMMAND: `HOME=/tmp/x; cp ~/.claude/<file> /home/u/.claude/`
+/// expands the "canonical" path to someone else's file. Any other command, a
+/// substitution, or an assignment prefix on the same line refuses.
+fn copy_writes_the_exceptions_file(args: &[String], lone: bool) -> bool {
     let mut target_dir: Option<&str> = None;
     let mut operands: Vec<&str> = Vec::new();
     let mut plain = true;
@@ -138,7 +145,7 @@ fn copy_writes_the_exceptions_file(args: &[String]) -> bool {
         .iter()
         .filter(|s| may_be_the_exceptions_file(s))
         .collect();
-    !named.is_empty() && !(plain && named.iter().all(|s| is_canonical(s)))
+    !named.is_empty() && !(lone && plain && named.iter().all(|s| is_canonical(s)))
 }
 
 /// Whether *word* is the real file by one of its [`CANONICAL`] spellings.
@@ -146,6 +153,8 @@ fn is_canonical(word: &str) -> bool {
     CANONICAL
         .iter()
         .any(|prefix| word.strip_prefix(prefix) == Some(EXCEPTIONS_FILE))
+    // Exact, case included: only the canonical spelling is the real file for
+    // the read this allows; any other spelling refuses.
 }
 
 /// Whether *word* names the file, or may expand into it.
@@ -164,12 +173,20 @@ pub(super) fn may_be_the_exceptions_file(word: &str) -> bool {
     let mut parts = word.rsplit(['/', '\\']);
     let leaf = parts.next().unwrap_or(word);
     let stem = EXCEPTIONS_FILE.split('-').next().unwrap_or(EXCEPTIONS_FILE);
-    leaf.starts_with(stem) || parts.any(|p| p == ".claude")
+    leaf.to_ascii_lowercase().starts_with(stem) || parts.any(|p| p.eq_ignore_ascii_case(".claude"))
 }
 
+/// Whether any path component of *word* reaches the file.
+///
+/// IGNORING ASCII CASE, because macOS and Windows filesystems do by default;
+/// and on Windows, ignoring trailing dots and spaces and any `:stream` suffix
+/// (`<file>::$DATA` writes the file's main stream).
 pub(super) fn is_the_exceptions_file(word: &str) -> bool {
-    word.split(['/', '\\', '\n'])
-        .any(|part| part == EXCEPTIONS_FILE)
+    word.split(['/', '\\', '\n']).any(|part| {
+        let part = part.split(':').next().unwrap_or(part);
+        part.trim_end_matches(['.', ' '])
+            .eq_ignore_ascii_case(EXCEPTIONS_FILE)
+    })
 }
 
 /// Whether the file is named anywhere in *line*, with quotes and backslashes
@@ -179,5 +196,5 @@ pub(super) fn line_names_the_file(line: &str) -> bool {
         .chars()
         .filter(|c| !matches!(c, '\'' | '"' | '\\'))
         .collect();
-    plain.contains(EXCEPTIONS_FILE)
+    plain.to_ascii_lowercase().contains(EXCEPTIONS_FILE)
 }

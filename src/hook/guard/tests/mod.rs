@@ -153,6 +153,22 @@ const MUST_BE_DENIED: &[&str] = &[
     // KNOWN OVER-REFUSALS, kept on purpose: `install` and `ln` name the file
     // either way and are not worth parsing, and a search for the file by
     // name is indistinguishable from a find that acts on it.
+    // Second security review. HOME reassigned earlier on the line makes the
+    // "canonical" source an attacker's file: the cp-from read is only taken on
+    // a line that is that one command.
+    "HOME=/tmp/fake; cp ~/.claude/yadgar-hook-exceptions.json /home/x/.claude/",
+    "export HOME=/tmp/fake && cp $HOME/.claude/yadgar-hook-exceptions.json /home/x/.claude",
+    "HOME=/tmp/fake cp ~/.claude/yadgar-hook-exceptions.json /home/x/.claude/",
+    // A case-insensitive filesystem (macOS, Windows) reaches the file by any
+    // case; Windows also ignores trailing dots and spaces and writes the main
+    // stream through `::$DATA`.
+    "cp /tmp/x ~/.claude/YADGAR-HOOK-EXCEPTIONS.JSON",
+    "rm ~/.claude/Yadgar-Hook-Exceptions.json",
+    "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json.",
+    "cp /tmp/x ~/.claude/yadgar-hook-exceptions.json::$DATA",
+    // Nesting past the bound used to fail open.
+    r#"sh -c "sh -c 'sh -c \"cp /tmp/x ~/.claude/yadgar-hook-exceptions.json\"'""#,
+    r#"echo "$(echo "$(echo "$(cp /tmp/x ~/.claude/yadgar-hook-exceptions.json)")")""#,
     "install -m 600 ~/.claude/yadgar-hook-exceptions.json /tmp/x.json",
     "ln -s ~/.claude/yadgar-hook-exceptions.json /tmp/link-to-it",
     "find ~/.claude -name yadgar-hook-exceptions.json",
@@ -394,4 +410,37 @@ fn a_payload_of_the_wrong_shape_is_refused_and_never_judged_as_empty() {
     // A well-formed call of a tool the guard does not judge still allows.
     let read = json!({"tool_name": "Read", "tool_input": {"file_path": "/tmp/x"}});
     assert_eq!(guard(&read), Decision::Allow);
+}
+
+#[test]
+fn an_edit_with_no_readable_path_is_refused_and_not_judged_as_no_path() {
+    // Second security review: a missing, non-string or non-object path read
+    // as "" and allowed. An edit the guard cannot place is one it cannot judge.
+    for payload in [
+        json!({"tool_name": "Edit"}),
+        json!({"tool_name": "Write", "tool_input": "x"}),
+        json!({"tool_name": "Edit", "tool_input": {"file_path": 7}}),
+        json!({"tool_name": "NotebookEdit", "tool_input": {"path": "/tmp/x"}}),
+    ] {
+        assert!(
+            matches!(guard(&payload), Decision::Deny(_)),
+            "allowed an edit it could not place: {payload}"
+        );
+    }
+    let fine = json!({"tool_name": "Write", "tool_input": {"file_path": "/tmp/x", "content": ""}});
+    assert_eq!(guard(&fine), Decision::Allow);
+}
+
+#[test]
+fn a_bash_command_too_long_to_check_quickly_is_refused() {
+    // A hook that times out is no decision at all, so the call would run.
+    let long = format!("echo {}", "$(".repeat(300_000));
+    let started = std::time::Instant::now();
+    assert!(denies(&long));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    // Under the cap, deeply nested substitutions are scanned in linear time.
+    let nested = format!("echo {}", "$(".repeat(30_000));
+    let started = std::time::Instant::now();
+    let _ = guard(&bash_call(&nested));
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
 }

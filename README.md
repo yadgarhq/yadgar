@@ -176,8 +176,11 @@ private prefix:  local/<uuid>/
 It uses the saved login and calls the gateway's `GET /auth/whoami`
 (ADR-0959, gateway 0.12.17 or later). It exits non-zero when there is no saved
 login, when the gateway refuses the credential (401: it is invalid or revoked,
-so run `yaadgaar login` again), when the gateway cannot be reached, and when
-the gateway names no account segment (the dev trusted-headers path).
+so run `yaadgaar login` again), when the gateway cannot be reached, when the
+gateway answers 404 (it is older than 0.12.17 and does not serve the route),
+when the gateway names no account segment (the dev trusted-headers path), and
+when the segment is not one path segment (it holds a `/`, whitespace or a
+control character).
 
 ## Installing
 

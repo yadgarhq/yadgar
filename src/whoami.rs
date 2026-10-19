@@ -41,6 +41,10 @@ pub enum WhoamiError {
          `local/` prefix to show (is it running on the dev trusted-headers path?)"
     )]
     NoSegment(String),
+    /// 200 with a segment that cannot be ONE path segment: a slash,
+    /// whitespace or a control character. Shown escaped, never raw.
+    #[error("the gateway gave an account segment that is not one path segment: {0:?}")]
+    UnsafeSegment(String),
     #[error("cannot write to the terminal: {0}")]
     Output(#[from] std::io::Error),
 }
@@ -78,6 +82,12 @@ async fn execute(
         Some(s) if !s.is_empty() => s.to_string(),
         _ => return Err(WhoamiError::NoSegment(identity.user_id)),
     };
+    if segment
+        .chars()
+        .any(|c| c == '/' || c.is_whitespace() || c.is_control())
+    {
+        return Err(WhoamiError::UnsafeSegment(segment));
+    }
     writeln!(stdout, "user_id:         {}", identity.user_id)?;
     writeln!(stdout, "account_segment: {segment}")?;
     writeln!(stdout, "private prefix:  local/{segment}/")?;

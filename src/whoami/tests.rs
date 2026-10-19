@@ -109,15 +109,17 @@ async fn a_non_success_status_is_never_read_as_an_identity() {
         "{result:?}"
     );
     assert!(printed.is_empty(), "{printed}");
+    assert_no_token(&result, &printed);
 }
 
 #[tokio::test]
 async fn a_404_names_a_gateway_older_than_the_route() {
-    let (result, _, _) = ask("404 Not Found", "").await;
+    let (result, printed, _) = ask("404 Not Found", "").await;
     assert!(
-        matches!(result, Err(WhoamiError::RouteNotServed)),
+        matches!(&result, Err(WhoamiError::RouteNotServed)),
         "{result:?}"
     );
+    assert_no_token(&result, &printed);
 }
 
 #[tokio::test]
@@ -141,10 +143,37 @@ async fn a_null_missing_or_empty_segment_is_refused_and_prints_no_prefix() {
 async fn a_success_without_a_user_id_is_not_reported_as_one() {
     let (result, printed, _) = ask("200 OK", r#"{"account_segment":"x"}"#).await;
     assert!(
-        matches!(result, Err(WhoamiError::Malformed(_))),
+        matches!(&result, Err(WhoamiError::Malformed(_))),
         "{result:?}"
     );
     assert!(printed.is_empty(), "{printed}");
+    assert_no_token(&result, &printed);
+}
+
+#[tokio::test]
+async fn a_segment_that_cannot_be_one_path_segment_is_refused() {
+    // A slash, whitespace or a control character would make `local/<segment>/`
+    // a different path, or put a terminal escape on screen. The uuid shape is
+    // the gateway's to own, so nothing stricter is checked here.
+    for body in [
+        r#"{"account_segment":"a/b","user_id":"yadgar:user:x"}"#,
+        r#"{"account_segment":"a b","user_id":"yadgar:user:x"}"#,
+        r#"{"account_segment":"a\tb","user_id":"yadgar:user:x"}"#,
+        r#"{"account_segment":"a\u001b[2Jb","user_id":"yadgar:user:x"}"#,
+    ] {
+        let (result, printed, _) = ask("200 OK", body).await;
+        assert!(
+            matches!(&result, Err(WhoamiError::UnsafeSegment(_))),
+            "{body}: {result:?}"
+        );
+        assert!(printed.is_empty(), "{body}: {printed}");
+        let message = result.as_ref().unwrap_err().to_string();
+        assert!(
+            !message.contains('\u{1b}'),
+            "{body}: raw escape in {message:?}"
+        );
+        assert_no_token(&result, &printed);
+    }
 }
 
 #[tokio::test]

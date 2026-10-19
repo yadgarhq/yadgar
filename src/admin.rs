@@ -425,7 +425,7 @@ fn check_echo(sent: bool, echoed: Option<bool>) -> Result<Option<String>, AdminE
 }
 
 /// The gateway's `{"error": ...}` text, or the raw body when it sent none.
-fn gateway_error(body: &str) -> String {
+pub(crate) fn gateway_error(body: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))

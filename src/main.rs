@@ -17,6 +17,7 @@ mod project;
 mod proxy;
 mod scheme;
 mod trust;
+mod whoami;
 
 #[cfg(test)]
 mod testserver;
@@ -161,6 +162,11 @@ enum Command {
         name: String,
     },
 
+    /// Print who your saved credential names: your user_id, your account
+    /// segment, and your private project prefix `local/<account_segment>/`
+    /// (ADR-0959, ADR-0954). Never prints the credential itself.
+    Whoami,
+
     /// Administrative verbs, run with your own credential (ledger 1552).
     Admin {
         #[command(subcommand)]
@@ -279,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
 
         Command::Hook { name } => hook::process::run(&name),
         Command::Admin { command } => Ok(admin::run(command).await?),
+        Command::Whoami => Ok(whoami::run().await?),
     }
 }
 

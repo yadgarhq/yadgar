@@ -892,3 +892,23 @@ fn password_stdin_is_refused_on_a_real_pty_not_only_a_process_with_no_terminal_a
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[test]
+fn whoami_with_no_saved_login_exits_non_zero_and_says_to_log_in() {
+    // No config at all: nothing to send, so nothing is sent, and the person is
+    // told the one command that fixes it.
+    let home = scratch("whoami-no-login");
+    let output = Command::new(env!("CARGO_BIN_EXE_yaadgaar"))
+        .arg("whoami")
+        .env("HOME", &home)
+        .env("YAADGAAR_CONFIG_DIR", home.join("config"))
+        .output()
+        .expect("the binary under test did not run");
+
+    assert!(!output.status.success(), "whoami succeeded with no login");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("not logged in"), "{said}");
+    assert!(said.contains("yaadgaar login"), "{said}");
+    assert!(stdout_of(&output).is_empty(), "{}", stdout_of(&output));
+    let _ = std::fs::remove_dir_all(&home);
+}

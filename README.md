@@ -39,6 +39,7 @@ lose its tasks with nothing to report.
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `yaadgaar login`                    | Asks for the gateway address and your credentials once and stores both together. It registers nothing — `install` owns every file the agent client reads.                                                                                                                                                                                       |
 | `yaadgaar enrol`                    | Redeems an admin's enrolment token: sets your password, prints your username, and stores the gateway address and credential. Replaces `login` on the first machine.                                                                                                                                                                             |
+| `yaadgaar whoami`                   | Prints who your saved credential names: your `user_id`, your account segment, and your private project prefix `local/<account_segment>/`. It never prints the credential.                                                                                                                                                                       |
 | `yaadgaar serve`                    | The stdio MCP server the agent spawns. Not run by hand.                                                                                                                                                                                                                                                                                         |
 | `yaadgaar install`                  | Registers the hooks, the rules reference and the MCP entry, in the agent client's **user-level** config — once per machine, never per repository.                                                                                                                                                                                               |
 | `yaadgaar uninstall`                | Removes what `install` added, and nothing else.                                                                                                                                                                                                                                                                                                 |
@@ -156,6 +157,30 @@ machine, and they can log in again, because the password is unchanged and the
 account is not locked. It asks no confirmation. The gateway refuses (403) a
 non-administrator, the bootstrap token, and an administrator targeting
 themselves, and answers 404 for an unknown user.
+
+### Finding your private project prefix
+
+A private project path is `local/<account_segment>/…` (ADR-0954). Ask the
+gateway for your segment rather than guessing it:
+
+```bash
+yaadgaar whoami
+```
+
+```text
+user_id:         yadgar:user:<uuid>
+account_segment: <uuid>
+private prefix:  local/<uuid>/
+```
+
+It uses the saved login and calls the gateway's `GET /auth/whoami`
+(ADR-0959, gateway 0.12.17 or later). It exits non-zero when there is no saved
+login, when the gateway refuses the credential (401: it is invalid or revoked,
+so run `yaadgaar login` again), when the gateway cannot be reached, when the
+gateway answers 404 (it is older than 0.12.17 and does not serve the route),
+when the gateway names no account segment (the dev trusted-headers path), and
+when the segment is not one path segment (it holds a `/`, whitespace or a
+control character).
 
 ## Installing
 

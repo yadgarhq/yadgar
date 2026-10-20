@@ -303,6 +303,7 @@ fn entry_with_a_foreign_hook_before_ours() -> Value {
 }
 
 mod coexistence;
+mod idempotence;
 mod lifecycle;
 mod refusals;
 mod registration;

@@ -63,18 +63,23 @@ EOF
 git push -u origin chore/adr-export 2>&1|tail -2
 gh-personal pr create --repo yadgarhq/docs --base main --head chore/adr-export --title "docs: export to adr/" --body-file /tmp/s/pr.md"#;
 
-/// (c) A `for` loop running `git show` into scratch files.
-const GIT_SHOW_LOOP: &str = "S=/tmp/s; mkdir -p $S/pr; for f in $(git diff --name-only origin/main...02ba810 -- 'adr/ADR-*'); do git show 02ba810:$f > $S/pr/$(basename $f | cut -c1-8).md; done; ls $S/pr | wc -l";
+/// (c) A `for` loop running `git show` into scratch files, SIMPLIFIED to the
+/// part that can be relaxed: its real form writes `$S/pr/$(basename …).md`,
+/// and a `$(…)` leaf cannot be ruled out of climbing back to the file with
+/// `..`, so the real (c) stays refused. A scratch write to a proven-literal
+/// path is relaxed.
+const SCRATCH_LOOP: &str =
+    "S=/tmp/s; for n in a b; do echo $n; done; wc -l $S/pr/body.md; ls $S/pr";
 
 const MUST_BE_ALLOWED: &[&str] = &[
     PYTHON_HEREDOC,
     PR_BODY_HEREDOC,
-    GIT_SHOW_LOOP,
+    SCRATCH_LOOP,
     // Markdown inline code holding a `/`.
     "cat > /tmp/b.md <<'EOF'\nNo `local/` prefix; only `kubernetes.io/cluster/*` tags.\nEOF",
     "cat > /tmp/b.md <<'EOF'\nSplit on `/` only, as in `a/b`.\nEOF",
     // A scratch directory set as a literal at the top of the line.
-    "S=/tmp/s; mkdir -p $S/pr; ls ${S}/pr/*.md",
+    "S=/tmp/s; mkdir -p $S/pr; wc -l ${S}/pr/body.md",
 ];
 
 const MUST_BE_DENIED: &[&str] = &[
@@ -229,6 +234,26 @@ const BYPASSES: &[&str] = &[
     // An assignment in argument position holding whitespace, run by a
     // wrapper that keeps it in the line's shell.
     "D=/tmp; command export \"D=a ~/.claude\"; rm $D/*.json",
+    // A literal directory does not make a word safe while another reference
+    // in it stays unproven: $f from the environment may be `../.claude/<file>`.
+    "D=/tmp; echo x > $D/$f",
+    "D=/tmp; echo x > ${D}/${f}",
+    "f=x; echo x > $D/$f",
+    "D=/tmp; cat a > $D/$f",
+    // A positional or special parameter, and a loop variable, in the path:
+    // each is unmodelled and may hold `../.claude/<file>`.
+    "f=x; echo x > $1/$f",
+    "f=x; echo x > $0/$f",
+    "D=/tmp; for n in a b; do echo x > $D/$n; done",
+    // The real (c): a `$(…)` leaf under a proven dir cannot be ruled out of
+    // climbing back to the file with `..`.
+    "S=/tmp/s; mkdir -p $S/pr; for f in $(git diff --name-only HEAD -- 'adr/*'); do git show HEAD:$f > $S/pr/$(basename $f | cut -c1-8).md; done",
+    // Literal-variable relaxation is self-protecting: a literal that IS the
+    // file's name, or a literal directory that is `.claude`, is substituted
+    // and then refused by the exact check.
+    "f=yadgar-hook-exceptions.json; echo x > /home/u/.claude/$f",
+    "D=/home/u/.claude; f=yadgar-hook-exceptions.json; cp a $D/$f",
+    "D=/home/u/.claude; echo x > $D/yadgar-hook-exceptions.json",
     // Third review: any write the expander does not model makes the name
     // unknown. A nameref, a `${D:=…}` default, a trap, `eval` behind a
     // wrapper, and zsh's own writers.

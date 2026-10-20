@@ -77,7 +77,14 @@ pub(super) fn data_heredocs_removed(line: &str) -> Option<String> {
         while lines.next()? != delimiter {}
     }
     let stripped = out.join("\n");
-    if ["`", "$(", "<(", ">("].iter().any(|t| stripped.contains(t)) {
+    // The executed part (bodies removed) carries NO expansion or glob: a
+    // parser differential over `$`, a substitution or a glob cannot then
+    // make the guard read a different command than the shell runs. The
+    // tokens the shape needs — quotes, `<`, `>`, `|`, `&`, `;` — stay.
+    if stripped
+        .chars()
+        .any(|c| HEREDOC_FORBIDDEN.contains(c) || !c.is_ascii())
+    {
         return None;
     }
     let plain = shell_commands_with_separators(&stripped)
@@ -85,6 +92,11 @@ pub(super) fn data_heredocs_removed(line: &str) -> Option<String> {
         .all(|(c, _)| heredoc_line_command(c));
     (found && plain).then_some(stripped)
 }
+
+/// Characters barred from the executed part of a data-heredoc line: every
+/// expansion, substitution, glob and comment introducer. `<`, `>`, `|`,
+/// `&`, `;`, quotes and `=` stay, since the shape needs them.
+const HEREDOC_FORBIDDEN: &str = "$`*?[]()~!#\\\t";
 
 /// The quoted delimiter of the heredoc *text* opens: `Some(None)` for no
 /// heredoc, and `None` for one that is not data (see
@@ -141,6 +153,17 @@ fn heredoc_line_command(command: &SimpleCommand) -> bool {
     }
 }
 
+/// Whether *c* may appear in a line the literal relaxation reads (its `$(…)`
+/// spans already masked): letters, digits, space, newline, and the few
+/// punctuation marks the shape uses. No quote, backslash, glob, operator or
+/// subshell bracket.
+fn is_conservative(c: char) -> bool {
+    // `|` is allowed: each pipe stage is a subshell, so it sets no variable
+    // in the line's shell, and its command is still checked. `&` is not: it
+    // backgrounds or (as `&&`) is an operator the proving does not model.
+    c.is_ascii_alphanumeric() || " \n_./=:@,+-;|${}>".contains(c)
+}
+
 /// The literal values of the variables a line sets only by proven literal
 /// assignments, all before the variable's first use.
 pub(super) struct Literals {
@@ -162,6 +185,14 @@ impl Literals {
         let Some(masked) = mask_substitutions(line) else {
             return none;
         };
+        // CONSERVATIVE CHARSET. With its `$(…)` spans masked, the line may
+        // hold only this set: a parser differential over a quote, a
+        // backslash, a glob, a brace or an operator this does not model
+        // cannot then make a dangerous line look like a safe one. Anything
+        // else leaves the whole line to the check on `main`.
+        if masked.chars().any(|c| !is_conservative(c)) {
+            return none;
+        }
         let commands = shell_commands_with_separators(&masked);
         if !commands.iter().all(|(c, _)| literal_line_command(c)) {
             return none;
@@ -211,20 +242,39 @@ impl Literals {
         Self { values }
     }
 
-    /// *word* with each proven `$NAME` / `${NAME}` replaced by each of its
+    /// *word* with every `$NAME` / `${NAME}` replaced by each of its proven
     /// literals, or `None` past [`MAX_ALTERNATIVES`].
+    ///
+    /// ALL OR NOTHING. Every `$` in the word must begin a PROVEN `$NAME` /
+    /// `${NAME}`. If any does not — a plain variable the line does not fix, a
+    /// positional or special parameter (`$1`, `$@`), a `$(…)` command
+    /// substitution, or a `${…}` that is not a plain name — the word is
+    /// returned UNCHANGED, so the check on `main` decides it exactly. A
+    /// proven literal directory does not make a word safe while such an
+    /// expansion remains in it: it may expand to `../.claude/…` and climb
+    /// back to the file.
     pub(super) fn substitute(&self, word: &str) -> Option<Vec<String>> {
-        let mut alternatives = vec![String::new()];
         let chars: Vec<char> = word.chars().collect();
         let mut i = 0;
         while i < chars.len() {
-            let found =
-                reference(&chars, i).and_then(|(name, end)| Some((self.values.get(&name)?, end)));
-            let Some((values, end)) = found else {
+            if chars[i] == '$' {
+                match reference(&chars, i) {
+                    Some((name, end)) if self.values.contains_key(&name) => i = end,
+                    _ => return Some(vec![word.to_string()]),
+                }
+            } else {
+                i += 1;
+            }
+        }
+        let mut alternatives = vec![String::new()];
+        let mut i = 0;
+        while i < chars.len() {
+            let Some((name, end)) = reference(&chars, i) else {
                 alternatives.iter_mut().for_each(|a| a.push(chars[i]));
                 i += 1;
                 continue;
             };
+            let values = &self.values[&name];
             alternatives = alternatives
                 .iter()
                 .flat_map(|a| values.iter().map(move |v| format!("{a}{v}")))
@@ -381,6 +431,35 @@ mod tests {
                 Literals::of(line).substitute("$S").unwrap(),
                 ["$S"],
                 "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_excluded_character_turns_off_the_literal_relaxation() {
+        // Each is the proven shape with one exotic character added; the whole
+        // line then falls back to the check on `main`, and nothing resolves.
+        // A reported parser-differential: `'$S'` and `\$S` are literal in the
+        // shell but this would otherwise substitute them.
+        for exotic in [
+            "S=/tmp; ls '$S'/y",   // single quote
+            "S=/tmp; ls \"$S\"/y", // double quote
+            "S=/tmp; ls \\$S/y",   // backslash
+            "S=/tmp; ls `pwd`/$S", // backtick
+            "S=/tmp; ls $S/*",     // glob star
+            "S=/tmp; ls $S/y?",    // glob question
+            "S=/tmp; ls $S/[a]",   // glob class
+            "S=/tmp; ls $S/~x",    // tilde
+            "S=/tmp; ls $S/x & y", // background
+            "S=/tmp; (ls $S)",     // subshell paren
+            "S=/tmp\tls $S",       // tab
+            "S=/tmp; ls $S/café",  // non-ascii
+            "S=/tmp; ls $S/x # c", // comment
+        ] {
+            assert_eq!(
+                Literals::of(exotic).substitute("$S").unwrap(),
+                ["$S"],
+                "{exotic}"
             );
         }
     }

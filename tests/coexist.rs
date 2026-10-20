@@ -315,3 +315,20 @@ fn no_hint_when_the_engines_directory_holds_only_engine_files() {
         "{out:?}"
     );
 }
+
+#[test]
+fn a_stray_flag_after_the_hook_name_never_turns_the_refusal_into_an_allow() {
+    // Ledger 1576 (d): `hook` ran behind `Cli::parse()`, so clap judged the
+    // arguments first and `--help` printed usage and exited 0 — the tool ran
+    // unchecked. The hook path now reads its own name before clap exists.
+    let home = scratch("guard-stray-flag");
+    for flag in ["--help", "--version", "-h"] {
+        let out = yaadgaar(
+            &home,
+            &["hook", "pre-tool-guard", flag],
+            &bash_payload(BYPASS),
+        );
+        assert_eq!(out.status.code(), Some(2), "{flag}: {out:?}");
+        assert!(out.stdout.is_empty(), "{flag}: {out:?}");
+    }
+}

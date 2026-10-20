@@ -51,6 +51,10 @@ mod guard;
 mod policy;
 pub mod process;
 
+#[cfg(test)]
+#[path = "hook/tests/shape.rs"]
+mod shape;
+
 pub use guard::pre_tool_guard;
 pub use policy::{Policy, EXCEPTIONS_FILE};
 

@@ -174,13 +174,28 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// NOT `#[tokio::main]`. That macro starts the runtime, and `Cli::parse()` and
+/// `init_tracing` then run, all BEFORE `hook::process::run` reaches its
+/// `catch_unwind`: a panic in any of them exited 101, which Claude Code reads as
+/// non-blocking, so the tool ran unchecked; and clap answered `--help` with
+/// exit 0. The hook needs no runtime, so it runs first, synchronously, with its
+/// setup inside the containment (ledger 1576 (d)).
+fn main() -> anyhow::Result<()> {
+    if let Some(name) = hook::process::hook_name(std::env::args_os()) {
+        // NO COLOUR UNDER `hook`. Its stderr is not read by a person at a
+        // terminal: on exit 2 Claude Code hands it to the model, and ANSI
+        // escapes arrive as noise around the reason (ledger 1570).
+        return hook::process::run(&name, || init_tracing(false));
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(real_main())
+}
+
+async fn real_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    // NO COLOUR UNDER `hook`. Its stderr is not read by a person at a terminal:
-    // on exit 2 Claude Code hands it to the model, and ANSI escapes arrive as
-    // noise around the reason (ledger 1570).
-    init_tracing(!matches!(cli.command, Command::Hook { .. }));
+    init_tracing(true);
 
     match cli.command {
         Command::Serve => {
@@ -283,7 +298,9 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
 
-        Command::Hook { name } => hook::process::run(&name),
+        // Normally unreachable: `main` takes `hook <name>` before clap. A `hook`
+        // that reaches here lacks its name, and clap refused it already.
+        Command::Hook { name } => hook::process::run(&name, || ()),
         Command::Admin { command } => Ok(admin::run(command).await?),
         Command::Whoami => Ok(whoami::run().await?),
     }

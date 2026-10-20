@@ -61,15 +61,20 @@ pub(super) struct Scope<'a> {
 impl<'a> Scope<'a> {
     /// The bindings and writes of *commands*, each with the operators before
     /// it, resolving the rest against *env*.
+    ///
+    /// *line* is the line with its subshell spans masked; *raw* is the line
+    /// as written, read for `${NAME…}` forms the mask removed.
     pub(super) fn of(
         commands: &[(SimpleCommand, Vec<String>)],
         line: &str,
+        raw: &str,
         env: &'a Environment,
     ) -> Self {
+        let (tainted, all_tainted) = super::writes::unmodelled_writes(line, raw);
         let mut scope = Scope {
             bindings: Vec::new(),
-            tainted: HashSet::new(),
-            all_tainted: false,
+            tainted,
+            all_tainted,
             env,
         };
         // NO ASSIGNMENT IS PROVEN on a line holding a heredoc or a `#`: the
@@ -358,7 +363,7 @@ mod tests {
     use crate::install::shellword::shell_commands_with_separators as scan;
 
     fn subst(line: &str, env: &Environment, word: &str, at: usize) -> Option<Vec<String>> {
-        Scope::of(&scan(line), line, env).substitute(word, at)
+        Scope::of(&scan(line), line, line, env).substitute(word, at)
     }
 
     #[test]

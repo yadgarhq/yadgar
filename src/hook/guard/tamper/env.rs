@@ -21,7 +21,7 @@
 //! in an earlier call.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Names the agent's shell sets or changes itself.
 const SHELL_SET: &[&str] = &[
@@ -61,18 +61,72 @@ impl Environment {
     }
 
     /// The hook process's environment, less every name the profile snapshots
-    /// under *snapshots* (a directory of `*.sh` files) touch.
-    ///
-    /// FAILS CLOSED: with no directory, or one that cannot be read in full,
-    /// nothing resolves, because what the snapshot would change is unknown.
+    /// under *snapshots* (a directory of `*.sh` files) or the shells' startup
+    /// files spell (see [`Environment::from_vars`]).
     pub fn from_process(snapshots: Option<&Path>) -> Self {
-        match snapshots.and_then(snapshot_names) {
-            Some(snapshot) => Self {
-                vars: std::env::vars().collect(),
-                snapshot,
-            },
-            None => Self::unknown(),
+        let vars: HashMap<String, String> = std::env::vars().collect();
+        let home = vars.get("HOME").map(PathBuf::from);
+        let zdotdir = vars
+            .get("ZDOTDIR")
+            .map(PathBuf::from)
+            .or_else(|| home.clone());
+        // The snapshot's name says which shell the tool runs; with no
+        // snapshot of either kind, both shells' files are read.
+        let kinds = snapshots.map(snapshot_kinds).unwrap_or_default();
+        let (zsh, bash) = match (kinds.contains("zsh"), kinds.contains("bash")) {
+            (false, false) => (true, true),
+            other => other,
+        };
+        let mut startup = Vec::new();
+        if zsh {
+            startup.extend(["/etc/zshenv", "/etc/zprofile", "/etc/zlogin"].map(PathBuf::from));
+            if let Some(z) = &zdotdir {
+                startup.extend([".zshenv", ".zprofile", ".zlogin"].map(|f| z.join(f)));
+            }
+            if let Some(h) = &home {
+                startup.push(h.join(".zshenv"));
+            }
         }
+        if bash {
+            startup.extend(["/etc/profile", "/etc/bash.bashrc"].map(PathBuf::from));
+            if let Some(h) = &home {
+                startup.extend([".profile", ".bash_profile", ".bash_login"].map(|f| h.join(f)));
+            }
+        }
+        Self::from_vars(vars, snapshots, &startup)
+    }
+
+    /// *vars*, less every name the snapshots under *snapshots* or the
+    /// *startup* files (and the files they source) spell anywhere: a name
+    /// such a file assigns, exports, unsets, reads or prints into may differ
+    /// in the agent's shell, however the file does it.
+    ///
+    /// FAILS CLOSED, resolving nothing, when: there is no snapshot directory,
+    /// it holds no snapshot, or any file in it cannot be read; a startup file
+    /// that exists cannot be read, or sources a path that is not a plain
+    /// absolute one; or the shell would run code of its own on starting or on
+    /// a command name (`BASH_ENV`, `ENV`, an exported `BASH_FUNC_…`).
+    pub fn from_vars(
+        vars: HashMap<String, String>,
+        snapshots: Option<&Path>,
+        startup: &[PathBuf],
+    ) -> Self {
+        if vars
+            .keys()
+            .any(|k| k == "BASH_ENV" || k == "ENV" || k.starts_with("BASH_FUNC_"))
+        {
+            return Self::unknown();
+        }
+        let Some(mut snapshot) = snapshots.and_then(snapshot_names) else {
+            return Self::unknown();
+        };
+        for file in startup {
+            match file_names(file, MAX_SOURCE_DEPTH, &mut HashSet::new()) {
+                Some(names) => snapshot.extend(names),
+                None => return Self::unknown(),
+            }
+        }
+        Self { vars, snapshot }
     }
 
     /// An environment of exactly *vars*, for a test.
@@ -102,11 +156,27 @@ impl Environment {
     }
 }
 
-/// Every name the `*.sh` files in *dir* may set or unset: each `NAME=`
-/// anywhere in them (a plain assignment is exported under `set -a`), and
-/// each operand of `export`, `unset`, `declare`, `typeset`, `local` and
-/// `readonly`. `None` when the directory, or any file in it, cannot be read,
-/// or when it holds no snapshot at all: then the snapshot may live elsewhere.
+/// The shells the snapshots under *dir* were taken from: `snapshot-zsh-…`
+/// and `snapshot-bash-…`.
+fn snapshot_kinds(dir: &Path) -> HashSet<&'static str> {
+    let mut out = HashSet::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        for kind in ["zsh", "bash"] {
+            if name.contains(&format!("-{kind}-")) {
+                out.insert(kind);
+            }
+        }
+    }
+    out
+}
+
+/// How deep `.` / `source` is followed from a startup file.
+const MAX_SOURCE_DEPTH: usize = 4; // ADR-0569-EXCEPTION(CB): bound on following untrusted files, not a per-install knob.
+
+/// Every name the `*.sh` files in *dir* spell. `None` when the directory,
+/// or any file in it, cannot be read, or when it holds no snapshot at all:
+/// then the snapshot may live elsewhere.
 fn snapshot_names(dir: &Path) -> Option<HashSet<String>> {
     let mut out = HashSet::new();
     let mut seen = false;
@@ -115,31 +185,43 @@ fn snapshot_names(dir: &Path) -> Option<HashSet<String>> {
         if path.extension().is_none_or(|e| e != "sh") {
             continue;
         }
-        let text = std::fs::read_to_string(&path).ok()?;
+        out.extend(names_in(&std::fs::read_to_string(&path).ok()?));
         seen = true;
-        for word in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '=')) {
-            if let Some((name, _)) = word.split_once('=') {
-                if is_name(name) {
-                    out.insert(name.to_string());
-                }
-            }
-        }
-        for line in text.lines() {
-            let mut words = line.split_whitespace();
-            if matches!(
-                words.next(),
-                Some("export" | "unset" | "declare" | "typeset" | "local" | "readonly")
-            ) {
-                out.extend(
-                    words
-                        .map(|w| w.split('=').next().unwrap_or(""))
-                        .filter(|n| is_name(n))
-                        .map(str::to_string),
-                );
-            }
-        }
     }
     seen.then_some(out)
+}
+
+/// Every name *path* spells, and the files it sources, to *depth*. An absent
+/// file spells nothing; `None` when one cannot be read or sources a path
+/// that is not a plain absolute one.
+fn file_names(path: &Path, depth: usize, seen: &mut HashSet<PathBuf>) -> Option<HashSet<String>> {
+    // A file already read adds nothing: `/etc/bashrc` and `/etc/profile`
+    // source each other.
+    if !path.exists() || !seen.insert(path.to_path_buf()) {
+        return Some(HashSet::new());
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut out = names_in(&text);
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        if !matches!(words.next(), Some("." | "source")) {
+            continue;
+        }
+        let target = words.next()?.trim_matches(['"', '\'']);
+        if depth == 0 || !target.starts_with('/') || target.contains(['$', '`', '*', '?', '~']) {
+            return None;
+        }
+        out.extend(file_names(Path::new(target), depth - 1, seen)?);
+    }
+    Some(out)
+}
+
+/// Every identifier in *text*.
+fn names_in(text: &str) -> HashSet<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| is_name(w))
+        .map(str::to_string)
+        .collect()
 }
 
 fn is_name(name: &str) -> bool {
@@ -172,24 +254,22 @@ mod tests {
 
     #[test]
     fn with_no_readable_snapshot_nothing_resolves() {
-        std::env::set_var("YAADGAAR_TEST_SRC", "/tmp/a");
         let missing = std::env::temp_dir().join("yaadgaar-no-such-snapshots");
         for env in [
-            Environment::from_process(None),
-            Environment::from_process(Some(&missing)),
+            Environment::from_vars(vars(&[("SRC", "/tmp/a")]), None, &[]),
+            Environment::from_vars(vars(&[("SRC", "/tmp/a")]), Some(&missing), &[]),
         ] {
-            assert_eq!(env.value("YAADGAAR_TEST_SRC"), None);
+            assert_eq!(env.value("SRC"), None);
         }
     }
 
     #[test]
     fn a_snapshot_directory_with_no_snapshot_resolves_nothing() {
-        std::env::set_var("YAADGAAR_TEST_SRC2", "/tmp/a");
         let dir = std::env::temp_dir().join(format!("yaadgaar-snap0-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("notes.txt"), "x").unwrap();
-        let env = Environment::from_process(Some(&dir));
-        assert_eq!(env.value("YAADGAAR_TEST_SRC2"), None);
+        let env = Environment::from_vars(vars(&[("SRC", "/tmp/a")]), Some(&dir), &[]);
+        assert_eq!(env.value("SRC"), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -202,7 +282,7 @@ mod tests {
             "set -a\nA=/x\nunset B\nf() { C=1; }\n",
         )
         .unwrap();
-        let mut env = Environment::from_process(Some(&dir));
+        let mut env = Environment::from_vars(HashMap::new(), Some(&dir), &[]);
         for name in ["A", "B", "C"] {
             env.vars.insert(name.into(), "/tmp".into());
             assert_eq!(env.value(name), None, "{name}");
@@ -215,9 +295,66 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yaadgaar-snap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("snapshot-zsh-1.sh"), "export D=/x\nalias a=b\n").unwrap();
-        let mut env = Environment::from_process(Some(&dir));
+        let mut env = Environment::from_vars(HashMap::new(), Some(&dir), &[]);
         env.vars.insert("D".into(), "/tmp".into());
         assert_eq!(env.value("D"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("yaadgaar-env-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("snap")).unwrap();
+        std::fs::write(dir.join("snap/snapshot-zsh-1.sh"), "f() { read X; }\n").unwrap();
+        dir
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_shell_that_runs_code_of_its_own_resolves_nothing() {
+        let dir = scratch("bashenv");
+        for extra in [
+            ("BASH_ENV", "/x"),
+            ("ENV", "/x"),
+            ("BASH_FUNC_ls%%", "() { :; }"),
+        ] {
+            let env =
+                Environment::from_vars(vars(&[("D", "/tmp"), extra]), Some(&dir.join("snap")), &[]);
+            assert_eq!(env.value("D"), None, "{extra:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn any_name_a_snapshot_or_startup_file_spells_is_unknown() {
+        let dir = scratch("startup");
+        std::fs::write(dir.join("sourced"), "Y=1\n").unwrap();
+        std::fs::write(
+            dir.join("zshenv"),
+            format!("print -v Z x\n. '{}'\n", dir.join("sourced").display()),
+        )
+        .unwrap();
+        let env = Environment::from_vars(
+            vars(&[("X", "/t"), ("Y", "/t"), ("Z", "/t"), ("D", "/t")]),
+            Some(&dir.join("snap")),
+            &[dir.join("zshenv"), dir.join("absent")],
+        );
+        for name in ["X", "Y", "Z"] {
+            assert_eq!(env.value(name), None, "{name}");
+        }
+        assert_eq!(env.value("D").as_deref(), Some("/t"));
+        std::fs::write(dir.join("zshenv"), ". $HOME/x\n").unwrap();
+        let env = Environment::from_vars(
+            vars(&[("D", "/t")]),
+            Some(&dir.join("snap")),
+            &[dir.join("zshenv")],
+        );
+        assert_eq!(env.value("D"), None, "a source the guard cannot follow");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

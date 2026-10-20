@@ -235,6 +235,18 @@ const BYPASSES: &[&str] = &[
     // An assignment in argument position holding whitespace, run by a
     // wrapper that keeps it in the line's shell.
     "D=/tmp; command export \"D=a ~/.claude\"; rm $D/*.json",
+    // Third review: any write the expander does not model makes the name
+    // unknown. A nameref, a `${D:=…}` default, a trap, `eval` behind a
+    // wrapper, and zsh's own writers.
+    "D=/tmp; declare -n R=D; R=~/.claude; rm $D/*.json",
+    "D=/tmp; typeset -n R; R=D; rm $D/*.json",
+    "D=; : ${D:=~/.claude}; rm $D/*.json",
+    "D=/tmp; trap 'read D' DEBUG; rm $D/*.json <<< ~/.claude",
+    "D=/tmp; command eval 'read D'; rm $D/*.json",
+    "D=/tmp; vared D; rm $D/*.json",
+    "D=/tmp; print -v D ~/.claude; rm $D/*.json",
+    "D=/tmp; foreach D (~/.claude) rm $D/*.json; end",
+    "D=/tmp; wait -p D; rm $D/*.json",
 ];
 
 #[test]

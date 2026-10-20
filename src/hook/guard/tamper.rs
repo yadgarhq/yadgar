@@ -48,6 +48,7 @@ use crate::install::shellword::shell_commands_with_separators;
 pub mod env;
 mod expand;
 mod spans;
+mod writes;
 use env::Environment;
 use expand::{Scope, EXPANSION};
 
@@ -66,7 +67,7 @@ pub(super) fn names_the_exceptions_file(line: &str, env: &Environment) -> bool {
     }
     let masked = spans::mask(line);
     let commands = shell_commands_with_separators(&masked);
-    let scope = Scope::of(&commands, &masked, env);
+    let scope = Scope::of(&commands, &masked, line, env);
     // `$(…)/y*` unquoted: the scanner ends one command at `$`, scans the
     // substitution as commands of its own, and starts another with `/y*`,
     // which begins with the substitution's output. The guard cannot tell

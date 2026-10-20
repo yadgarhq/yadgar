@@ -16,8 +16,9 @@
 //! So a variable resolves to its real value only when it is set in the hook's
 //! environment and none of those can change it. Every other one, and every
 //! variable at all when no environment is given, stays UNKNOWN: it may hold
-//! anything, `.claude` included, and the caller refuses accordingly. `PWD` is
-//! the payload's working directory, unless the line runs `cd`.
+//! anything, `.claude` included, and the caller refuses accordingly. `PWD`
+//! is one of them: the payload's `cwd` is not proven to follow a `cd` made
+//! in an earlier call.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -44,11 +45,10 @@ const SHELL_SET: &[&str] = &[
 pub struct Environment {
     /// The hook process's own environment. Empty when nothing resolves.
     vars: HashMap<String, String>,
-    /// Names the profile snapshot exports: their value in the agent's shell
-    /// is the snapshot's, which this does not parse.
+    /// Names the profile snapshots set, export or unset in any way: their
+    /// value in the agent's shell is the snapshot's, which this does not
+    /// evaluate.
     snapshot: HashSet<String>,
-    /// The payload's working directory, which is `$PWD` in the tool shell.
-    cwd: Option<String>,
 }
 
 impl Environment {
@@ -57,40 +57,39 @@ impl Environment {
         Self {
             vars: HashMap::new(),
             snapshot: HashSet::new(),
-            cwd: None,
         }
     }
 
-    /// The hook process's environment, less the names in the profile
-    /// snapshots under *snapshots* (a directory of `*.sh` files), with *cwd*
-    /// as `$PWD`.
-    pub fn from_process(snapshots: Option<&Path>, cwd: Option<&str>) -> Self {
-        Self {
-            vars: std::env::vars().collect(),
-            snapshot: snapshots.map(exported_names).unwrap_or_default(),
-            cwd: cwd.map(str::to_string),
+    /// The hook process's environment, less every name the profile snapshots
+    /// under *snapshots* (a directory of `*.sh` files) touch.
+    ///
+    /// FAILS CLOSED: with no directory, or one that cannot be read in full,
+    /// nothing resolves, because what the snapshot would change is unknown.
+    pub fn from_process(snapshots: Option<&Path>) -> Self {
+        match snapshots.and_then(snapshot_names) {
+            Some(snapshot) => Self {
+                vars: std::env::vars().collect(),
+                snapshot,
+            },
+            None => Self::unknown(),
         }
     }
 
     /// An environment of exactly *vars*, for a test.
     #[cfg(test)]
-    pub fn of(vars: &[(&str, &str)], cwd: Option<&str>) -> Self {
+    pub fn of(vars: &[(&str, &str)]) -> Self {
         Self {
             vars: vars
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             snapshot: HashSet::new(),
-            cwd: cwd.map(str::to_string),
         }
     }
 
     /// The value *name* holds in the agent's shell, or `None` when it is
-    /// UNKNOWN. *cd* says the line changes directory, which changes `$PWD`.
-    pub(super) fn value(&self, name: &str, cd: bool) -> Option<String> {
-        if name == "PWD" {
-            return self.cwd.clone().filter(|_| !cd);
-        }
+    /// UNKNOWN.
+    pub(super) fn value(&self, name: &str) -> Option<String> {
         if SHELL_SET.contains(&name)
             || name.to_ascii_uppercase().starts_with("CLAUDE")
             || self.snapshot.contains(name)
@@ -103,41 +102,52 @@ impl Environment {
     }
 }
 
-/// Every name a `*.sh` file in *dir* exports: `export NAME=`, `declare -x`,
-/// `typeset -x`. Unreadable files add nothing; the names they would add stay
-/// resolvable only if the hook's environment has them, as for any variable.
-fn exported_names(dir: &Path) -> HashSet<String> {
+/// Every name the `*.sh` files in *dir* may set or unset: each `NAME=`
+/// anywhere in them (a plain assignment is exported under `set -a`), and
+/// each operand of `export`, `unset`, `declare`, `typeset`, `local` and
+/// `readonly`. `None` when the directory, or any file in it, cannot be read,
+/// or when it holds no snapshot at all: then the snapshot may live elsewhere.
+fn snapshot_names(dir: &Path) -> Option<HashSet<String>> {
     let mut out = HashSet::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let mut seen = false;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let path = entry.ok()?.path();
         if path.extension().is_none_or(|e| e != "sh") {
             continue;
         }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in text.lines() {
-            let mut words = line.split_whitespace();
-            let first = words.next();
-            let rest: Vec<&str> = match first {
-                Some("export") => words.collect(),
-                Some("declare" | "typeset" | "local" | "readonly") => {
-                    words.filter(|w| !w.starts_with('-')).collect()
-                }
-                _ => continue,
-            };
-            for word in rest {
-                let name = word.split('=').next().unwrap_or("");
-                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        let text = std::fs::read_to_string(&path).ok()?;
+        seen = true;
+        for word in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '=')) {
+            if let Some((name, _)) = word.split_once('=') {
+                if is_name(name) {
                     out.insert(name.to_string());
                 }
             }
         }
+        for line in text.lines() {
+            let mut words = line.split_whitespace();
+            if matches!(
+                words.next(),
+                Some("export" | "unset" | "declare" | "typeset" | "local" | "readonly")
+            ) {
+                out.extend(
+                    words
+                        .map(|w| w.split('=').next().unwrap_or(""))
+                        .filter(|n| is_name(n))
+                        .map(str::to_string),
+                );
+            }
+        }
     }
-    out
+    seen.then_some(out)
+}
+
+fn is_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -146,17 +156,58 @@ mod tests {
 
     #[test]
     fn only_a_variable_the_shell_cannot_change_resolves() {
-        let env = Environment::of(
-            &[("SRC", "/tmp/a"), ("PATH", "/bin"), ("CLAUDE_X", "/x")],
-            Some("/w"),
-        );
-        assert_eq!(env.value("SRC", false).as_deref(), Some("/tmp/a"));
-        assert_eq!(env.value("UNSET", false), None, "unset is unknown");
-        assert_eq!(env.value("PATH", false), None, "the shell changes it");
-        assert_eq!(env.value("CLAUDE_X", false), None, "the client adds them");
-        assert_eq!(env.value("PWD", false).as_deref(), Some("/w"));
-        assert_eq!(env.value("PWD", true), None, "a cd changes it");
-        assert_eq!(Environment::unknown().value("SRC", false), None);
+        let env = Environment::of(&[
+            ("SRC", "/tmp/a"),
+            ("PATH", "/bin"),
+            ("CLAUDE_X", "/x"),
+            ("PWD", "/w"),
+        ]);
+        assert_eq!(env.value("SRC").as_deref(), Some("/tmp/a"));
+        assert_eq!(env.value("UNSET"), None, "unset is unknown");
+        assert_eq!(env.value("PATH"), None, "the shell changes it");
+        assert_eq!(env.value("CLAUDE_X"), None, "the client adds them");
+        assert_eq!(env.value("PWD"), None, "the shell's own directory");
+        assert_eq!(Environment::unknown().value("SRC"), None);
+    }
+
+    #[test]
+    fn with_no_readable_snapshot_nothing_resolves() {
+        std::env::set_var("YAADGAAR_TEST_SRC", "/tmp/a");
+        let missing = std::env::temp_dir().join("yaadgaar-no-such-snapshots");
+        for env in [
+            Environment::from_process(None),
+            Environment::from_process(Some(&missing)),
+        ] {
+            assert_eq!(env.value("YAADGAAR_TEST_SRC"), None);
+        }
+    }
+
+    #[test]
+    fn a_snapshot_directory_with_no_snapshot_resolves_nothing() {
+        std::env::set_var("YAADGAAR_TEST_SRC2", "/tmp/a");
+        let dir = std::env::temp_dir().join(format!("yaadgaar-snap0-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        let env = Environment::from_process(Some(&dir));
+        assert_eq!(env.value("YAADGAAR_TEST_SRC2"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_name_the_snapshot_sets_or_unsets_in_any_way_is_unknown() {
+        let dir = std::env::temp_dir().join(format!("yaadgaar-snap2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("snapshot-zsh-2.sh"),
+            "set -a\nA=/x\nunset B\nf() { C=1; }\n",
+        )
+        .unwrap();
+        let mut env = Environment::from_process(Some(&dir));
+        for name in ["A", "B", "C"] {
+            env.vars.insert(name.into(), "/tmp".into());
+            assert_eq!(env.value(name), None, "{name}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -164,9 +215,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("yaadgaar-snap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("snapshot-zsh-1.sh"), "export D=/x\nalias a=b\n").unwrap();
-        let mut env = Environment::from_process(Some(&dir), None);
+        let mut env = Environment::from_process(Some(&dir));
         env.vars.insert("D".into(), "/tmp".into());
-        assert_eq!(env.value("D", false), None);
+        assert_eq!(env.value("D"), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

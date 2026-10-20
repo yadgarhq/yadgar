@@ -226,6 +226,15 @@ const BYPASSES: &[&str] = &[
     "true # ; D=/tmp\nrm $D/*.json",
     "readonly D; D=/tmp; rm $D/*.json",
     "eval 'D=\"x y\"'; rm $D/*.json",
+    // `local` outside a function fails; a function called in a loop body
+    // assigns the loop's variable; `$PWD` may not be the payload's `cwd`.
+    "local D=/tmp; rm $D/*.json",
+    "f() { D=~/.claude; }; for D in /tmp; do f; rm $D/*.json; done",
+    "for D in /tmp; do for D in ~/.claude; do :; done; rm $D/*.json; done",
+    "D=(~/.claude); rm $D/*.json",
+    // An assignment in argument position holding whitespace, run by a
+    // wrapper that keeps it in the line's shell.
+    "D=/tmp; command export \"D=a ~/.claude\"; rm $D/*.json",
 ];
 
 #[test]
@@ -254,34 +263,28 @@ fn every_way_of_naming_the_exceptions_file_is_refused() {
 /// The agent's shell, for the tests that resolve a variable the line does
 /// not set: safe values, and a working directory outside `.claude`.
 fn safe_env() -> Environment {
-    Environment::of(
-        &[
-            ("FILES", "a.rs b.rs"),
-            ("OUT", "/tmp/out"),
-            ("SRC", "/tmp/src"),
-            ("DST", "/tmp/dst"),
-            ("f", "notes.json"),
-            ("r", "repo"),
-            ("GITHUB_WORKSPACE", "/w"),
-            ("DIR", "sub"),
-            ("D", "/tmp/x"),
-            ("HOME", "/home/u"),
-        ],
-        Some("/home/u/proj"),
-    )
+    Environment::of(&[
+        ("FILES", "a.rs b.rs"),
+        ("OUT", "/tmp/out"),
+        ("SRC", "/tmp/src"),
+        ("DST", "/tmp/dst"),
+        ("f", "notes.json"),
+        ("r", "repo"),
+        ("GITHUB_WORKSPACE", "/w"),
+        ("DIR", "sub"),
+        ("D", "/tmp/x"),
+        ("HOME", "/home/u"),
+    ])
 }
 
 /// The same, with `D` and the working directory inside `.claude`, and `f`
 /// the file's name.
 fn claude_env() -> Environment {
-    Environment::of(
-        &[
-            ("D", "/home/u/.claude"),
-            ("f", crate::hook::EXCEPTIONS_FILE),
-            ("HOME", "/home/u"),
-        ],
-        Some("/home/u/.claude"),
-    )
+    Environment::of(&[
+        ("D", "/home/u/.claude"),
+        ("f", crate::hook::EXCEPTIONS_FILE),
+        ("HOME", "/home/u"),
+    ])
 }
 
 fn refuses_in(command: &str, env: &Environment) -> bool {
@@ -301,7 +304,6 @@ const RESOLVED: &[&str] = &[
     "rm $D/*.json",
     "cp /tmp/x $D/${f}",
     "rm $D/*s.json",
-    "rm $PWD/*.json",
 ];
 
 #[test]
@@ -316,7 +318,6 @@ fn a_variable_the_line_does_not_set_is_decided_by_its_real_value() {
         "rm $D/*.json",
         "cp /tmp/x $D/${f}",
         "rm $D/*s.json",
-        "rm $PWD/*.json",
     ];
     let allowed: Vec<&&str> = into_claude
         .iter()
@@ -336,15 +337,31 @@ fn a_variable_the_line_does_not_set_is_decided_by_its_real_value() {
 
 #[test]
 fn what_no_environment_can_decide_still_refuses() {
-    for command in [
-        "rm */*",
-        "rm $CLAUDE_CONFIG_DIR/*.json",
-        "rm $UNSET_HERE/*.json",
-        "cd /; rm $PWD/*.json",
-    ] {
-        assert!(refuses_in(command, &safe_env()), "allowed: {command}");
-    }
+    let allowed: Vec<&&str> = UNDECIDABLE
+        .iter()
+        .filter(|c| !refuses_in(c, &safe_env()))
+        .collect();
+    assert!(allowed.is_empty(), "allowed with safe values: {allowed:#?}");
 }
+
+/// Refused even where every variable the hook can see is safe: each is a
+/// branch where the value in the agent's shell cannot be known for certain.
+const UNDECIDABLE: &[&str] = &[
+    "rm */*",
+    "rm $CLAUDE_CONFIG_DIR/*.json",
+    "rm $UNSET_HERE/*.json",
+    "cd /; rm $PWD/*.json",
+    // The payload's `cwd` is not proven to follow a `cd` from an earlier call.
+    "rm $PWD/*.json",
+    // `select` and `for NAME` with no `in` set the variable from input and
+    // from the positional parameters.
+    "select D in ~/.claude; do rm $D/*.json; done",
+    "for D; do rm $D/*.json; done",
+    // An inner loop over the same name leaves its last word behind.
+    "for D in /tmp; do for D in ~/.claude; do :; done; rm $D/*.json; done",
+    // An array assignment: `$D` is its first element.
+    "D=(~/.claude); rm $D/*.json",
+];
 
 #[test]
 fn too_many_alternatives_refuse_at_both_bounds() {

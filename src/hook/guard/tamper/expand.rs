@@ -55,8 +55,6 @@ pub(super) struct Scope<'a> {
     tainted: HashSet<String>,
     /// `eval`, `source` or `.` on the line: any variable may be anything.
     all_tainted: bool,
-    /// The line runs `cd`, `pushd` or `popd`, so `$PWD` is not the payload's.
-    cd: bool,
     env: &'a Environment,
 }
 
@@ -72,7 +70,6 @@ impl<'a> Scope<'a> {
             bindings: Vec::new(),
             tainted: HashSet::new(),
             all_tainted: false,
-            cd: false,
             env,
         };
         // NO ASSIGNMENT IS PROVEN on a line holding a heredoc or a `#`: the
@@ -103,6 +100,14 @@ impl<'a> Scope<'a> {
                     .get(at + 1)
                     .and_then(|(_, b)| b.first())
                     .map(String::as_str);
+                // `NAME=(…)` is an array assignment: the scanner reads an
+                // empty `NAME=` and then a `(`, and `$NAME` is the first
+                // element, which this does not read.
+                if after == Some("(") {
+                    if let Some((name, "")) = command.words.last().and_then(|w| assignment(w)) {
+                        scope.tainted.insert(name.to_string());
+                    }
+                }
                 let unconditional = !unprovable
                     && parens == 0
                     && nesting == 0
@@ -133,8 +138,9 @@ impl<'a> Scope<'a> {
     /// `typeset` / `local`, are assignments; a value there holding whitespace
     /// is split into its words, as an unquoted expansion of it would be. Any
     /// other `NAME=value` word may reach a shell too (`env D=… sh -c …`), so
-    /// it adds its value as well, unless it holds whitespace: then it is a
-    /// quoted argument, such as a whole `bash -c 'S=…; …'` script.
+    /// it adds its value as well; holding whitespace, it is a quoted argument
+    /// (a whole `bash -c 'S=…; …'` script, or `command export "D=a b"`), and
+    /// its name becomes unknown.
     fn note_assignments(&mut self, words: &[String], at: usize, unconditional: bool) {
         let declares = words.first().is_some_and(|w| {
             matches!(
@@ -143,14 +149,21 @@ impl<'a> Scope<'a> {
             )
         });
         let leading = words.iter().take_while(|w| assignment(w).is_some()).count();
+        // `local` is not proven: outside a function it fails, and the
+        // variable keeps the environment's value.
         let pure = leading == words.len()
-            || (declares && words[1..].iter().all(|w| assignment(w).is_some()));
+            || (declares
+                && words[0] != "local"
+                && words[1..].iter().all(|w| assignment(w).is_some()));
         for (i, word) in words.iter().enumerate() {
             let Some((name, value)) = assignment(word) else {
                 continue;
             };
             let in_place = i < leading || declares;
             if !in_place && value.contains(char::is_whitespace) {
+                // A quoted argument, or `command export "D=a b"`: what it
+                // sets, if anything, is not read here, so it is unknown.
+                self.tainted.insert(name.to_string());
                 continue;
             }
             let definite = unconditional && pure;
@@ -166,14 +179,17 @@ impl<'a> Scope<'a> {
         if matches!(first, "eval" | "source" | ".") {
             self.all_tainted = true;
         }
-        if matches!(first, "cd" | "pushd" | "popd") {
-            self.cd = true;
-        }
-        let writer = matches!(
-            first,
-            "read" | "mapfile" | "readarray" | "getopts" | "unset" | "printf" | "readonly"
-        ) || (matches!(first, "declare" | "typeset" | "local" | "export")
-            && words.iter().any(|w| w.starts_with('-')));
+        // `select` sets its variable from input, and `for NAME` with no `in`
+        // from the positional parameters.
+        let loop_from_elsewhere =
+            first == "select" || (first == "for" && words.get(2).is_none_or(|w| w != "in"));
+        let writer = loop_from_elsewhere
+            || matches!(
+                first,
+                "read" | "mapfile" | "readarray" | "getopts" | "unset" | "printf" | "readonly"
+            )
+            || (matches!(first, "declare" | "typeset" | "local" | "export")
+                && words.iter().any(|w| w.starts_with('-')));
         for word in words {
             if let Some((name, _)) = word.split_once("+=").filter(|(n, _)| is_name(n)) {
                 self.tainted.insert(name.to_string());
@@ -223,21 +239,15 @@ impl<'a> Scope<'a> {
         let tainted = self.all_tainted || self.tainted.contains(name);
         let mine: Vec<&Binding> = self.bindings.iter().filter(|b| b.name == name).collect();
         // Inside the body of a loop over it, the variable holds one of the
-        // loop's words, or a value assigned to it in the body before *at*.
+        // loop's words, or a value some assignment on the line gives it.
         let in_loop = mine
             .iter()
             .find(|b| matches!(b.kind, Kind::Loop { until: Some(u) } if b.at < at && at < u));
-        let known: Vec<&Binding> = match in_loop {
-            Some(lp) if !tainted => mine
-                .iter()
-                .copied()
-                .filter(|b| match b.kind {
-                    Kind::Loop { until } => b.at == lp.at && until.is_some(),
-                    Kind::Assign { .. } => lp.at < b.at && b.at < at,
-                })
-                .collect(),
-            _ => mine.clone(),
-        };
+        // Every value the line gives the name counts wherever it is set: a
+        // function defined before a loop and called in it assigns there, and
+        // an inner loop over the same name leaves its last word behind. A
+        // loop in force only removes the environment's value.
+        let known = mine.clone();
         let proven = !tainted
             && (in_loop.is_some()
                 || mine
@@ -253,7 +263,7 @@ impl<'a> Scope<'a> {
         if tainted {
             values.push(EXPANSION.to_string());
         } else if !proven {
-            match self.env.value(name, self.cd) {
+            match self.env.value(name) {
                 Some(value) => values.extend(pieces(&value).map(str::to_string)),
                 None => values.push(EXPANSION.to_string()),
             }
@@ -394,17 +404,13 @@ mod tests {
 
     #[test]
     fn a_variable_the_line_does_not_set_resolves_against_the_environment() {
-        let env = Environment::of(&[("SRC", "/tmp/a b")], Some("/w"));
+        let env = Environment::of(&[("SRC", "/tmp/a b"), ("PWD", "/w")]);
         assert_eq!(
             subst("cp $SRC/x y", &env, "$SRC/x", 0).unwrap(),
             ["/tmp/a/x", "b/x"]
         );
         assert_eq!(subst("rm $NOPE/x", &env, "$NOPE/x", 0).unwrap(), ["\0/x"]);
-        assert_eq!(subst("ls $PWD/x", &env, "$PWD/x", 0).unwrap(), ["/w/x"]);
-        assert_eq!(
-            subst("cd /; ls $PWD/x", &env, "$PWD/x", 1).unwrap(),
-            ["\0/x"]
-        );
+        assert_eq!(subst("ls $PWD/x", &env, "$PWD/x", 0).unwrap(), ["\0/x"]);
     }
 
     #[test]

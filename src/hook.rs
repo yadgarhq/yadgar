@@ -84,13 +84,13 @@ pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>) -> Decision {
         // gateway. The exceptions file is read here and nowhere else, so a
         // stale entry for any other name never opens it.
         "pre-tool-guard" => {
-            // The profile snapshots sit beside the exceptions file, in the
-            // agent client's own directory.
-            let snapshots = exceptions
-                .and_then(Path::parent)
+            // The profile snapshots sit in the agent client's own directory:
+            // `$CLAUDE_CONFIG_DIR` when set, else the exceptions file's.
+            let snapshots = std::env::var_os("CLAUDE_CONFIG_DIR")
+                .map(std::path::PathBuf::from)
+                .or_else(|| exceptions.and_then(Path::parent).map(Path::to_path_buf))
                 .map(|d| d.join("shell-snapshots"));
-            let cwd = payload.get("cwd").and_then(Value::as_str);
-            let env = Environment::from_process(snapshots.as_deref(), cwd);
+            let env = Environment::from_process(snapshots.as_deref());
             pre_tool_guard_in(payload, &Policy::load(exceptions), &env)
         }
 

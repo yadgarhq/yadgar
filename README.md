@@ -188,9 +188,8 @@ control character).
 pipx install yaadgaar
 ```
 
-Measured with `pipx install yaadgaar==0.1.2` on a fresh Debian VM. `pip install
-yaadgaar` installs the same wheel, which holds only the binary. To move to a
-newer release, `pipx install --force yaadgaar==<version>`.
+`pip install yaadgaar` installs the same wheel, which holds only the binary.
+To move to a newer release, `pipx install --force yaadgaar==<version>`.
 
 ## Getting started
 
@@ -240,9 +239,14 @@ newer release, `pipx install --force yaadgaar==<version>`.
    found walking up from it, otherwise the git `origin` remote reduced to
    `owner/repo`. With neither, no key is sent and the gateway refuses calls
    that need one; the client adds a reason to that refusal that names
-   `.yadgar/project-id`. A deployment that enforces project registration also
-   refuses a key it does not know, and this client has no command that
-   registers one.
+   `.yadgar/project-id`. A deployment whose gateway runs project validation in
+   enforcing mode also refuses a key that is not registered or that does not
+   resolve, and this client has no command that registers one. The client does
+   not check the key itself. It sends the key it found, and the gateway decides.
+   The refusal reaches the agent as a tool error that holds the gateway's own
+   message: `yadgar gateway answered <status>: <message>`. The client adds
+   nothing to that message when it did send a key. Ask the deployment's admin
+   to register the key, or write the registered key into `.yadgar/project-id`.
 
    ```bash
    mkdir -p .yadgar && printf '%s\n' 'owner/repo' > .yadgar/project-id

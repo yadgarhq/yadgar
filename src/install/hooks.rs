@@ -166,8 +166,13 @@ pub fn entry_commands(entry: &Value) -> Vec<&str> {
 /// hard assignment deletes both without a word. Strip only what yadgar owns,
 /// append fresh, leave the rest exactly where it was.
 ///
-/// Idempotent: a second install strips what the first one wrote and re-appends
-/// it, so re-running produces byte-identical output rather than duplicates.
+/// Idempotent, and positionally stable: our entry is replaced AT THE INDEX it
+/// already holds, so a second install writes back the same bytes. Removing it
+/// and appending moved it behind any foreign entry that followed it, which
+/// reordered the file under the other tool's feet. A first install appends. A
+/// stale duplicate of ours collapses into the first one's position. An event
+/// key we register is never removed and re-added either: that would move it to
+/// the end of the `hooks` object.
 ///
 /// Ours always goes into its OWN entry, even when a foreign entry already
 /// carries the same matcher. Do not "tidy" that by appending into the existing
@@ -178,16 +183,62 @@ pub fn merge(settings: &mut Value, binary: &Path) {
     let Some(hooks) = ensure_object(settings, HOOKS_KEY) else {
         return;
     };
-    strip_managed(hooks);
-    for spec in MANAGED_HOOKS {
-        let list = hooks.entry(spec.event).or_insert_with(|| json!([]));
+    // Events we still register are placed in situ below; every other event is a
+    // retired one, and stripping it is the migration off an older install.
+    let live: Vec<&str> = MANAGED_HOOKS.iter().map(|spec| spec.event).collect();
+    strip_managed(hooks, &live);
+    for event in live
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let list = hooks.entry(event).or_insert_with(|| json!([]));
         if !list.is_array() {
             *list = json!([]);
         }
+        let fresh = MANAGED_HOOKS
+            .iter()
+            .filter(|spec| spec.event == event)
+            .map(|spec| entry_for(binary, spec))
+            .collect();
         if let Some(array) = list.as_array_mut() {
-            array.push(entry_for(binary, spec));
+            place(array, fresh);
         }
     }
+}
+
+/// Put *fresh* where our first entry in *array* sits, or at the end if none.
+///
+/// Our hooks come out of every entry that holds one. An entry left empty by
+/// that goes; one still holding a foreign hook stays, and the fresh entries go
+/// after it, so no foreign entry changes index relative to another.
+fn place(array: &mut Vec<Value>, fresh: Vec<Value>) {
+    let mut kept = Vec::with_capacity(array.len() + fresh.len());
+    let mut at = None;
+    for mut entry in array.drain(..) {
+        let gone = strip_entry(&mut entry);
+        if gone == 0 || survives(&entry) {
+            kept.push(entry);
+        }
+        if gone > 0 && at.is_none() {
+            at = Some(kept.len());
+        }
+    }
+    let at = at.unwrap_or(kept.len());
+    kept.splice(at..at, fresh);
+    *array = kept;
+}
+
+/// Does this entry still hold a hook after ours came out of it?
+///
+/// Counted on the RAW `hooks` array, not on `entry_commands`: an http, prompt
+/// or agent hook has no `command`, and counting commands called an entry
+/// holding one of those empty and deleted it.
+fn survives(entry: &Value) -> bool {
+    entry
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|hooks| !hooks.is_empty())
 }
 
 /// Remove every managed hook entry; returns how many were removed.
@@ -202,7 +253,7 @@ pub fn strip(settings: &mut Value) -> usize {
     let Some(hooks) = settings.get_mut(HOOKS_KEY).and_then(Value::as_object_mut) else {
         return 0;
     };
-    strip_managed(hooks)
+    strip_managed(hooks, &[])
 }
 
 /// Strip yadgar's hooks from every event, dropping what ends up empty.
@@ -218,12 +269,17 @@ pub fn strip(settings: &mut Value) -> usize {
 /// as leaving the hooks themselves. A key that still holds foreign entries is
 /// never removed, because it is not empty.
 ///
+/// Events named in *except* are skipped: [`merge`] places those in situ.
+///
 /// Returns how many hooks were removed — hooks, not entries, because one
 /// registration is one hook and that is what the CLI reports.
-fn strip_managed(hooks: &mut serde_json::Map<String, Value>) -> usize {
+fn strip_managed(hooks: &mut serde_json::Map<String, Value>, except: &[&str]) -> usize {
     let mut removed = 0;
     let mut emptied = Vec::new();
     for (event, list) in hooks.iter_mut() {
+        if except.contains(&event.as_str()) {
+            continue;
+        }
         let Some(array) = list.as_array_mut() else {
             continue;
         };
@@ -231,15 +287,8 @@ fn strip_managed(hooks: &mut serde_json::Map<String, Value>) -> usize {
         array.retain_mut(|entry| {
             let gone = strip_entry(entry);
             removed += gone;
-            // Keep the entry unless we took the last thing in it. Counted on
-            // the RAW `hooks` array, not on `entry_commands`: an http, prompt
-            // or agent hook has no `command`, and counting commands called an
-            // entry holding one of those empty and deleted it.
-            gone == 0
-                || entry
-                    .get("hooks")
-                    .and_then(Value::as_array)
-                    .is_some_and(|hooks| !hooks.is_empty())
+            // Keep the entry unless we took the last thing in it.
+            gone == 0 || survives(entry)
         });
         if array.is_empty() && before > 0 {
             emptied.push(event.clone());

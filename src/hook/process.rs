@@ -36,6 +36,17 @@ pub fn hook_name(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<S
     Some(args.next()?.to_string_lossy().into_owned())
 }
 
+/// A DEBUG-BUILD FAULT for `tests/hook_exit.rs`: a panic in the hook's setup,
+/// before dispatch, must still exit 2 (ledger 1576 (d)). Called from
+/// `init_tracing`, the setup step. `debug_assertions` is off in every release
+/// build, so no shipped binary reads the variable.
+pub fn planted_setup_fault() {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("YAADGAAR_TEST_PANIC_IN_SETUP").is_some() {
+        panic!("planted panic in the hook's setup");
+    }
+}
+
 /// Run one hook handler and answer the agent client in the format it honours.
 ///
 /// EXITS rather than returns on a refusal, and the asymmetry is the point: a
@@ -70,9 +81,8 @@ fn decide(name: &str, init: impl FnOnce()) -> Decision {
 /// A panic left status 101 — a non-blocking error to Claude Code, so the tool
 /// RAN unchecked (ledger 1570). Reading stdin and the exceptions file happens
 /// inside *decide*, so a panic there refuses too. `catch_unwind` needs the
-/// default `panic = "unwind"`; a test pins that `Cargo.toml` never sets
-/// `abort`, under which this would catch nothing — the `compile_error!` above
-/// refuses to build that.
+/// default `panic = "unwind"`; under `abort` it would catch nothing, and the
+/// `compile_error!` above refuses to build that.
 ///
 /// SILENT: the default hook has already written `thread 'main' panicked at` to
 /// stderr by the time the unwind is caught, and on exit 2 Claude Code hands
@@ -138,28 +148,52 @@ mod tests {
         assert_eq!(contain_panic(|| Decision::Allow), Decision::Allow);
     }
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static NOISE: AtomicUsize = AtomicUsize::new(0);
+    /// Set in the child process only: it makes the test below plant the panic.
+    const CHILD: &str = "YAADGAAR_TEST_CONTAIN_PANIC_CHILD";
 
     #[test]
-    fn a_contained_panic_prints_nothing_and_the_previous_hook_comes_back() {
+    fn a_panic_does_not_reach_stderr_through_the_default_hook() {
         // Ledger 1576 (c): the default hook wrote `thread 'main' panicked at`
         // to stderr before the unwind was caught, and on exit 2 that line
         // reaches the model around the refusal reason.
+        //
+        // A CHILD PROCESS, because only a real stderr shows what the default
+        // hook prints: the test harness captures a panic message in-process.
+        if std::env::var_os(CHILD).is_some() {
+            assert!(matches!(
+                contain_panic(|| panic!("x")),
+                Decision::Deny(r) if r.contains("(x)")
+            ));
+            return;
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+                "hook::process::tests::a_panic_does_not_reach_stderr_through_the_default_hook",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "the child failed: {out:?}");
+        assert!(!stderr.contains("panicked at"), "{stderr}");
+    }
+
+    #[test]
+    fn the_previous_hook_comes_back_after_a_contained_panic() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SEEN: AtomicUsize = AtomicUsize::new(0);
         let _held = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let outer = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {
-            NOISE.fetch_add(1, Ordering::SeqCst);
+            SEEN.fetch_add(1, Ordering::SeqCst);
         }));
-        let denied = contain_panic_locked(|| panic!("planted"));
-        let during = NOISE.load(Ordering::SeqCst);
+        let _ = contain_panic_locked(|| panic!("planted"));
         let _ = std::panic::catch_unwind(|| panic!("outside the guard"));
-        let after = NOISE.load(Ordering::SeqCst);
         std::panic::set_hook(outer);
-        assert!(matches!(denied, Decision::Deny(_)));
-        assert_eq!(during, 0, "the hook ran for a contained panic");
-        assert_eq!(after, 1, "the previous hook was not restored");
+        assert_eq!(SEEN.load(Ordering::SeqCst), 1, "hook not restored");
     }
 
     #[test]

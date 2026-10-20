@@ -298,8 +298,8 @@ async fn real_main() -> anyhow::Result<()> {
             Ok(())
         }
 
-        // Normally unreachable: `main` takes `hook <name>` before clap. A `hook`
-        // that reaches here lacks its name, and clap refused it already.
+        // Unreachable in practice: `main` takes `hook <name>` before clap, and
+        // a `hook` with no name is a clap usage error that exits 2.
         Command::Hook { name } => hook::process::run(&name, || ()),
         Command::Admin { command } => Ok(admin::run(command).await?),
         Command::Whoami => Ok(whoami::run().await?),
@@ -353,6 +353,7 @@ fn blob_source(
 /// frame the agent cannot parse, and the failure looks like a broken protocol
 /// rather than a misdirected logger.
 fn init_tracing(ansi: bool) {
+    hook::process::planted_setup_fault();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

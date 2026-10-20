@@ -1,11 +1,10 @@
 //! The two narrow relaxations of the exceptions-file check (ledger 1701).
 //!
 //! Everything else is checked exactly as before this change. A relaxation
-//! applies only to a line whose every command is on a short list of
-//! commands that run no code from a file and set no shell variable; any
-//! other command, operator or expansion leaves the line to the old check.
-//! The one assumption: a command on that list is the program its name says,
-//! and not a shell function from the user's profile.
+//! applies only to a line whose every command is on a short list; any other
+//! command, operator or expansion leaves the line to the old check. The one
+//! assumption: a command on a list is the program its name says, and not a
+//! shell function from the user's profile.
 //!
 //! * [`data_heredocs_removed`]: the body of a `cat > FILE <<'EOF'` heredoc,
 //!   whose delimiter is QUOTED, is data written to a file; the shell expands
@@ -23,36 +22,35 @@ use std::collections::{HashMap, HashSet};
 use super::MAX_ALTERNATIVES;
 use crate::install::shellword::{shell_commands_with_separators, SimpleCommand};
 
-/// Commands that run no code from a file and set no shell variable.
-const PLAIN: &[&str] = &[
-    "cd",
-    "mkdir",
-    "ls",
-    "wc",
-    "cat",
-    "head",
-    "tail",
-    "cut",
-    "basename",
-    "dirname",
-    "echo",
-    "sort",
-    "uniq",
-    "true",
-    "git",
-    "gh",
-    "gh-personal",
+/// Commands with no option that executes a program or reads one by path, as
+/// checked one by one: `mkdir`, `ls`, `wc` (`--files0-from` reads a file
+/// list but runs nothing), `cat`, `head`, `tail`, `cut`, `basename`,
+/// `dirname`, `echo`, `true`. `sort` (`-o` writes) and `uniq` (second
+/// operand writes) are deliberately absent. `cd` is here for the data-heredoc
+/// line, which runs no substitution, but NOT for the literal relaxation,
+/// where it would move `$PWD`. `git` and `gh` are handled apart.
+const PLAIN_HEREDOC: &[&str] = &[
+    "cd", "mkdir", "ls", "wc", "cat", "head", "tail", "cut", "basename", "dirname", "echo", "true",
 ];
 
-/// `git` options that change which code it runs, or where its hooks live.
-const GIT_RUNS_OTHER_CODE: &[&str] = &[
-    "-c",
-    "-C",
-    "--exec-path",
-    "--config-env",
-    "--git-dir",
-    "--work-tree",
+/// The same, less `cd`: the literal relaxation reads `$PWD`, so a `cd` would
+/// change a value it may resolve.
+const PLAIN_LITERAL: &[&str] = &[
+    "mkdir", "ls", "wc", "cat", "head", "tail", "cut", "basename", "dirname", "echo", "true",
 ];
+
+/// The `git` subcommands a data-heredoc line may run: each reads or writes
+/// the repository and runs no arbitrary program. `rebase --exec`,
+/// `difftool`/`mergetool`, `filter-branch`, `bisect run`, `submodule` and
+/// the like are absent, as is any `-c`/`-C`/`--exec*`/`--git-dir`/GIT_* that
+/// redirects what runs.
+const GIT_SUBCOMMANDS: &[&str] = &[
+    "fetch", "push", "status", "rev-list", "log", "diff", "show", "add", "commit", "checkout",
+    "switch", "branch",
+];
+
+/// The `gh pr` verbs a data-heredoc line may run.
+const GH_PR_VERBS: &[&str] = &["create", "edit", "comment"];
 
 /// *line* with the bodies of its data heredocs removed, or `None` when it
 /// holds no heredoc, a heredoc that is not data, or a command that could run
@@ -112,10 +110,24 @@ fn heredoc_delimiter(text: &str) -> Option<Option<String>> {
         [_] => {}
         _ => return None,
     }
+    // `<<-` strips leading tabs and is not modelled.
+    if text[ops[0] + 2..].starts_with('-') {
+        return None;
+    }
     let rest = text[ops[0] + 2..].trim_start();
     let quote = rest.chars().next().filter(|c| matches!(c, '\'' | '"'))?;
     let end = rest[1..].find(quote)? + 1;
     let delimiter = &rest[1..end];
+    // The word ends at the closing quote: `<<"E"OF` is the delimiter `EOF`,
+    // not `E`, so anything but whitespace, end or a redirect after the quote
+    // means this is not a quoted-delimiter heredoc the guard can read.
+    if rest[end + 1..]
+        .chars()
+        .next()
+        .is_some_and(|c| !c.is_whitespace() && c != '<' && c != '>')
+    {
+        return None;
+    }
     if delimiter.is_empty()
         || !delimiter
             .chars()
@@ -143,24 +155,40 @@ fn heredoc_line_command(command: &SimpleCommand) -> bool {
         // `2>&1` scans as a word, a redirect, a separator and a word.
         None => true,
         Some(w) if w.chars().all(|c| c.is_ascii_digit()) => words.len() == 1,
-        Some(&"git") => !words.iter().any(|w| {
-            GIT_RUNS_OTHER_CODE
-                .iter()
-                .any(|o| w == o || (o.starts_with("--") && w.starts_with(o)))
-        }),
-        Some(&("gh" | "gh-personal")) => words.get(1) == Some(&"pr"),
-        Some(first) => PLAIN.contains(first),
+        Some(&"git") => git_is_safe(&words[1..]),
+        Some(&("gh" | "gh-personal")) => {
+            words.get(1) == Some(&"pr") && words.get(2).is_some_and(|v| GH_PR_VERBS.contains(v))
+        }
+        Some(first) => PLAIN_HEREDOC.contains(first),
     }
 }
 
-/// Whether *c* may appear in a line the literal relaxation reads (its `$(…)`
-/// spans already masked): letters, digits, space, newline, and the few
-/// punctuation marks the shape uses. No quote, backslash, glob, operator or
-/// subshell bracket.
+/// Whether a `git` invocation (its words after `git`) is a plain repository
+/// command: no option that redirects what runs, and its first non-option
+/// word is an allowlisted subcommand.
+fn git_is_safe(args: &[&str]) -> bool {
+    let no_redirect = !args.iter().any(|w| {
+        matches!(*w, "-c" | "-C" | "-x")
+            || w.starts_with("--exec")
+            || w.starts_with("--git-dir")
+            || w.starts_with("--work-tree")
+            || w.starts_with("--config-env")
+            || w.starts_with("--namespace")
+            || w.starts_with("GIT_")
+    });
+    let subcommand = args.iter().find(|w| !w.starts_with('-'));
+    no_redirect && subcommand.is_some_and(|w| GIT_SUBCOMMANDS.contains(w))
+}
+
+/// Whether *c* may appear in a line the literal relaxation reads: letters,
+/// digits, space, newline, the path punctuation `_./=:@,+-`, and the few
+/// operators the shape needs — `;` and `|` to separate commands, `>` to
+/// redirect, and the `$ { }` of a reference. No quote, backslash, backtick,
+/// glob (`* ? [ ]`), `&`, `(` / `)`, `<`, `~`, `!`, `#`, tab or non-ASCII:
+/// each could make a dangerous line parse unlike how this reads it. `|` is
+/// allowed because each pipe stage is a subshell that sets no variable and
+/// whose command is still checked.
 fn is_conservative(c: char) -> bool {
-    // `|` is allowed: each pipe stage is a subshell, so it sets no variable
-    // in the line's shell, and its command is still checked. `&` is not: it
-    // backgrounds or (as `&&`) is an operator the proving does not model.
     c.is_ascii_alphanumeric() || " \n_./=:@,+-;|${}>".contains(c)
 }
 
@@ -171,29 +199,23 @@ pub(super) struct Literals {
 }
 
 impl Literals {
-    /// The proven literal variables of *line*: none at all unless every
-    /// command outside its `$(…)` spans is [`PLAIN`], `python3`, a `for`
-    /// loop or a literal assignment, and the line holds no heredoc, `#`,
-    /// backtick or process substitution.
+    /// The proven literal variables of *line*: none at all unless the line
+    /// passes the conservative charset gate (so it holds no `$(…)`, backtick,
+    /// quote or heredoc) and every command is a [`PLAIN_LITERAL`] command, a
+    /// `for` loop, or a literal assignment.
     pub(super) fn of(line: &str) -> Self {
         let none = Self {
             values: HashMap::new(),
         };
-        if line.contains("<<") || line.contains('#') || line.contains('`') {
+        // CONSERVATIVE CHARSET over the WHOLE raw command. A quote, a
+        // backslash, a glob, a brace, a `(` or `)`, an operator, `<`/`>`,
+        // `~`, `!`, `#`, tab or non-ASCII byte leaves the whole line to
+        // `main`. `$(…)` and backticks hold a `(` or a backtick, so a span —
+        // and any assignment inside one — can never appear here.
+        if line.contains("<<") || line.chars().any(|c| !is_conservative(c)) {
             return none;
         }
-        let Some(masked) = mask_substitutions(line) else {
-            return none;
-        };
-        // CONSERVATIVE CHARSET. With its `$(…)` spans masked, the line may
-        // hold only this set: a parser differential over a quote, a
-        // backslash, a glob, a brace or an operator this does not model
-        // cannot then make a dangerous line look like a safe one. Anything
-        // else leaves the whole line to the check on `main`.
-        if masked.chars().any(|c| !is_conservative(c)) {
-            return none;
-        }
-        let commands = shell_commands_with_separators(&masked);
+        let commands = shell_commands_with_separators(line);
         if !commands.iter().all(|(c, _)| literal_line_command(c)) {
             return none;
         }
@@ -238,7 +260,12 @@ impl Literals {
             }
             nesting += i32::from(first == Some("for")) - i32::from(first == Some("done"));
         }
-        values.retain(|name, _| !disproven.contains(name) && assigned_before_read(line, name));
+        // A3: names the shell maintains itself never resolve.
+        values.retain(|name, _| {
+            !SHELL_MAINTAINED.contains(&name.as_str())
+                && !disproven.contains(name)
+                && assigned_before_read(line, name)
+        });
         Self { values }
     }
 
@@ -299,47 +326,15 @@ fn literal_line_command(command: &SimpleCommand) -> bool {
         return true;
     };
     words.iter().all(|w| literal_assignment(w).is_some())
-        || matches!(first.as_str(), "for" | "done" | "python3")
-        || PLAIN.contains(&first.as_str())
+        || matches!(first.as_str(), "for" | "done")
+        || PLAIN_LITERAL.contains(&first.as_str())
 }
 
-/// *line* with each `$(…)` replaced by `$__span__`, a reference to no
-/// variable: its commands run in a subshell, which sets nothing in the
-/// line's shell. `None` when a span does not close.
-fn mask_substitutions(line: &str) -> Option<String> {
-    let c: Vec<char> = line.chars().collect();
-    let mut out = String::new();
-    let mut i = 0;
-    let mut single = false;
-    while i < c.len() {
-        if c[i] == '\'' {
-            single = !single;
-        }
-        if !single && c[i] == '$' && c.get(i + 1) == Some(&'(') {
-            let mut depth = 0;
-            let mut j = i + 1;
-            loop {
-                match c.get(j)? {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                j += 1;
-            }
-            out.push_str("$__span__");
-            i = j + 1;
-            continue;
-        }
-        out.push(c[i]);
-        i += 1;
-    }
-    Some(out)
-}
+/// Names bash and zsh maintain themselves, so an assignment on the line does
+/// not fix their value where it is read.
+const SHELL_MAINTAINED: &[&str] = &[
+    "_", "PWD", "OLDPWD", "SHLVL", "IFS", "RANDOM", "SECONDS", "LINENO", "REPLY", "PATH", "HOME",
+];
 
 /// The NAME and value of a `NAME=value` word whose value is a plain literal
 /// path: no expansion, glob, quote, tilde or space.
@@ -472,6 +467,10 @@ mod tests {
             Some("cat > /tmp/b.md <<'EOF'\ngh pr create --body-file /tmp/b.md")
         );
         for line in [
+            // M11: an unquoted delimiter; M12: a dot directory; `<<-`.
+            "cat > /tmp/b.md <<EOF\nx\nEOF",
+            "cat > /tmp/.h/x.md <<'EOF'\nx\nEOF",
+            "cat > /tmp/b.md <<-'EOF'\nx\nEOF",
             "cat > /tmp/b <<EOF\nx\nEOF",
             "bash <<'EOF'\nx\nEOF",
             "cat > /tmp/b.sh <<'EOF'\nx\nEOF\nbash /tmp/b.sh",

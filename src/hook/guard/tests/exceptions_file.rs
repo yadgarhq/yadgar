@@ -138,6 +138,54 @@ const MUST_BE_DENIED: &[&str] = &[
 /// Security review of this change: each one was refused before it, and a
 /// first version of it let each through.
 const BYPASSES: &[&str] = &[
+    // Fourth review. Each spells the file's name with a brace list, so only
+    // the matcher, and not the line-text check, can refuse it.
+    // A1: an assignment inside `$(…)` is never proven, and the charset gate
+    // covers span contents.
+    "S=/tmp/s; X=$( S=/home/u/.claude; rm $S/* ); echo x > $S/yadgar-hook-{exceptions,z}.json",
+    "S=/tmp/s; X=$( S=/home/u/.claude ); echo x > $S/yadgar-hook-{exceptions,z}.json",
+    // A2: text after a heredoc's closing quote is part of the delimiter.
+    "cat > /tmp/b.md <<\"E\"OF\nx\nEOF\nrm ~/.c*/y*\nE",
+    "cat > /tmp/b.md <<'E'OF\nx\nEOF\nrm ~/.c*/y*\nE",
+    // A3: names the shell maintains itself.
+    "_=/tmp; echo /home/u/.claude; echo x > $_/yadgar-hook-{exceptions,z}.json",
+    "PWD=/tmp; echo x > $PWD/yadgar-hook-{exceptions,z}.json",
+    "OLDPWD=/tmp; echo x > $OLDPWD/yadgar-hook-{exceptions,z}.json",
+    "S=/tmp; cd /home/u/.claude; echo x > $S/../.claude/yadgar-hook-{exceptions,z}.json",
+    // A4: a git subcommand outside the allowlist on a data-heredoc line.
+    "cat > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF\ngit rebase --exec 'bash /tmp/b.md' HEAD~1",
+    "cat > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF\ngit difftool -x 'bash /tmp/b.md'",
+    // A git subcommand off the allowlist with no redirect flag (submodule,
+    // bisect run, filter-branch all run arbitrary code).
+    "cat > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF\ngit submodule foreach bash /tmp/b.md",
+    "cat > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF\ngit bisect run bash /tmp/b.md",
+    "cat > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF\ngit -c core.pager='bash /tmp/b.md' log",
+    // A5: `sort` and `uniq` are off the list; gh only creates, edits or
+    // comments on a PR.
+    "S=/tmp; sort -o $S/x $S/yadgar-hook-{exceptions,z}.json",
+    "cat > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF\ngh pr view",
+    // Mutation killers.
+    "D=/home/u/.claude; echo x > $D/yadgar-hook-{exceptions,z}.json",
+    "ls | S=/tmp; echo x > $S/yadgar-hook-{exceptions,z}.json",
+    "for n in; do S=/tmp; done; echo x > $S/yadgar-hook-{exceptions,z}.json",
+    "cat > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF\nbash /tmp/b.md",
+    "cat > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF\necho `bash /tmp/b.md`",
+    "bash > /tmp/o.md <<'EOF'\nrm ~/.c*/y*\nEOF",
+    "bash <<'A'; cat > /tmp/b.md <<'B'\nrm ~/.c*/y*\nA\nB",
+    "cat > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF\ngit -c 'core.pager=bash /tmp/b.md' log",
+    "rm ~/{\"x /.claude\",z}/y*.json",
+    // Mutation killers needing a glob leaf under a wrongly-proven safe dir
+    // (the exact-name cases above cannot catch a mis-proof of the directory).
+    // M6: a `for` variable also assigned as a literal is still disproven.
+    "S=/tmp; for S in a b; do :; done; rm $S/y*.json",
+    // M22: an assignment inside a loop body is not proven.
+    "for n in a; do S=/tmp; done; rm $S/y*.json",
+    // M11: an unquoted-delimiter heredoc body is read as commands.
+    "cat > /tmp/b.md <<EOF\nrm ~/.c*/y*\nEOF",
+    // M16: only `cat` writes a heredoc body verbatim; another command does not.
+    "wc > /tmp/b.md <<'EOF'\nrm ~/.c*/y*\nEOF",
+    // M17: a second heredoc on the line is not modelled.
+    "cat > /tmp/a.md <<'EOF'\nx\nEOF\ncat <<EOF2\nrm ~/.c*/y*\nEOF2",
     // A bracket class that matches `.claude` and also a one-letter name.
     "rm ~/[.0]*/y*.json",
     "rm ~/[!x]*/y*.json",
@@ -211,8 +259,8 @@ const BYPASSES: &[&str] = &[
     // dotglob, and a `cd` that changes `$PWD`.
     "rm ~/[!y]*/*.json",
     "cd ~/.cl?ude; rm $PWD/*.json",
-    // Variables the line does not set: with no environment to resolve them
-    // against (these tests give the guard none), they refuse.
+    // Variables the line does not set are unknown (read as `*`), so a path
+    // built from them refuses.
     "rm $D/$f",
     "rm $D/*.json",
     "rm */*",

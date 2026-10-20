@@ -34,9 +34,10 @@
 //! `$NAME` for a variable set only by literal top-level assignments before
 //! its first use. Separately, brace-list items holding whitespace collapse
 //! into one, which changes no answer (see [`first_brace_list`]) but keeps
-//! heredoc code under the alternatives bound. Two cases are refused that
-//! were not: an unquoted `$(…)` whose output starts a path (`rm
-//! $(echo ~/.claude)/y*`).
+//! heredoc code under the alternatives bound. One case is refused that was
+//! not: an unquoted `$(…)` whose output starts a path, whether as an
+//! argument (`rm $(echo ~/.claude)/y*`) or a redirect target
+//! (`echo x > $(echo ~/.claude)/y*`).
 //!
 //! `Edit`, `Write` and `NotebookEdit` on the file's path are exact.
 

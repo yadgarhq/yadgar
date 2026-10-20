@@ -4,6 +4,7 @@ use super::*;
 use serde_json::json;
 
 mod disabled;
+mod exceptions_file;
 
 /// The guard with every refusal on: what a machine with no exceptions file gets.
 fn guard(call: &Value) -> Decision {

@@ -26,10 +26,25 @@
 //! * a link made with one name and written through another (`ln -s` then an
 //!   `Edit` of the link).
 //!
+//! **TWO RELAXATIONS, AND ONLY TWO** (ledger 1701, ADR-0969). The check
+//! below refused agents' ordinary commands. Two shapes are relaxed, each
+//! under conditions in `tamper/allow.rs` that fall back to this check on
+//! anything else: the body of a quoted-delimiter heredoc written by `cat`
+//! to a plain file, on a line that runs nothing that could execute it; and
+//! `$NAME` for a variable set only by literal top-level assignments before
+//! its first use. Separately, brace-list items holding whitespace collapse
+//! into one, which changes no answer (see [`first_brace_list`]) but keeps
+//! heredoc code under the alternatives bound. One case is refused that was
+//! not: an unquoted `$(…)` whose output starts a path, whether as an
+//! argument (`rm $(echo ~/.claude)/y*`) or a redirect target
+//! (`echo x > $(echo ~/.claude)/y*`).
+//!
 //! `Edit`, `Write` and `NotebookEdit` on the file's path are exact.
 
 use crate::hook::EXCEPTIONS_FILE;
-use crate::install::shellword::SimpleCommand;
+use crate::install::shellword::{shell_commands, SimpleCommand};
+
+mod allow;
 
 /// Whether *line* names the exceptions file, or may expand into it.
 ///
@@ -40,13 +55,44 @@ use crate::install::shellword::SimpleCommand;
 /// target is checked for a shell expansion that may produce it (see
 /// [`may_be_the_exceptions_file`]).
 pub(super) fn names_the_exceptions_file(line: &str, commands: &[SimpleCommand]) -> bool {
-    line_names_the_file(line)
-        || commands.iter().any(|c| {
-            c.words
-                .iter()
-                .chain(&c.writes_to)
-                .any(|w| may_be_the_exceptions_file(w))
-        })
+    if line_names_the_file(line) {
+        return true;
+    }
+    // RELAXATION 1: a data heredoc's body is not commands.
+    let stripped = allow::data_heredocs_removed(line);
+    let scanned;
+    let (line, commands) = match &stripped {
+        Some(stripped) => {
+            scanned = shell_commands(stripped);
+            (stripped.as_str(), scanned.as_slice())
+        }
+        None => (line, commands),
+    };
+    // RELAXATION 2: a proven literal variable is its literal.
+    let literals = allow::Literals::of(line);
+    // `$(…)/y*` unquoted: the scanner ends one command at `$`, scans the
+    // substitution as commands of its own, and starts another with `/y*`,
+    // which begins with the substitution's output. After a word ending in
+    // `$`, the first word of every later command is read as `*` + word.
+    let mut after_substitution = false;
+    for c in commands {
+        for (n, w) in c.words.iter().chain(&c.writes_to).enumerate() {
+            let word = if n == 0 && after_substitution {
+                format!("*{w}")
+            } else {
+                w.clone()
+            };
+            let Some(alternatives) = literals.substitute(&word) else {
+                // Too many values to check: refuse rather than guess.
+                return true;
+            };
+            if alternatives.iter().any(|a| may_be_the_exceptions_file(a)) {
+                return true;
+            }
+        }
+        after_substitution |= c.words.iter().chain(&c.writes_to).any(|w| w.ends_with('$'));
+    }
+    false
 }
 
 /// Whether the file's name appears in *line*, quotes and backslashes removed,
@@ -139,7 +185,7 @@ fn first_brace_list(word: &str) -> Option<(usize, usize, Vec<String>)> {
                             break; // `{x}` with no comma is not a list.
                         }
                         items.push(word[start..i].to_string());
-                        return Some((open, i, items));
+                        return Some((open, i, one_spaced_item(items)));
                     }
                 }
                 b',' if depth == 1 => {
@@ -207,6 +253,31 @@ fn closing(chars: &[char], open: usize, left: char, right: char) -> usize {
         }
     }
     chars.len()
+}
+
+/// *items* with every item that holds whitespace and no `/` replaced by
+/// ONE `" "` item.
+///
+/// THIS CHANGES NO ANSWER. Such an item lands inside one path component,
+/// and a component holding whitespace can match neither `.claude` nor the
+/// file name, whatever else it holds; so every such item gives the same
+/// answer as `" "`. What it changes is the count: Python and Rust in a
+/// heredoc body are full of `{a, b}`, and expanding each multiplied the
+/// alternatives past the bound, which refuses.
+fn one_spaced_item(items: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut spaced = false;
+    for item in items {
+        if item.contains(char::is_whitespace) && !item.contains(['/', '\\']) {
+            if !spaced {
+                out.push(" ".to_string());
+                spaced = true;
+            }
+        } else {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// Whether glob *pattern* (`*`, `?`, `[…]`, `[!…]`) matches *name*, ignoring
@@ -319,6 +390,12 @@ mod tests {
         );
         assert_eq!(brace_expand("{x}").unwrap(), ["{x}"]);
         assert!(brace_expand(&"{a,b}".repeat(10)).is_none());
+        assert_eq!(
+            brace_expand("{a b,c d,e}").unwrap().len(),
+            2,
+            "items holding whitespace collapse into one"
+        );
+        assert!(brace_expand(&"{ a, b}".repeat(10)).is_some());
     }
 
     #[test]

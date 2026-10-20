@@ -54,7 +54,6 @@ use crate::install::shellword::{shell_commands, SimpleCommand};
 mod runs;
 mod tamper;
 use runs::{executed, substitutions, value_of, SHELLS};
-pub use tamper::env::Environment;
 use tamper::{is_the_exceptions_file, names_the_exceptions_file};
 
 /// Refuse a tool call that the standing rules forbid.
@@ -63,19 +62,7 @@ use tamper::{is_the_exceptions_file, names_the_exceptions_file};
 /// an agent once used Edit rather than Bash to add itself to the push
 /// allowlist, pushed to master, then reverted the file to conceal it — and a
 /// Bash-only matcher never even routed the call to the guard.
-///
-/// Every variable a Bash line does not set is UNKNOWN here; [`run`] passes
-/// the hook's real environment through [`pre_tool_guard_in`].
-///
-/// [`run`]: crate::hook::run
-#[cfg(test)]
 pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
-    pre_tool_guard_in(payload, policy, &Environment::unknown())
-}
-
-/// [`pre_tool_guard`], looking up a variable a Bash line does not set in
-/// *env* (see `guard/tamper/env.rs`).
-pub fn pre_tool_guard_in(payload: &Value, policy: &Policy, env: &Environment) -> Decision {
     // A PAYLOAD OF THE WRONG SHAPE REFUSES (ledger 1589). It used to read as
     // tool "" with command "", which allows: JSON that is not a tool call is a
     // call the guard cannot judge, exactly like JSON that does not parse.
@@ -98,7 +85,7 @@ pub fn pre_tool_guard_in(payload: &Value, policy: &Policy, env: &Environment) ->
         // TOO LONG TO CHECK QUICKLY refuses: a hook that times out is no
         // decision at all, so the call would run unchecked.
         "Bash" if field("command").len() > MAX_COMMAND_BYTES => Decision::Deny(TOO_LONG.into()),
-        "Bash" => bash(&field("command"), 0, policy, env),
+        "Bash" => bash(&field("command"), 0, policy),
 
         // ONLY THE PATH. An edit executes nothing, so its CONTENT is text a
         // person wrote and not a command anybody ran. Reading the content is
@@ -154,7 +141,7 @@ fn env_split_string(words: &[String]) -> Option<&str> {
 /// refuses on the whole line's text.
 const MAX_NESTING: usize = 2; // ADR-0569-EXCEPTION(CB): bound on recursive -c unwrapping, not a per-install knob.
 
-fn bash(line: &str, depth: usize, policy: &Policy, env: &Environment) -> Decision {
+fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
     // A BACKSLASH-NEWLINE IS A LINE CONTINUATION: the shell deletes the pair
     // before it reads words, so `exc\<newline>eptions` is one word. Removed
     // here, before any check reads the line.
@@ -167,12 +154,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &Environment) -> Decisio
     // denylist cannot safely let through a command that names the file:
     // every allowance (a `cp` from it, a read with `cat`) was a parsing
     // question the shell could answer differently. See `tamper.rs`.
-    // A NESTED LINE (`sh -c`, `eval`, a substitution) resolves nothing: its
-    // variables may come from the line around it, `$0` and `$1` from that
-    // line's arguments, none of which this level sees.
-    let unknown = Environment::unknown();
-    let env = if depth == 0 { env } else { &unknown };
-    if policy.hook_config_tamper && names_the_exceptions_file(line, env) {
+    if policy.hook_config_tamper && names_the_exceptions_file(line, &commands) {
         return Decision::Deny(EXCEPTIONS.into());
     }
 
@@ -190,7 +172,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &Environment) -> Decisio
     // 1590 change): `echo "$(cp x ~/.claude/<file>)"` writes the file.
     if depth < MAX_NESTING {
         for inner in &inner {
-            if let Decision::Deny(reason) = bash(inner, depth + 1, policy, env) {
+            if let Decision::Deny(reason) = bash(inner, depth + 1, policy) {
                 return Decision::Deny(reason);
             }
         }
@@ -201,7 +183,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &Environment) -> Decisio
         // program at all, and used to be skipped as allowed.
         if depth < MAX_NESTING {
             if let Some(split) = env_split_string(&command.words) {
-                if let Decision::Deny(reason) = bash(split, depth + 1, policy, env) {
+                if let Decision::Deny(reason) = bash(split, depth + 1, policy) {
                     return Decision::Deny(reason);
                 }
             }
@@ -218,7 +200,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &Environment) -> Decisio
         // `eval` runs its arguments as a line, exactly as `sh -c` runs its
         // script.
         if program == "eval" && depth < MAX_NESTING {
-            if let Decision::Deny(reason) = bash(&args.join(" "), depth + 1, policy, env) {
+            if let Decision::Deny(reason) = bash(&args.join(" "), depth + 1, policy) {
                 return Decision::Deny(reason);
             }
         }
@@ -226,7 +208,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &Environment) -> Decisio
         // what runs, and `sh -c 'terraform apply'` runs terraform.
         if SHELLS.contains(&program) && depth < MAX_NESTING {
             if let Some(script) = value_of(args, "-c") {
-                if let Decision::Deny(reason) = bash(script, depth + 1, policy, env) {
+                if let Decision::Deny(reason) = bash(script, depth + 1, policy) {
                     return Decision::Deny(reason);
                 }
             }

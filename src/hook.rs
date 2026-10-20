@@ -51,7 +51,7 @@ mod guard;
 mod policy;
 pub mod process;
 
-use guard::{pre_tool_guard_in, Environment};
+pub use guard::pre_tool_guard;
 pub use policy::{Policy, EXCEPTIONS_FILE};
 
 /// The exit status a positively matched refusal leaves.
@@ -83,16 +83,7 @@ pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>) -> Decision {
         // inspects the command it was handed and needs nothing from the
         // gateway. The exceptions file is read here and nowhere else, so a
         // stale entry for any other name never opens it.
-        "pre-tool-guard" => {
-            // The profile snapshots sit in the agent client's own directory:
-            // `$CLAUDE_CONFIG_DIR` when set, else the exceptions file's.
-            let snapshots = std::env::var_os("CLAUDE_CONFIG_DIR")
-                .map(std::path::PathBuf::from)
-                .or_else(|| exceptions.and_then(Path::parent).map(Path::to_path_buf))
-                .map(|d| d.join("shell-snapshots"));
-            let env = Environment::from_process(snapshots.as_deref());
-            pre_tool_guard_in(payload, &Policy::load(exceptions), &env)
-        }
+        "pre-tool-guard" => pre_tool_guard(payload, &Policy::load(exceptions)),
 
         // Any other name is an entry an older install left behind: up to 0.1.4
         // `install` registered eleven more handlers, all of them inert, and they

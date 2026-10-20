@@ -12,48 +12,40 @@
 //! of a write costs the decision file the guard exists to protect. So any
 //! command whose text names the file refuses. Read it with the Read tool.
 //!
-//! **NO WEAKENING** (ADR-0969): a change here must refuse every command the
-//! check before it refused. Each step below only REPLACES an approximation
-//! of the old check with an exact answer, or keeps the approximation:
-//!
-//! * a `$NAME` the old check read as `*` now takes the values it can hold
-//!   (`expand.rs`, `env.rs`); any value nobody can know is still `*`;
-//! * a backtick or `$(…)` span is one `*` before the word is cut at `/`;
-//! * a brace list drops only items holding whitespace, which can be neither
-//!   `.claude` nor the file name.
-//!
-//! The path rule itself is unchanged: some component before the leaf can
-//! match `.claude` and the leaf can match the file. A `*` there can match a
-//! leading dot, because `dotglob` and a program's own globbing (`find
-//! -path`) can, and any component counts, because one between `.claude` and
-//! the leaf can be a link back to `.claude`.
-//!
 //! **WHAT A TEXT CHECK CANNOT SEE**, stated rather than implied. A command can
 //! reach the file without its name, or a glob that can match it under
 //! `.claude`, ever appearing on the line:
 //!
-//! * a name built by `printf`, `base64 -d`, `rev`, `tr` or `xxd` and piped
-//!   to `sh`, or by string concatenation inside an interpreter;
+//! * a path built in the same call: `D=~/.claude; f=yadgar; rm $D/$f*` is
+//!   caught only while a component can still match `.claude`; a name built by
+//!   `printf`, `base64 -d`, `rev`, `tr` or `xxd` and piped to `sh`, or by
+//!   string concatenation inside an interpreter, is not;
 //! * a command that acts on the directory rather than the name:
 //!   `cd ~/.claude && rm y*`, `rm -rf ~/.claude/`, `tar -x -C ~/.claude`,
 //!   `find ~/.claude -name 'y*' -delete`;
 //! * a link made with one name and written through another (`ln -s` then an
 //!   `Edit` of the link).
 //!
+//! **TWO RELAXATIONS, AND ONLY TWO** (ledger 1701, ADR-0969). The check
+//! below refused agents' ordinary commands. Two shapes are relaxed, each
+//! under conditions in `tamper/allow.rs` that fall back to this check on
+//! anything else: the body of a quoted-delimiter heredoc written by `cat`
+//! to a plain file, on a line that runs nothing that could execute it; and
+//! `$NAME` for a variable set only by literal top-level assignments before
+//! its first use. Separately, brace-list items holding whitespace collapse
+//! into one, which changes no answer (see [`first_brace_list`]) but keeps
+//! heredoc code under the alternatives bound. Two cases are refused that
+//! were not: an unquoted `$(…)` whose output starts a path (`rm
+//! $(echo ~/.claude)/y*`).
+//!
 //! `Edit`, `Write` and `NotebookEdit` on the file's path are exact.
 
 use crate::hook::EXCEPTIONS_FILE;
-use crate::install::shellword::shell_commands_with_separators;
+use crate::install::shellword::{shell_commands, SimpleCommand};
 
-pub mod env;
-mod expand;
-mod spans;
-mod writes;
-use env::Environment;
-use expand::{Scope, EXPANSION};
+mod allow;
 
-/// Whether *line* names the exceptions file, or may expand into it, with
-/// each variable the line does not set looked up in *env*.
+/// Whether *line* names the exceptions file, or may expand into it.
 ///
 /// The text is taken with quotes and backslashes removed and case folded, so
 /// `yadgar-hook-exception\s.json`, `'yadgar-hook-'exceptions.json` and a
@@ -61,108 +53,86 @@ use expand::{Scope, EXPANSION};
 /// or `:stream` suffix still contains the name. Then each word and redirect
 /// target is checked for a shell expansion that may produce it (see
 /// [`may_be_the_exceptions_file`]).
-pub(super) fn names_the_exceptions_file(line: &str, env: &Environment) -> bool {
+pub(super) fn names_the_exceptions_file(line: &str, commands: &[SimpleCommand]) -> bool {
     if line_names_the_file(line) {
         return true;
     }
-    let masked = spans::mask(line);
-    let commands = shell_commands_with_separators(&masked);
-    let scope = Scope::of(&commands, &masked, line, env);
+    // RELAXATION 1: a data heredoc's body is not commands.
+    let stripped = allow::data_heredocs_removed(line);
+    let scanned;
+    let (line, commands) = match &stripped {
+        Some(stripped) => {
+            scanned = shell_commands(stripped);
+            (stripped.as_str(), scanned.as_slice())
+        }
+        None => (line, commands),
+    };
+    // RELAXATION 2: a proven literal variable is its literal.
+    let literals = allow::Literals::of(line);
     // `$(…)/y*` unquoted: the scanner ends one command at `$`, scans the
     // substitution as commands of its own, and starts another with `/y*`,
-    // which begins with the substitution's output. The guard cannot tell
-    // where the substitution ends, so after a word ending in `$` (an
-    // argument or a redirect target), the first word of EVERY later command
-    // may begin with output.
+    // which begins with the substitution's output. After a word ending in
+    // `$`, the first word of every later command is read as `*` + word.
     let mut after_substitution = false;
-    for (at, (c, _)) in commands.iter().enumerate() {
-        let refused = c
-            .words
-            .iter()
-            .chain(&c.writes_to)
-            .enumerate()
-            .any(|(n, w)| {
-                let word = if n == 0 && after_substitution {
-                    format!("{EXPANSION}{w}")
-                } else {
-                    w.clone()
-                };
-                may_be_the_exceptions_file(&word, at, &scope)
-            });
-        if refused {
-            return true;
+    for c in commands {
+        for (n, w) in c.words.iter().chain(&c.writes_to).enumerate() {
+            let word = if n == 0 && after_substitution {
+                format!("*{w}")
+            } else {
+                w.clone()
+            };
+            let Some(alternatives) = literals.substitute(&word) else {
+                // Too many values to check: refuse rather than guess.
+                return true;
+            };
+            if alternatives.iter().any(|a| may_be_the_exceptions_file(a)) {
+                return true;
+            }
         }
         after_substitution |= c.words.iter().chain(&c.writes_to).any(|w| w.ends_with('$'));
     }
     false
 }
 
-/// *line* with quotes and backslashes removed, ASCII case folded.
-fn plain(line: &str) -> String {
-    line.chars()
-        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
-        .collect::<String>()
-        .to_ascii_lowercase()
-}
-
 /// Whether the file's name appears in *line*, quotes and backslashes removed,
 /// ignoring ASCII case.
 fn line_names_the_file(line: &str) -> bool {
-    plain(line).contains(EXCEPTIONS_FILE)
+    let plain: String = line
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    plain.to_ascii_lowercase().contains(EXCEPTIONS_FILE)
 }
 
-/// Whether *word*, in the command at index *at*, names the file, or a shell
-/// expansion in it could produce the file under a `.claude` directory.
+/// Whether *word* names the file, or a shell expansion in it could produce
+/// the file under a `.claude` directory.
 ///
-/// Each `$NAME` takes every value it may hold (see [`expand`]), brace lists
-/// are expanded, spans collapse, and the word is cut at `/` into path
-/// components, each GLOB-MATCHED against `.claude` and the file name,
-/// ignoring case: `~/.c*/y*`, `~/.c[l]aude/*.json`, `~/{.claude,}/*.json`
-/// and `D=~/.claude; rm $D/$a` all count; `~/.claude/*.md`, `'yadgar.*'`
-/// and `$YADGAR_URL` do not. The word refuses when [`reaches_the_file`]
-/// holds, and when there are too many alternatives to check.
-fn may_be_the_exceptions_file(word: &str, at: usize, scope: &Scope) -> bool {
+/// Brace lists are expanded and each path component is GLOB-MATCHED (ignoring
+/// case) against `.claude` and the file name, with a `$`-expansion or backtick
+/// standing for `*`: `~/.c*/y*`, `~/.c[l]aude/*.json`, `~/{.claude,}/*.json`
+/// and `$D/$a$b` all count. A word refuses only when some component before
+/// the last can match `.claude` and the last can match the file; a glob that
+/// cannot reach the file there (`~/.claude/*.md`, `'yadgar.*'`, `$YADGAR_URL`)
+/// does not. A `*` is let match a leading dot, unlike the shell by default,
+/// because `dotglob` and a variable can.
+fn may_be_the_exceptions_file(word: &str) -> bool {
     if is_the_exceptions_file(word) {
         return true;
     }
-    if !word.contains(['$', '*', '?', '[', OPEN_BRACE, '`', EXPANSION]) {
+    if !word.contains(['$', '*', '?', '[', OPEN_BRACE, '`']) {
         return false;
     }
-    let Some(words) = scope.substitute(word, at) else {
-        // Too many values to check: refuse rather than guess.
+    let Some(alternatives) = brace_expand(word) else {
+        // Too many alternatives to check: refuse rather than guess.
         return true;
     };
-    words.iter().any(|w| {
-        if is_the_exceptions_file(w) {
-            return true;
-        }
-        spans::collapse(w).iter().any(|reading| {
-            let Some(alternatives) = brace_expand(reading) else {
-                // Too many alternatives to check: refuse rather than guess.
-                return true;
-            };
-            alternatives.iter().any(|alt| reaches_the_file(alt))
-        })
+    alternatives.iter().any(|alt| {
+        let parts: Vec<String> = alt.split(['/', '\\']).map(as_glob).collect();
+        let Some((leaf, dirs)) = parts.split_last() else {
+            return false;
+        };
+        glob_matches(leaf, EXCEPTIONS_FILE) && dirs.iter().any(|d| glob_matches(d, ".claude"))
     })
-}
-
-/// Whether the path *word*, its expansions collapsed, may be the file in a
-/// `.claude` directory: its last component can glob-match the file name,
-/// and ANY earlier component can match `.claude`.
-fn reaches_the_file(word: &str) -> bool {
-    let parts: Vec<&str> = word.split(['/', '\\']).collect();
-    let Some((leaf, dirs)) = parts.split_last() else {
-        return false;
-    };
-    glob_matches(&as_glob(leaf), EXCEPTIONS_FILE)
-        && dirs
-            .iter()
-            .any(|dir| glob_matches(&as_glob(dir), ".claude"))
-}
-
-/// *part* as a glob pattern: an expansion may hold anything, so it is `*`.
-fn as_glob(part: &str) -> String {
-    part.replace(EXPANSION, "*")
 }
 
 /// The brace characters, named: a literal `{` in the code would unbalance the
@@ -214,14 +184,7 @@ fn first_brace_list(word: &str) -> Option<(usize, usize, Vec<String>)> {
                             break; // `{x}` with no comma is not a list.
                         }
                         items.push(word[start..i].to_string());
-                        // AN ITEM HOLDING WHITESPACE IS DROPPED: neither
-                        // `.claude` nor the file name holds any, so no
-                        // alternative it is part of can match either. Python
-                        // and Rust in a heredoc body are full of `{a, b}`,
-                        // and expanding them refused the line at the bound.
-                        // A list left with no item leaves no alternative.
-                        items.retain(|item| !item.contains(char::is_whitespace));
-                        return Some((open, i, items));
+                        return Some((open, i, one_spaced_item(items)));
                     }
                 }
                 b',' if depth == 1 => {
@@ -233,6 +196,87 @@ fn first_brace_list(word: &str) -> Option<(usize, usize, Vec<String>)> {
         }
     }
     None
+}
+
+/// *part* as a glob pattern: each `$name`, `${…}`, `$(…)` or backtick span
+/// becomes `*`, since it may expand to anything.
+fn as_glob(part: &str) -> String {
+    let chars: Vec<char> = part.chars().collect();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '$' => {
+                out.push('*');
+                i += 1;
+                match chars.get(i) {
+                    Some(&OPEN_BRACE) => i = closing(&chars, i, OPEN_BRACE, CLOSE_BRACE),
+                    Some('(') => i = closing(&chars, i, '(', ')'),
+                    _ => {
+                        while chars
+                            .get(i)
+                            .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        {
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            '`' => {
+                out.push('*');
+                i = chars[i + 1..]
+                    .iter()
+                    .position(|&c| c == '`')
+                    .map_or(chars.len(), |n| i + n + 2);
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The index just past the bracket that closes the one at *open*.
+fn closing(chars: &[char], open: usize, left: char, right: char) -> usize {
+    let mut depth = 0;
+    for (i, &c) in chars.iter().enumerate().skip(open) {
+        if c == left {
+            depth += 1;
+        } else if c == right {
+            depth -= 1;
+            if depth == 0 {
+                return i + 1;
+            }
+        }
+    }
+    chars.len()
+}
+
+/// *items* with every item that holds whitespace and no `/` replaced by
+/// ONE `" "` item.
+///
+/// THIS CHANGES NO ANSWER. Such an item lands inside one path component,
+/// and a component holding whitespace can match neither `.claude` nor the
+/// file name, whatever else it holds; so every such item gives the same
+/// answer as `" "`. What it changes is the count: Python and Rust in a
+/// heredoc body are full of `{a, b}`, and expanding each multiplied the
+/// alternatives past the bound, which refuses.
+fn one_spaced_item(items: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut spaced = false;
+    for item in items {
+        if item.contains(char::is_whitespace) && !item.contains(['/', '\\']) {
+            if !spaced {
+                out.push(" ".to_string());
+                spaced = true;
+            }
+        } else {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// Whether glob *pattern* (`*`, `?`, `[…]`, `[!…]`) matches *name*, ignoring
@@ -346,24 +390,16 @@ mod tests {
         assert_eq!(brace_expand("{x}").unwrap(), ["{x}"]);
         assert!(brace_expand(&"{a,b}".repeat(10)).is_none());
         assert_eq!(
-            brace_expand("f(a, {b, c})").unwrap(),
-            ["f(a, b)"],
-            "an item holding whitespace is dropped"
+            brace_expand("{a b,c d,e}").unwrap().len(),
+            2,
+            "items holding whitespace collapse into one"
         );
-        assert_eq!(brace_expand("~/{.c*,' '}/x").unwrap(), ["~/.c*/x"]);
-        assert!(brace_expand("{ a, b}").unwrap().is_empty(), "no item left");
+        assert!(brace_expand(&"{ a, b}".repeat(10)).is_some());
     }
 
     #[test]
-    fn any_component_that_can_be_claude_counts() {
-        assert!(reaches_the_file("~/.c*/y*"));
-        assert!(reaches_the_file("~/.claude/\0"));
-        assert!(reaches_the_file("~/.claude/s/y*"), "s may be a link back");
-        assert!(reaches_the_file("~/[!x]*/y*"), "dotglob");
-        assert!(reaches_the_file("\0/\0"), "an unknown may be anything");
-        assert!(reaches_the_file("*/node_modules/*"));
-        assert!(!reaches_the_file("/tmp/a/\0"));
-        assert!(!reaches_the_file("~/.claude/*.md"));
-        assert!(!reaches_the_file("\0"), "no directory, as before");
+    fn an_expansion_stands_for_anything() {
+        assert_eq!(as_glob("$D"), "*");
+        assert_eq!(as_glob("${a}x$(b)`c`"), "*x**");
     }
 }

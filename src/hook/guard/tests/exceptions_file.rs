@@ -73,14 +73,8 @@ const MUST_BE_ALLOWED: &[&str] = &[
     // Markdown inline code holding a `/`.
     "cat > /tmp/b.md <<'EOF'\nNo `local/` prefix; only `kubernetes.io/cluster/*` tags.\nEOF",
     "cat > /tmp/b.md <<'EOF'\nSplit on `/` only, as in `a/b`.\nEOF",
-    // A loop variable takes the loop's words, not anything.
-    "for w in agent-a agent-b; do git -C .claude/worktrees/$w status; done",
-    // A `bash -c` script that starts with an assignment is ONE word, `S=…`,
-    // to the line outside it; read as a binding, `$S` in it expanded into
-    // copies of the whole script, past the bound.
-    "bash -c 'S=/tmp/s; W=/tmp/w; T=$S/live; rm -rf $T; mkdir -p $T/apps $T/scripts/gates; cd $W; for f in apps/a.yaml scripts/pin.json scripts/gates/r.sha256; do git show 36059be:$f > $T/$f; done; TOKEN=$(gh auth token) timeout 600 python3 scripts/pin.py --repo $T --check --evidence $S/ev.json > $S/body.md; echo exit=$?'",
-    // A loop variable set from another one, on a line that spells `.claude`.
-    "cd ~/x/.claude/worktrees/a && for d in infra apps; do for f in $d/*; do cat $f; done; done",
+    // A scratch directory set as a literal at the top of the line.
+    "S=/tmp/s; mkdir -p $S/pr; ls ${S}/pr/*.md",
 ];
 
 const MUST_BE_DENIED: &[&str] = &[
@@ -272,92 +266,8 @@ fn every_way_of_naming_the_exceptions_file_is_refused() {
     );
 }
 
-/// The agent's shell, for the tests that resolve a variable the line does
-/// not set: safe values, and a working directory outside `.claude`.
-fn safe_env() -> Environment {
-    Environment::of(&[
-        ("FILES", "a.rs b.rs"),
-        ("OUT", "/tmp/out"),
-        ("SRC", "/tmp/src"),
-        ("DST", "/tmp/dst"),
-        ("f", "notes.json"),
-        ("r", "repo"),
-        ("GITHUB_WORKSPACE", "/w"),
-        ("DIR", "sub"),
-        ("D", "/tmp/x"),
-        ("HOME", "/home/u"),
-    ])
-}
-
-/// The same, with `D` and the working directory inside `.claude`, and `f`
-/// the file's name.
-fn claude_env() -> Environment {
-    Environment::of(&[
-        ("D", "/home/u/.claude"),
-        ("f", crate::hook::EXCEPTIONS_FILE),
-        ("HOME", "/home/u"),
-    ])
-}
-
-fn refuses_in(command: &str, env: &Environment) -> bool {
-    matches!(
-        pre_tool_guard_in(&bash_call(command), &Policy::ALL_ON, env),
-        Decision::Deny(r) if r == EXCEPTIONS
-    )
-}
-
-/// Each refused with no environment, and decided by the variables' values.
-const RESOLVED: &[&str] = &[
-    "for f in $FILES; do git show HEAD:$f > $OUT/$f; done",
-    "cp $SRC/$f $DST/$f",
-    "cd $GITHUB_WORKSPACE/$DIR",
-    "gh api repos/acme/$r/contents/$f --jq .content",
-    "rm $D/$f",
-    "rm $D/*.json",
-    "cp /tmp/x $D/${f}",
-    "rm $D/*s.json",
-];
-
-#[test]
-fn a_variable_the_line_does_not_set_is_decided_by_its_real_value() {
-    let refused: Vec<&&str> = RESOLVED
-        .iter()
-        .filter(|c| refuses_in(c, &safe_env()))
-        .collect();
-    assert!(refused.is_empty(), "refused with safe values: {refused:#?}");
-    let into_claude = [
-        "rm $D/$f",
-        "rm $D/*.json",
-        "cp /tmp/x $D/${f}",
-        "rm $D/*s.json",
-    ];
-    let allowed: Vec<&&str> = into_claude
-        .iter()
-        .filter(|c| !refuses_in(c, &claude_env()))
-        .collect();
-    assert!(
-        allowed.is_empty(),
-        "allowed pointing into .claude: {allowed:#?}"
-    );
-    for command in RESOLVED {
-        assert!(
-            denies(command),
-            "with no environment, {command} must refuse"
-        );
-    }
-}
-
-#[test]
-fn what_no_environment_can_decide_still_refuses() {
-    let allowed: Vec<&&str> = UNDECIDABLE
-        .iter()
-        .filter(|c| !refuses_in(c, &safe_env()))
-        .collect();
-    assert!(allowed.is_empty(), "allowed with safe values: {allowed:#?}");
-}
-
-/// Refused even where every variable the hook can see is safe: each is a
-/// branch where the value in the agent's shell cannot be known for certain.
+/// Refused: each is a branch where a value in the agent's shell cannot be
+/// known for certain, so nothing is relaxed.
 const UNDECIDABLE: &[&str] = &[
     "rm */*",
     "rm $CLAUDE_CONFIG_DIR/*.json",
@@ -376,16 +286,65 @@ const UNDECIDABLE: &[&str] = &[
 ];
 
 #[test]
-fn too_many_alternatives_refuse_at_both_bounds() {
-    let words: Vec<String> = (0..20).map(|i| format!("w{i}")).collect();
-    let few = format!("for v in {}; do echo $v/$v; done", words[..3].join(" "));
-    let many = format!("for v in {}; do echo $v/$v; done", words.join(" "));
-    assert!(!refuses_in(&few, &safe_env()));
+fn what_cannot_be_known_still_refuses() {
+    let allowed: Vec<&&str> = UNDECIDABLE.iter().filter(|c| !denies(c)).collect();
+    assert!(allowed.is_empty(), "allowed: {allowed:#?}");
+}
+
+/// Shapes that look like an allowlisted one but are not: each falls back to
+/// the check on `main`, which refuses it.
+const NOT_RELAXED: &[&str] = &[
+    // A value from the environment, or not a plain literal.
+    "cp $SRC/$f $DST/$f",
+    "S=$HOME/.claude; rm $S/*.json",
+    "S=~/.c*; rm $S/*.json",
+    "S=/tmp/s; rm $S/../$X/*.json",
+    // An assignment the line may not run, or that something else rewrites.
+    "false && S=/tmp; rm $S/*",
+    "(S=/tmp); rm $S/*",
+    "S=/tmp | cat; rm $S/*",
+    "S=/tmp; read S; rm $S/*",
+    "S=/tmp; eval x; rm $S/*",
+    "S=/tmp; grep -q x f; rm $S/*",
+    "S=/tmp; for S in ~/.claude; do rm $S/*; done",
+    "S=/tmp; f; rm $S/*",
+    // A heredoc whose body may run: a shell or interpreter reads it, or a
+    // command on the line could run the file it is written to.
+    "cat > /tmp/x.sh <<'EOF'\nrm ~/.c*/y*\nEOF\nbash /tmp/x.sh",
+    "bash <<'EOF'\nrm ~/.c*/y*\nEOF",
+    "cat > .git/hooks/pre-push <<'EOF'\nrm ~/.c*/y*\nEOF\ngit push",
+    "cat <<EOF > /tmp/b.md\n`echo ~/.claude`/y*\nEOF",
+    // A data heredoc only into a `.md` or `.txt` file outside any dot
+    // directory: a profile, a hook or a script may be run by a later call.
+    "cat > /home/u/.zshenv <<'EOF'\nrm ~/.c*/y*\nEOF",
+    "cat > /tmp/x.sh <<'EOF'\nrm ~/.c*/y*\nEOF",
+    "cat > /tmp/.hooks/pre-push <<'EOF'\nrm ~/.c*/y*\nEOF",
+    // Work in a `.claude/worktrees/…` checkout, and a wildcard directory.
+    "for w in agent-a agent-b; do git -C .claude/worktrees/$w status; done",
+    "find . -name '*.json' -not -path '*/node_modules/*'",
+];
+
+#[test]
+fn a_shape_outside_the_allowlist_is_checked_as_on_main() {
+    let allowed: Vec<&&str> = NOT_RELAXED.iter().filter(|c| !denies(c)).collect();
     assert!(
-        refuses_in(&many, &safe_env()),
+        allowed.is_empty(),
+        "relaxed outside the allowlist: {allowed:#?}"
+    );
+}
+
+#[test]
+fn too_many_alternatives_refuse_at_both_bounds() {
+    assert!(!denies("echo {a,b}/x"));
+    let lists = format!("echo {}/x", "{a,b}".repeat(9));
+    assert!(denies(&lists), "past the brace bound");
+    let mut many = String::new();
+    for i in 0..300 {
+        many.push_str(&format!("S=/tmp/{i}; "));
+    }
+    assert!(!denies(&format!("{many}ls /tmp")));
+    assert!(
+        denies(&format!("{many}ls $S/$S")),
         "past the substitution bound"
     );
-    assert!(!refuses_in("echo {a,b}/x", &safe_env()));
-    let lists = format!("echo {}/x", "{a,b}".repeat(9));
-    assert!(refuses_in(&lists, &safe_env()), "past the brace bound");
 }

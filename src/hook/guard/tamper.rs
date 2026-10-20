@@ -12,42 +12,47 @@
 //! of a write costs the decision file the guard exists to protect. So any
 //! command whose text names the file refuses. Read it with the Read tool.
 //!
+//! **NO WEAKENING** (ADR-0969): a change here must refuse every command the
+//! check before it refused. Each step below only REPLACES an approximation
+//! of the old check with an exact answer, or keeps the approximation:
+//!
+//! * a `$NAME` the old check read as `*` now takes the values it can hold
+//!   (`expand.rs`, `env.rs`); any value nobody can know is still `*`;
+//! * a backtick or `$(…)` span is one `*` before the word is cut at `/`;
+//! * a brace list drops only items holding whitespace, which can be neither
+//!   `.claude` nor the file name.
+//!
+//! The path rule itself is unchanged: some component before the leaf can
+//! match `.claude` and the leaf can match the file. A `*` there can match a
+//! leading dot, because `dotglob` and a program's own globbing (`find
+//! -path`) can, and any component counts, because one between `.claude` and
+//! the leaf can be a link back to `.claude`.
+//!
 //! **WHAT A TEXT CHECK CANNOT SEE**, stated rather than implied. A command can
 //! reach the file without its name, or a glob that can match it under
 //! `.claude`, ever appearing on the line:
 //!
-//! * a path built in the same call: `D=~/.claude; f=yadgar; rm $D/$f*` is
-//!   caught, because a variable set on the line takes its values there, and so
-//!   is a wildcard directory on a line that spells `.claude` anywhere; a name
-//!   built by `printf`, `base64 -d`, `rev`, `tr` or `xxd` and piped to `sh`,
-//!   or by string concatenation inside an interpreter, is not;
-//! * THE ONE GAP THIS CHECK ACCEPTS: a directory that is ONLY a variable
-//!   set outside the line, or only a wildcard, on a line that never spells
-//!   `.claude`, with a leaf that may name any file: `rm $D/$f` or
-//!   `rm $D/*.json` with `D` from the environment, or `rm */*` under
-//!   `dotglob`. Refusing those refused every `$a/$b` and `*/x/*`, dozens of
-//!   ordinary commands a day. A leaf only the file is likely to match
-//!   (`rm $D/y*.json`) still refuses. Setting `D` takes an earlier call that
-//!   edits the user's profile, which names `.claude` in that call;
+//! * a name built by `printf`, `base64 -d`, `rev`, `tr` or `xxd` and piped
+//!   to `sh`, or by string concatenation inside an interpreter;
 //! * a command that acts on the directory rather than the name:
 //!   `cd ~/.claude && rm y*`, `rm -rf ~/.claude/`, `tar -x -C ~/.claude`,
 //!   `find ~/.claude -name 'y*' -delete`;
 //! * a link made with one name and written through another (`ln -s` then an
 //!   `Edit` of the link).
 //!
-//! **KEPT ON PURPOSE**: a quoted pattern refuses as a glob does, so
-//! `find . -not -path './.claude/*'` refuses; once the quotes are gone it
-//! reads exactly as `rm ./.claude/*`.
-//!
 //! `Edit`, `Write` and `NotebookEdit` on the file's path are exact.
 
 use crate::hook::EXCEPTIONS_FILE;
-use crate::install::shellword::SimpleCommand;
+use crate::install::shellword::shell_commands_with_separators;
 
+pub mod env;
 mod expand;
-use expand::{Bindings, EXPANSION};
+mod spans;
+use env::Environment;
+use expand::{Scope, EXPANSION};
 
-/// Whether *line* names the exceptions file, or may expand into it.
+/// Whether *line* names the exceptions file, or may expand into it, with
+/// each variable the line does not set looked up in *env*.
 ///
 /// The text is taken with quotes and backslashes removed and case folded, so
 /// `yadgar-hook-exception\s.json`, `'yadgar-hook-'exceptions.json` and a
@@ -55,24 +60,23 @@ use expand::{Bindings, EXPANSION};
 /// or `:stream` suffix still contains the name. Then each word and redirect
 /// target is checked for a shell expansion that may produce it (see
 /// [`may_be_the_exceptions_file`]).
-pub(super) fn names_the_exceptions_file(line: &str, commands: &[SimpleCommand]) -> bool {
+pub(super) fn names_the_exceptions_file(line: &str, env: &Environment) -> bool {
     if line_names_the_file(line) {
         return true;
     }
-    let line = Line {
-        bindings: expand::bindings(commands),
-        names_claude: plain(line).contains(".claude"),
-    };
-    commands.iter().enumerate().any(|(at, c)| {
-        // `$(…)/y*` unquoted: the scanner ends one command at `$`, scans the
-        // substitution as commands of its own, and starts another with
-        // `/y*`, which begins with the substitution's output. The guard
-        // cannot tell where the substitution ends, so after a word ending in
-        // `$`, the first word of EVERY later command may begin with output.
-        let after_substitution = commands[..at]
-            .iter()
-            .any(|p| p.words.last().is_some_and(|w| w.ends_with('$')));
-        c.words
+    let masked = spans::mask(line);
+    let commands = shell_commands_with_separators(&masked);
+    let scope = Scope::of(&commands, &masked, env);
+    // `$(…)/y*` unquoted: the scanner ends one command at `$`, scans the
+    // substitution as commands of its own, and starts another with `/y*`,
+    // which begins with the substitution's output. The guard cannot tell
+    // where the substitution ends, so after a word ending in `$` (an
+    // argument or a redirect target), the first word of EVERY later command
+    // may begin with output.
+    let mut after_substitution = false;
+    for (at, (c, _)) in commands.iter().enumerate() {
+        let refused = c
+            .words
             .iter()
             .chain(&c.writes_to)
             .enumerate()
@@ -82,20 +86,14 @@ pub(super) fn names_the_exceptions_file(line: &str, commands: &[SimpleCommand]) 
                 } else {
                     w.clone()
                 };
-                may_be_the_exceptions_file(&word, at, &line)
-            })
-    })
-}
-
-/// What the whole line tells a check of one of its words.
-struct Line {
-    /// The variables the line sets (see [`expand::bindings`]).
-    bindings: Bindings,
-    /// Whether `.claude` appears anywhere in the line's text. Then a wildcard
-    /// directory may be it: `D=$(echo ~/.claude); rm $D/y*` builds the path in
-    /// a command substitution, which the scanner splits off as its own
-    /// command, so `$D` has no value the guard can read.
-    names_claude: bool,
+                may_be_the_exceptions_file(&word, at, &scope)
+            });
+        if refused {
+            return true;
+        }
+        after_substitution |= c.words.iter().chain(&c.writes_to).any(|w| w.ends_with('$'));
+    }
+    false
 }
 
 /// *line* with quotes and backslashes removed, ASCII case folded.
@@ -112,26 +110,24 @@ fn line_names_the_file(line: &str) -> bool {
     plain(line).contains(EXCEPTIONS_FILE)
 }
 
-/// Whether *word* names the file, or a shell expansion in it could produce
-/// the file under a `.claude` directory.
+/// Whether *word*, in the command at index *at*, names the file, or a shell
+/// expansion in it could produce the file under a `.claude` directory.
 ///
-/// A variable set on the line takes the values it is set to there; every
-/// other expansion stands for `*` (see [`expand`]). Brace lists are expanded,
-/// and the word is cut at `/` into path components, each GLOB-MATCHED against
-/// `.claude` and the file name, ignoring case: `~/.c*/y*`,
-/// `~/.c[l]aude/*.json`, `~/{.claude,}/*.json` and `D=~/.claude; rm $D/$a`
-/// all count; `~/.claude/*.md`, `'yadgar.*'` and `$YADGAR_URL` do not. A `*`
-/// is let match a leading dot, unlike the shell by default, because `dotglob`
-/// can. The word refuses when [`reaches_the_file`] holds. *at* is the index
-/// of the command the word is in.
-fn may_be_the_exceptions_file(word: &str, at: usize, line: &Line) -> bool {
+/// Each `$NAME` takes every value it may hold (see [`expand`]), brace lists
+/// are expanded, spans collapse, and the word is cut at `/` into path
+/// components, each GLOB-MATCHED against `.claude` and the file name,
+/// ignoring case: `~/.c*/y*`, `~/.c[l]aude/*.json`, `~/{.claude,}/*.json`
+/// and `D=~/.claude; rm $D/$a` all count; `~/.claude/*.md`, `'yadgar.*'`
+/// and `$YADGAR_URL` do not. The word refuses when [`reaches_the_file`]
+/// holds, and when there are too many alternatives to check.
+fn may_be_the_exceptions_file(word: &str, at: usize, scope: &Scope) -> bool {
     if is_the_exceptions_file(word) {
         return true;
     }
     if !word.contains(['$', '*', '?', '[', OPEN_BRACE, '`', EXPANSION]) {
         return false;
     }
-    let Some(words) = expand::substitute(word, &line.bindings, at) else {
+    let Some(words) = scope.substitute(word, at) else {
         // Too many values to check: refuse rather than guess.
         return true;
     };
@@ -139,60 +135,29 @@ fn may_be_the_exceptions_file(word: &str, at: usize, line: &Line) -> bool {
         if is_the_exceptions_file(w) {
             return true;
         }
-        let Some(alternatives) = brace_expand(w) else {
-            // Too many alternatives to check: refuse rather than guess.
-            return true;
-        };
-        alternatives
-            .iter()
-            .any(|alt| reaches_the_file(&expand::collapse(alt), line.names_claude))
+        spans::collapse(w).iter().any(|reading| {
+            let Some(alternatives) = brace_expand(reading) else {
+                // Too many alternatives to check: refuse rather than guess.
+                return true;
+            };
+            alternatives.iter().any(|alt| reaches_the_file(alt))
+        })
     })
 }
 
 /// Whether the path *word*, its expansions collapsed, may be the file in a
-/// `.claude` directory.
-///
-/// * The last component must glob-match the file name.
-/// * Some earlier component, ANY earlier one, must be able to match
-///   `.claude`, and something must be EVIDENCE that the path means it:
-///   - that component cannot match every name in [`ANY_DIRS`]: `.c*`,
-///     `[.]claude`, `[!x]*` and `.claud?` are evidence, `*`, `$D` and `**`
-///     are not;
-///   - or the leaf cannot match any name in [`ANY_FILES`]: `y*.json` and
-///     `*-exceptions.json` are evidence, `*`, `*.json` and `$f` are not;
-///   - or *names_claude*: the line spells `.claude` somewhere else.
-///
-///   Without evidence, every `$a/$b` and `*/x/*` was a write of the file.
-///
-/// Any earlier component, and not only the leaf's parent: `.claude/s/y*`
-/// reaches the file when `s` is a link back to `.claude`, and a `.` or `..`
-/// or an expansion in between may climb back to it as well.
-fn reaches_the_file(word: &str, names_claude: bool) -> bool {
+/// `.claude` directory: its last component can glob-match the file name,
+/// and ANY earlier component can match `.claude`.
+fn reaches_the_file(word: &str) -> bool {
     let parts: Vec<&str> = word.split(['/', '\\']).collect();
     let Some((leaf, dirs)) = parts.split_last() else {
         return false;
     };
-    let leaf = as_glob(leaf);
-    if !glob_matches(&leaf, EXCEPTIONS_FILE) {
-        return false;
-    }
-    let leaf_is_evidence = !ANY_FILES.iter().any(|name| glob_matches(&leaf, name));
-    dirs.iter().any(|dir| {
-        let glob = as_glob(dir);
-        glob_matches(&glob, ".claude")
-            && (names_claude
-                || leaf_is_evidence
-                || ANY_DIRS.iter().any(|name| !glob_matches(&glob, name)))
-    })
+    glob_matches(&as_glob(leaf), EXCEPTIONS_FILE)
+        && dirs
+            .iter()
+            .any(|dir| glob_matches(&as_glob(dir), ".claude"))
 }
-
-/// Directory names unlike `.claude` and unlike each other: a pattern that
-/// matches every one of them says nothing about which directory it names.
-const ANY_DIRS: &[&str] = &["0", "x", "src", "node_modules"];
-
-/// File names unlike the exceptions file: a leaf pattern that matches one of
-/// them is as likely to name any file.
-const ANY_FILES: &[&str] = &["0", "x", "a.json", "settings.json", "README.md"];
 
 /// *part* as a glob pattern: an expansion may hold anything, so it is `*`.
 fn as_glob(part: &str) -> String {
@@ -247,17 +212,14 @@ fn first_brace_list(word: &str) -> Option<(usize, usize, Vec<String>)> {
                         if items.is_empty() {
                             break; // `{x}` with no comma is not a list.
                         }
-                        // ONE HOLDING WHITESPACE is read as one expansion:
-                        // unquoted, a space or newline ends the word, so the
-                        // list came from quotes, where the shell expands no
-                        // brace, or has a quoted item, `{.claude," "}`, where
-                        // it does. Python and Rust in a heredoc body are full
-                        // of `{a, b}`, and expanding each refused the line at
-                        // the bound; the expansion covers both readings.
-                        if bytes[open..i].iter().any(u8::is_ascii_whitespace) {
-                            return Some((open, i, vec![EXPANSION.to_string()]));
-                        }
                         items.push(word[start..i].to_string());
+                        // AN ITEM HOLDING WHITESPACE IS DROPPED: neither
+                        // `.claude` nor the file name holds any, so no
+                        // alternative it is part of can match either. Python
+                        // and Rust in a heredoc body are full of `{a, b}`,
+                        // and expanding them refused the line at the bound.
+                        // A list left with no item leaves no alternative.
+                        items.retain(|item| !item.contains(char::is_whitespace));
                         return Some((open, i, items));
                     }
                 }
@@ -384,30 +346,23 @@ mod tests {
         assert!(brace_expand(&"{a,b}".repeat(10)).is_none());
         assert_eq!(
             brace_expand("f(a, {b, c})").unwrap(),
-            ["f(a, \0)"],
-            "a list holding whitespace is one expansion, not a product"
+            ["f(a, b)"],
+            "an item holding whitespace is dropped"
         );
+        assert_eq!(brace_expand("~/{.c*,' '}/x").unwrap(), ["~/.c*/x"]);
+        assert!(brace_expand("{ a, b}").unwrap().is_empty(), "no item left");
     }
 
     #[test]
-    fn a_wildcard_directory_is_no_evidence_of_claude() {
-        assert!(reaches_the_file("~/.c*/y*", false));
-        assert!(reaches_the_file("~/.claude/\0", false));
-        assert!(reaches_the_file("~/.claude/x/\0", false));
-        assert!(reaches_the_file("~/.claude/s/y*", false), "s may be a link");
-        assert!(reaches_the_file("~/[!x]*/y*", false));
-        assert!(reaches_the_file("~/[.0]*/y*", false));
-        assert!(!reaches_the_file("\0/\0", false));
-        assert!(!reaches_the_file("*/node_modules/*", false));
-        assert!(!reaches_the_file("?*/*.json", false));
-        assert!(
-            reaches_the_file("\0/y*.json", false),
-            "a leaf only the file is likely to match"
-        );
-        assert!(reaches_the_file("*/y*.json", false));
-        assert!(
-            reaches_the_file("\0/y*", true),
-            "evidence when the line spells .claude"
-        );
+    fn any_component_that_can_be_claude_counts() {
+        assert!(reaches_the_file("~/.c*/y*"));
+        assert!(reaches_the_file("~/.claude/\0"));
+        assert!(reaches_the_file("~/.claude/s/y*"), "s may be a link back");
+        assert!(reaches_the_file("~/[!x]*/y*"), "dotglob");
+        assert!(reaches_the_file("\0/\0"), "an unknown may be anything");
+        assert!(reaches_the_file("*/node_modules/*"));
+        assert!(!reaches_the_file("/tmp/a/\0"));
+        assert!(!reaches_the_file("~/.claude/*.md"));
+        assert!(!reaches_the_file("\0"), "no directory, as before");
     }
 }

@@ -86,7 +86,22 @@ pub struct SimpleCommand {
 /// command being run or a word being mentioned — so it answered both questions
 /// the same way and got both wrong.
 pub fn shell_commands(line: &str) -> Vec<SimpleCommand> {
+    shell_commands_with_separators(line)
+        .into_iter()
+        .map(|(command, _)| command)
+        .collect()
+}
+
+/// [`shell_commands`], each with the operators the scanner passed since the
+/// command before it, in order: `;` `&` `&&` `||` `|` `(` `)` or a newline.
+/// Empty for the first command of a line that opens with no operator.
+///
+/// For a caller that must know whether a command runs unconditionally in the
+/// current shell: after `&&` it may not run at all, and inside `( … )` or
+/// before `|` it runs in a subshell, whose assignments never reach the line.
+pub fn shell_commands_with_separators(line: &str) -> Vec<(SimpleCommand, Vec<String>)> {
     let mut out = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
     let mut current = SimpleCommand {
         words: Vec::new(),
         writes_to: Vec::new(),
@@ -100,23 +115,25 @@ pub fn shell_commands(line: &str) -> Vec<SimpleCommand> {
                 // A file read FROM is an argument like any other.
                 _ => current.words.push(w),
             },
-            Token::Separator => {
+            Token::Separator(op) => {
                 pending = None;
                 if !current.words.is_empty() || !current.writes_to.is_empty() {
-                    out.push(std::mem::replace(
+                    let command = std::mem::replace(
                         &mut current,
                         SimpleCommand {
                             words: Vec::new(),
                             writes_to: Vec::new(),
                         },
-                    ));
+                    );
+                    out.push((command, std::mem::take(&mut seen)));
                 }
+                seen.push(op);
             }
             redirect => pending = Some(redirect),
         }
     }
     if !current.words.is_empty() || !current.writes_to.is_empty() {
-        out.push(current);
+        out.push((current, seen));
     }
     out
 }
@@ -125,7 +142,7 @@ pub fn shell_commands(line: &str) -> Vec<SimpleCommand> {
 enum Token {
     Word(String),
     /// `;` `&` `&&` `||` `|` `(` `)` or a newline: one command ends here.
-    Separator,
+    Separator(String),
     /// `>` or `>>`: the next word is a file the command writes into.
     Into,
     /// `<`: the next word is a file the command reads from.
@@ -192,10 +209,12 @@ fn scan(cmd: &str) -> Vec<Token> {
             (None, c) if matches!(c, ';' | '|' | '&' | '(' | ')' | '\n') => {
                 flush!();
                 // `&&` and `||` separate exactly as their single forms do here.
+                let mut op = c.to_string();
                 if chars.peek() == Some(&c) {
                     chars.next();
+                    op.push(c);
                 }
-                out.push(Token::Separator);
+                out.push(Token::Separator(op));
             }
             (None, c) if c.is_whitespace() => flush!(),
             (None, c) => {
@@ -274,6 +293,23 @@ mod tests {
         let commands = shell_commands(r#"gh pr comment --body "a; b""#);
         assert_eq!(commands.len(), 1);
         assert_eq!(commands[0].words.last().unwrap(), "a; b");
+    }
+
+    #[test]
+    fn each_command_carries_the_operators_before_it() {
+        let commands = shell_commands_with_separators("a; (b && c) | d\ne");
+        let seps: Vec<Vec<&str>> = commands
+            .iter()
+            .map(|(_, s)| s.iter().map(String::as_str).collect())
+            .collect();
+        let want: Vec<Vec<&str>> = vec![
+            vec![],
+            vec![";", "("],
+            vec!["&&"],
+            vec![")", "|"],
+            vec!["\n"],
+        ];
+        assert_eq!(seps, want);
     }
 
     #[test]

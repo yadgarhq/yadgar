@@ -70,18 +70,9 @@ const MUST_BE_ALLOWED: &[&str] = &[
     PYTHON_HEREDOC,
     PR_BODY_HEREDOC,
     GIT_SHOW_LOOP,
-    // The same loop with its variables set outside the line.
-    "for f in $FILES; do git show HEAD:$f > $OUT/$f; done",
-    "cp $SRC/$f $DST/$f",
-    "cd $GITHUB_WORKSPACE/$DIR",
-    "gh api repos/acme/$r/contents/$f --jq .content",
-    // Wildcards in a find pattern or a grep pattern.
-    "find . -name '*.json' -not -path '*/node_modules/*'",
-    "find . -maxdepth 4 -iname 'pull_request_template*' -not -path '*/.venv/*'",
-    "grep -n '^## \\|NEEDS-HUMAN.\\*\\*' body.md",
-    "ls docs/runbooks/x/*/*",
     // Markdown inline code holding a `/`.
     "cat > /tmp/b.md <<'EOF'\nNo `local/` prefix; only `kubernetes.io/cluster/*` tags.\nEOF",
+    "cat > /tmp/b.md <<'EOF'\nSplit on `/` only, as in `a/b`.\nEOF",
     // A loop variable takes the loop's words, not anything.
     "for w in agent-a agent-b; do git -C .claude/worktrees/$w status; done",
     // A `bash -c` script that starts with an assignment is ONE word, `S=…`,
@@ -136,6 +127,13 @@ const MUST_BE_DENIED: &[&str] = &[
     "find . -not -path './.claude/*'",
     // KEPT ON PURPOSE: `worktrees` may be a link back to `.claude`.
     "find . -name '*.md' -not -path '*/.claude/worktrees/*'",
+    // KEPT, NO WEAKENING: a wildcard directory may be `.claude` under
+    // `dotglob` or a program's own globbing (`find -path`), and a directory
+    // after it may be a link back. Refused before this change, and still.
+    "find . -name '*.json' -not -path '*/node_modules/*'",
+    "find . -maxdepth 4 -iname 'pull_request_template*' -not -path '*/.venv/*'",
+    "grep -n '^## \\|NEEDS-HUMAN.\\*\\*' body.md",
+    "ls docs/runbooks/x/*/*",
 ];
 
 /// Security review of this change: each one was refused before it, and a
@@ -174,6 +172,60 @@ const BYPASSES: &[&str] = &[
     "rm */y*.json",
     "rm ?*/y*.json",
     "cp /tmp/x $D/*-exceptions.json",
+    // Independent review of the second version. M1: a whitespace brace list
+    // must keep the evidence of the items that hold none.
+    "rm ~/{.*,\" \"}/*.json",
+    "rm ~/{.cla?de,\"a b\"}/*.json",
+    "rm ~/{.c*,' '}/*",
+    "rm ~/{.c,\" \"}*/*.json",
+    // M2: a span is not the literal text `.claude`.
+    "rm ~/.${X:-claude}/*.json",
+    "rm ~/.${X:-claude}/y*.json",
+    "rm ${HOME}/.${N:-claude}/*",
+    // M3: the body of a loop writes its variable another way.
+    "for D in ~; do D+=/.cl; D+=aude; rm $D/y*.json; done",
+    "for D in /tmp; do read D; rm $D/y*.json; done <<< ~/.claude",
+    "for D in /tmp; do printf -v D %s/.cl%s ~ aude; rm $D/y*.json; done",
+    // M4: a loop with no `done`, in a subshell or in a pipeline.
+    "( for D in /tmp; { :; } ); rm $D/y*.json",
+    "for D in /tmp; { :; } | cat; rm $D/y*.json",
+    // M5: the directory built inside the call.
+    "D=~; D+=/.cl; D+=aude; rm $D/*.json",
+    "printf -v D %s/.cl%s ~ aude; rm $D/*.json",
+    "D=$(printf %s/.cl%s ~ aude); rm $D/*.json",
+    "D=$(echo ~/.cl?ude); rm $D/*.json",
+    // M6: a nested shell's positional parameters.
+    "sh -c 'rm $0/*.json' ~/.claude",
+    "bash -c 'rm $1/*.json' _ ~/.c?aude",
+    // M7: ANSI-C quoting.
+    "rm ~/$'\\x2eclaude'/*.json",
+    "rm ~/$'\\056claude'/*.json",
+    // Found by the differential run: a backtick span the scanner cut at a
+    // space, opening in one word and closing in the next.
+    "rm ~/.claude/`echo y`*",
+    "rm `echo ~/.claude`/`echo y`*",
+    // Allowed before this change too: a substitution as a redirect target.
+    "echo x > $(echo ~/.claude)/y*.json",
+    // A quoted backtick does not open a span.
+    "echo '`'; rm `echo ~/.claude`/y*.json",
+    "echo \"`echo ~/.claude`\"/y*.json; rm `echo ~/.claude`/`echo y`*",
+    // dotglob, and a `cd` that changes `$PWD`.
+    "rm ~/[!y]*/*.json",
+    "cd ~/.cl?ude; rm $PWD/*.json",
+    // Variables the line does not set: with no environment to resolve them
+    // against (these tests give the guard none), they refuse.
+    "rm $D/$f",
+    "rm $D/*.json",
+    "rm */*",
+    "cp /tmp/x $D/${f}",
+    "rm $D/*s.json",
+    "rm $PWD/*.json",
+    // Decoys: an assignment in a heredoc body, after a comment, onto a
+    // readonly name, or inside `eval`.
+    "cat <<'EOF'\nD=/tmp\nEOF\nrm $D/*.json",
+    "true # ; D=/tmp\nrm $D/*.json",
+    "readonly D; D=/tmp; rm $D/*.json",
+    "eval 'D=\"x y\"'; rm $D/*.json",
 ];
 
 #[test]
@@ -197,4 +249,114 @@ fn every_way_of_naming_the_exceptions_file_is_refused() {
         allowed.is_empty(),
         "not refused as the exceptions file: {allowed:#?}"
     );
+}
+
+/// The agent's shell, for the tests that resolve a variable the line does
+/// not set: safe values, and a working directory outside `.claude`.
+fn safe_env() -> Environment {
+    Environment::of(
+        &[
+            ("FILES", "a.rs b.rs"),
+            ("OUT", "/tmp/out"),
+            ("SRC", "/tmp/src"),
+            ("DST", "/tmp/dst"),
+            ("f", "notes.json"),
+            ("r", "repo"),
+            ("GITHUB_WORKSPACE", "/w"),
+            ("DIR", "sub"),
+            ("D", "/tmp/x"),
+            ("HOME", "/home/u"),
+        ],
+        Some("/home/u/proj"),
+    )
+}
+
+/// The same, with `D` and the working directory inside `.claude`, and `f`
+/// the file's name.
+fn claude_env() -> Environment {
+    Environment::of(
+        &[
+            ("D", "/home/u/.claude"),
+            ("f", crate::hook::EXCEPTIONS_FILE),
+            ("HOME", "/home/u"),
+        ],
+        Some("/home/u/.claude"),
+    )
+}
+
+fn refuses_in(command: &str, env: &Environment) -> bool {
+    matches!(
+        pre_tool_guard_in(&bash_call(command), &Policy::ALL_ON, env),
+        Decision::Deny(r) if r == EXCEPTIONS
+    )
+}
+
+/// Each refused with no environment, and decided by the variables' values.
+const RESOLVED: &[&str] = &[
+    "for f in $FILES; do git show HEAD:$f > $OUT/$f; done",
+    "cp $SRC/$f $DST/$f",
+    "cd $GITHUB_WORKSPACE/$DIR",
+    "gh api repos/acme/$r/contents/$f --jq .content",
+    "rm $D/$f",
+    "rm $D/*.json",
+    "cp /tmp/x $D/${f}",
+    "rm $D/*s.json",
+    "rm $PWD/*.json",
+];
+
+#[test]
+fn a_variable_the_line_does_not_set_is_decided_by_its_real_value() {
+    let refused: Vec<&&str> = RESOLVED
+        .iter()
+        .filter(|c| refuses_in(c, &safe_env()))
+        .collect();
+    assert!(refused.is_empty(), "refused with safe values: {refused:#?}");
+    let into_claude = [
+        "rm $D/$f",
+        "rm $D/*.json",
+        "cp /tmp/x $D/${f}",
+        "rm $D/*s.json",
+        "rm $PWD/*.json",
+    ];
+    let allowed: Vec<&&str> = into_claude
+        .iter()
+        .filter(|c| !refuses_in(c, &claude_env()))
+        .collect();
+    assert!(
+        allowed.is_empty(),
+        "allowed pointing into .claude: {allowed:#?}"
+    );
+    for command in RESOLVED {
+        assert!(
+            denies(command),
+            "with no environment, {command} must refuse"
+        );
+    }
+}
+
+#[test]
+fn what_no_environment_can_decide_still_refuses() {
+    for command in [
+        "rm */*",
+        "rm $CLAUDE_CONFIG_DIR/*.json",
+        "rm $UNSET_HERE/*.json",
+        "cd /; rm $PWD/*.json",
+    ] {
+        assert!(refuses_in(command, &safe_env()), "allowed: {command}");
+    }
+}
+
+#[test]
+fn too_many_alternatives_refuse_at_both_bounds() {
+    let words: Vec<String> = (0..20).map(|i| format!("w{i}")).collect();
+    let few = format!("for v in {}; do echo $v/$v; done", words[..3].join(" "));
+    let many = format!("for v in {}; do echo $v/$v; done", words.join(" "));
+    assert!(!refuses_in(&few, &safe_env()));
+    assert!(
+        refuses_in(&many, &safe_env()),
+        "past the substitution bound"
+    );
+    assert!(!refuses_in("echo {a,b}/x", &safe_env()));
+    let lists = format!("echo {}/x", "{a,b}".repeat(9));
+    assert!(refuses_in(&lists, &safe_env()), "past the brace bound");
 }

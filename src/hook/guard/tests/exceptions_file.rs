@@ -10,8 +10,8 @@
 //!   same kind for the file;
 //! * a backtick or `$(…)` span was cut at its `/` before it was read as one
 //!   expansion, so Markdown like `` `adr/` `` in a heredoc body became `*/*`;
-//! * a `.claude` component anywhere before a `*` leaf counted, though a glob
-//!   cannot cross a `/`.
+//! * Python or Rust `{a, b}` in a heredoc body was brace-expanded, and the
+//!   product passed the bound at which the guard refuses rather than guess.
 
 use super::*;
 
@@ -82,10 +82,12 @@ const MUST_BE_ALLOWED: &[&str] = &[
     "ls docs/runbooks/x/*/*",
     // Markdown inline code holding a `/`.
     "cat > /tmp/b.md <<'EOF'\nNo `local/` prefix; only `kubernetes.io/cluster/*` tags.\nEOF",
-    // `.claude` is not the directory the `*` lists.
-    "find . -name '*.md' -not -path '*/.claude/worktrees/*'",
     // A loop variable takes the loop's words, not anything.
     "for w in agent-a agent-b; do git -C .claude/worktrees/$w status; done",
+    // A `bash -c` script that starts with an assignment is ONE word, `S=…`,
+    // to the line outside it; read as a binding, `$S` in it expanded into
+    // copies of the whole script, past the bound.
+    "bash -c 'S=/tmp/s; W=/tmp/w; T=$S/live; rm -rf $T; mkdir -p $T/apps $T/scripts/gates; cd $W; for f in apps/a.yaml scripts/pin.json scripts/gates/r.sha256; do git show 36059be:$f > $T/$f; done; TOKEN=$(gh auth token) timeout 600 python3 scripts/pin.py --repo $T --check --evidence $S/ev.json > $S/body.md; echo exit=$?'",
     // A loop variable set from another one, on a line that spells `.claude`.
     "cd ~/x/.claude/worktrees/a && for d in infra apps; do for f in $d/*; do cat $f; done; done",
 ];
@@ -132,6 +134,46 @@ const MUST_BE_DENIED: &[&str] = &[
     // DELIBERATE OVER-REFUSAL: a quoted pattern reads the same as an unquoted
     // glob once the shell removes the quotes, and `rm ./.claude/*` is a write.
     "find . -not -path './.claude/*'",
+    // KEPT ON PURPOSE: `worktrees` may be a link back to `.claude`.
+    "find . -name '*.md' -not -path '*/.claude/worktrees/*'",
+];
+
+/// Security review of this change: each one was refused before it, and a
+/// first version of it let each through.
+const BYPASSES: &[&str] = &[
+    // A bracket class that matches `.claude` and also a one-letter name.
+    "rm ~/[.0]*/y*.json",
+    "rm ~/[!x]*/y*.json",
+    // A directory between `.claude` and the leaf may be a link back to it.
+    "ln -s . ~/.claude/s; rm ~/.claude/s/y*.json",
+    "rm ~/.claude/s/y*.json",
+    "rm ~/.claude/x/*",
+    "rm ~/.claude/./y*.json",
+    // A DECOY: a binding on the line that does not take effect where the
+    // variable is read, so the variable keeps its value from the environment.
+    "F=x true; cp /tmp/x ~/.claude/$F",
+    "git -c F=x status; cp /tmp/x ~/.claude/$F",
+    "(F=x); cp /tmp/x ~/.claude/$F",
+    "false && F=x; cp /tmp/x ~/.claude/$F",
+    "cp /tmp/x ~/.claude/$F; F=x",
+    "cp /tmp/x ~/.claude/$F; for F in x; do :; done",
+    "for F in; do :; done; cp /tmp/x ~/.claude/$F",
+    "cat > /tmp/n <<'EOF'\nF=x\nEOF\ncp /tmp/x ~/.claude/$F",
+    // A brace list with a quoted item holding whitespace is still expanded.
+    "rm ~/{.claude,\" \"}/y*.json",
+    "rm ~/.c{l,\" \"}aude/y*.json",
+    // Command substitution, a nested shell, a subshell, `eval`.
+    "rm $(echo ~/.claude)/y*.json",
+    "D=~/.claude bash -c 'rm $D/y*'",
+    "bash -c 'D=~/.claude; rm $D/y*'",
+    "(D=~/.claude; rm $D/y*)",
+    "D=~/.claude; eval \"rm $D/y*\"",
+    "cd ~ && rm .claude/y*",
+    // A wildcard directory with a leaf only the file is likely to match.
+    "rm $D/y*.json",
+    "rm */y*.json",
+    "rm ?*/y*.json",
+    "cp /tmp/x $D/*-exceptions.json",
 ];
 
 #[test]
@@ -148,6 +190,7 @@ fn ordinary_commands_that_name_no_exceptions_file_are_allowed() {
 fn every_way_of_naming_the_exceptions_file_is_refused() {
     let allowed: Vec<&&str> = MUST_BE_DENIED
         .iter()
+        .chain(BYPASSES)
         .filter(|c| !matches!(guard(&bash_call(c)), Decision::Deny(r) if r == EXCEPTIONS))
         .collect();
     assert!(

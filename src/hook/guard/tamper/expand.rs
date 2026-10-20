@@ -2,20 +2,17 @@
 //!
 //! Split out of `tamper.rs` at its size ceiling. Two steps, in this order:
 //!
-//! 1. [`substitute`]: a `$NAME` or `${NAME}` whose NAME is SET ON THE SAME
-//!    LINE (`NAME=value`, `export NAME=value`, `for NAME in a b c`) is replaced
-//!    by each value it is set to there. A variable can hold only a value from
-//!    this line or from the environment the session started with, and a
-//!    command cannot change that environment for a later call; so a variable
-//!    set here holds what it is set to here.
+//! 1. [`substitute`]: a `$NAME` or `${NAME}` whose NAME is set on the same
+//!    line is replaced by each value the line sets it to (see [`bindings`]).
+//!    Unless the guard can tell the binding is IN FORCE where the variable is
+//!    read, the reference itself is kept as one more alternative, standing
+//!    for the value the variable may hold from the environment.
 //! 2. [`collapse`]: every expansion left (`$NAME`, `${…}`, `$(…)`, a backtick
 //!    pair) becomes one [`EXPANSION`] character, BEFORE the word is cut at
 //!    `/`. A span holds `/` of its own: `` `adr/` `` in a Markdown heredoc was
 //!    cut in two and read as `*/*`. An expansion whose text names `claude`
 //!    (`$CLAUDE_CONFIG_DIR`, `$(dirname ~/.claude/x)`) becomes `.claude`
 //!    instead, since that is the directory it may produce.
-
-use std::collections::HashMap;
 
 use super::{CLOSE_BRACE, MAX_ALTERNATIVES, OPEN_BRACE};
 use crate::install::shellword::SimpleCommand;
@@ -24,43 +21,101 @@ use crate::install::shellword::SimpleCommand;
 /// shell word, so it cannot be confused with a character that was typed.
 pub(super) const EXPANSION: char = '\0';
 
-/// Each variable set on the line, and every value it is set to.
-pub(super) type Bindings = HashMap<String, Vec<String>>;
+/// One value the line may give a variable.
+pub(super) struct Binding {
+    name: String,
+    value: String,
+    /// The index of the command that sets it.
+    at: usize,
+    /// For a `for` loop's variable: the index of the loop's `done`. Inside the
+    /// loop body the variable HOLDS one of the loop's words, and nothing else.
+    body_until: Option<usize>,
+}
 
-/// The variables *commands* set: any `NAME=value` word, and the words of a
-/// `for NAME in …` list.
+/// Every variable binding on the line.
+pub(super) type Bindings = Vec<Binding>;
+
+/// The variables *commands* may set: any `NAME=value` word, and the words of
+/// a `for NAME in …` list.
 ///
-/// Read wide on purpose: a word like `-c x=y` binds `x` too. Binding a name
-/// that the shell does not bind only replaces its value, and the value of a
-/// name nothing on the line sets comes from the session's environment, which
-/// no command of this call controls.
+/// An assignment is NEVER taken as in force where the variable is read. It
+/// may be a prefix (`F=x cmd` sets nothing after `cmd`), in a subshell
+/// (`(F=x)`), behind a condition (`false && F=x`), after the read, inside a
+/// heredoc body, or not an assignment at all (`git -c F=x`). Then the read
+/// sees the environment, and the environment is the user's profile, which an
+/// earlier call can have changed. So an assignment ADDS its value as an
+/// alternative and replaces nothing: it decides only what a variable may
+/// hold, never what it may not.
+///
+/// A `for` loop's variable is in force inside the loop's body, and there it
+/// replaces the reference. A non-empty literal list runs the body with each
+/// of its words, whatever conditions surround the loop.
 pub(super) fn bindings(commands: &[SimpleCommand]) -> Bindings {
     let mut out = Bindings::new();
-    for command in commands {
-        // `do for f in …` after a `;` is still a `for`.
-        let skip = command
-            .words
-            .iter()
-            .take_while(|w| matches!(w.as_str(), "do" | "then" | "else" | "!"))
-            .count();
-        let words = &command.words[skip..];
+    for (at, command) in commands.iter().enumerate() {
+        let words = after_keywords(&command.words);
         if words.first().is_some_and(|w| w == "for") && words.get(2).is_some_and(|w| w == "in") {
             if let Some(name) = words.get(1).filter(|n| is_name(n)) {
-                out.entry(name.clone())
-                    .or_default()
-                    .extend(words[3..].iter().cloned());
+                let until = matching_done(commands, at);
+                out.extend(words[3..].iter().map(|value| Binding {
+                    name: name.clone(),
+                    value: value.clone(),
+                    at,
+                    body_until: Some(until),
+                }));
             }
             continue;
         }
         for word in words {
-            if let Some((name, value)) = word.split_once('=').filter(|(n, _)| is_name(n)) {
-                out.entry(name.to_string())
-                    .or_default()
-                    .push(value.to_string());
+            // A value holding whitespace is not taken: unquoted, whitespace
+            // ends the word, so it came from quotes, and in practice it is a
+            // whole `bash -c 'S=…; …'` script read as one `S=` word. Leaving
+            // the variable unbound gives it the environment's value, the
+            // alternative every assignment keeps anyway.
+            if let Some((name, value)) = word
+                .split_once('=')
+                .filter(|(n, v)| is_name(n) && !v.contains(char::is_whitespace))
+            {
+                out.push(Binding {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                    at,
+                    body_until: None,
+                });
             }
         }
     }
     out
+}
+
+/// *words* after the reserved words that may open a command: `do for f in …`
+/// after a `;` is still a `for`.
+fn after_keywords(words: &[String]) -> &[String] {
+    let skip = words
+        .iter()
+        .take_while(|w| matches!(w.as_str(), "do" | "then" | "else" | "!"))
+        .count();
+    &words[skip..]
+}
+
+/// The index of the `done` that closes the loop opened at *open*, or the
+/// line's end.
+fn matching_done(commands: &[SimpleCommand], open: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, command) in commands.iter().enumerate().skip(open) {
+        let words = after_keywords(&command.words);
+        match words.first().map(String::as_str) {
+            Some("for" | "while" | "until" | "select") => depth += 1,
+            Some("done") => {
+                depth -= 1;
+                if depth == 0 {
+                    return i;
+                }
+            }
+            _ => {}
+        }
+    }
+    commands.len()
 }
 
 fn is_name(name: &str) -> bool {
@@ -71,55 +126,73 @@ fn is_name(name: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// How many times a value is itself substituted into: `T=$S/x` and
+/// How deep a value is itself substituted into: `T=$S/x` and
 /// `for f in $d/*` set a variable from another one.
-const MAX_PASSES: usize = 3; // ADR-0569-EXCEPTION(CB): bound on expanding untrusted input, not a per-install knob.
+const MAX_DEPTH: usize = 3; // ADR-0569-EXCEPTION(CB): bound on expanding untrusted input, not a per-install knob.
 
-/// *word* with each `$NAME` / `${NAME}` that *bindings* holds replaced by
-/// each of its values, the values' own references too up to [`MAX_PASSES`],
-/// or `None` past [`MAX_ALTERNATIVES`].
-pub(super) fn substitute(word: &str, bindings: &Bindings) -> Option<Vec<String>> {
-    let mut words = vec![word.to_string()];
-    for _ in 0..MAX_PASSES {
-        let mut next = Vec::new();
-        for w in &words {
-            next.extend(substitute_once(w, bindings)?);
-            if next.len() > MAX_ALTERNATIVES {
-                return None;
-            }
-        }
-        if next == words {
-            break;
-        }
-        words = next;
-    }
-    Some(words)
+/// *word*, read by the command at index *at*, with each `$NAME` / `${NAME}`
+/// the line binds replaced by each value it may hold there, or `None` past
+/// [`MAX_ALTERNATIVES`].
+pub(super) fn substitute(word: &str, bindings: &Bindings, at: usize) -> Option<Vec<String>> {
+    expand_refs(word, bindings, at, MAX_DEPTH)
 }
 
-fn substitute_once(word: &str, bindings: &Bindings) -> Option<Vec<String>> {
+fn expand_refs(word: &str, bindings: &Bindings, at: usize, depth: usize) -> Option<Vec<String>> {
     let chars: Vec<char> = word.chars().collect();
     let mut alternatives = vec![String::new()];
     let mut i = 0;
     while i < chars.len() {
-        let bound = reference(&chars, i).and_then(|(name, end)| Some((bindings.get(&name)?, end)));
-        match bound {
-            Some((values, end)) => {
-                alternatives = alternatives
-                    .iter()
-                    .flat_map(|a| values.iter().map(move |v| format!("{a}{v}")))
-                    .collect();
-                if alternatives.len() > MAX_ALTERNATIVES {
-                    return None;
-                }
-                i = end;
+        let bound = match reference(&chars, i).filter(|_| depth > 0) {
+            Some((name, end)) => {
+                values_at(&chars[i..end], &name, bindings, at, depth)?.map(|values| (values, end))
             }
-            None => {
-                alternatives.iter_mut().for_each(|a| a.push(chars[i]));
-                i += 1;
-            }
+            None => None,
+        };
+        let Some((values, end)) = bound else {
+            alternatives.iter_mut().for_each(|a| a.push(chars[i]));
+            i += 1;
+            continue;
+        };
+        alternatives = alternatives
+            .iter()
+            .flat_map(|a| values.iter().map(move |v| format!("{a}{v}")))
+            .collect();
+        if alternatives.len() > MAX_ALTERNATIVES {
+            return None;
         }
+        i = end;
     }
     Some(alternatives)
+}
+
+/// What the reference *text* to *name* may hold at command *at*: `Some(None)`
+/// when the line does not bind it, `None` past [`MAX_ALTERNATIVES`]. The
+/// values are substituted in turn, as read where they were set.
+fn values_at(
+    text: &[char],
+    name: &str,
+    bindings: &Bindings,
+    at: usize,
+    depth: usize,
+) -> Option<Option<Vec<String>>> {
+    let in_force = |b: &Binding| b.body_until.is_some_and(|until| b.at < at && at < until);
+    // Every value the line may give it, a loop's words outside the loop too:
+    // after `done` the variable keeps the last word.
+    let known: Vec<&Binding> = bindings.iter().filter(|b| b.name == name).collect();
+    if known.is_empty() {
+        return Some(None);
+    }
+    let mut values = Vec::new();
+    for b in &known {
+        values.extend(expand_refs(&b.value, bindings, b.at, depth - 1)?);
+        if values.len() > MAX_ALTERNATIVES {
+            return None;
+        }
+    }
+    if !known.iter().any(|b| in_force(b)) {
+        values.push(text.iter().collect());
+    }
+    Some(Some(values))
 }
 
 /// The NAME of a plain `$NAME` or `${NAME}` at *at*, and the index after it.
@@ -213,29 +286,45 @@ mod tests {
     use crate::install::shellword::shell_commands;
 
     #[test]
-    fn a_variable_set_on_the_line_takes_its_values_there() {
+    fn an_assignment_adds_a_value_and_a_loop_variable_replaces_it() {
+        // 0 `D=…`  1 `export E=…`  2 `for w in a b`  3 `do echo $w`  4 `done`
         let b = bindings(&shell_commands(
-            "D=~/.claude; export E=/tmp; for w in a b; do :; done",
+            "D=~/.claude; export E=/tmp; for w in a b; do echo $w; done",
         ));
-        assert_eq!(substitute("$D/x", &b).unwrap(), ["~/.claude/x"]);
-        assert_eq!(substitute("${E}/$w", &b).unwrap(), ["/tmp/a", "/tmp/b"]);
+        assert_eq!(substitute("$D/x", &b, 3).unwrap(), ["~/.claude/x", "$D/x"]);
         assert_eq!(
-            substitute("$UNSET/${E:-x}", &b).unwrap(),
+            substitute("${E}/$w", &b, 3).unwrap(),
+            ["/tmp/a", "/tmp/b", "${E}/a", "${E}/b"],
+            "inside the body the loop variable holds only its words"
+        );
+        assert_eq!(
+            substitute("$w", &b, 5).unwrap(),
+            ["a", "b", "$w"],
+            "after the loop it may not be in force"
+        );
+        assert_eq!(
+            substitute("$UNSET/${E:-x}", &b, 3).unwrap(),
             ["$UNSET/${E:-x}"]
         );
+    }
+
+    #[test]
+    fn a_value_is_substituted_where_it_was_set_to_a_bound() {
+        // 0 `for d in a`  1 `do for f in $d/*`  2 `do echo $f`  3 `done`  4 `done`
         let b = bindings(&shell_commands(
-            "for d in a; do for f in $d/*; do :; done; done",
+            "for d in a; do for f in $d/*; do echo $f; done; done",
         ));
-        assert_eq!(
-            substitute("$f", &b).unwrap(),
-            ["a/*"],
-            "a value's own references"
-        );
+        assert_eq!(substitute("$f", &b, 2).unwrap(), ["a/*"]);
         let b = bindings(&shell_commands("P=$P:x"));
-        assert_eq!(substitute("$P", &b).unwrap(), ["$P:x:x:x"], "bounded");
-        let many = format!("for v in {}; do :; done", "x ".repeat(20));
+        let p = substitute("$P", &b, 1).unwrap();
+        assert_eq!(p.len(), 4, "bounded: {p:?}");
+        assert!(p.contains(&"$P".to_string()));
+        let many = format!("for v in {}; do echo $v/$v; done", "x ".repeat(20));
         let b = bindings(&shell_commands(&many));
-        assert!(substitute("$v/$v", &b).is_none(), "past the bound refuses");
+        assert!(
+            substitute("$v/$v", &b, 1).is_none(),
+            "past the bound refuses"
+        );
     }
 
     #[test]

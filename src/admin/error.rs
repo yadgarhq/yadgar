@@ -93,6 +93,14 @@ pub enum AdminError {
     RepeatedPageToken,
     #[error("--credential-id must not be empty")]
     EmptyCredentialId,
+    /// The `token` is not in the alphabet the gateway issues (standard base64,
+    /// RFC 4648 section 4). Nothing of it is echoed: it may hold terminal
+    /// escapes, and the operator can act on the refusal without seeing it.
+    #[error(
+        "the gateway's token is not standard base64 (RFC 4648 section 4); it was not \
+         printed or written, and the enrolment it belongs to should be voided"
+    )]
+    TokenAlphabet,
     #[error("cannot write the token to {0}: {1}")]
     TokenFile(PathBuf, std::io::Error),
     #[error("cannot write to the terminal: {0}")]

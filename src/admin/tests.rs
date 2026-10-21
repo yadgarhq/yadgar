@@ -577,3 +577,79 @@ async fn an_escape_sequence_in_the_enrolment_id_never_reaches_stderr() {
     assert!(!err.contains('\u{1b}') && !err.contains('\u{7}'), "{err:?}");
     assert!(err.contains(r"e\u{1b}]52;c;aGk="), "{err:?}");
 }
+
+// ---- the token is checked against the alphabet the gateway issues (ledger 1741) ----
+
+#[tokio::test]
+async fn a_token_outside_the_issued_alphabet_is_refused_and_printed_nowhere() {
+    // The gateway issues STANDARD base64 with padding. Anything else in the
+    // `token` field is a gateway that is not behaving, and on `--stdout` the
+    // token goes straight to the operator's terminal, so an ESC (an OSC 52
+    // clipboard write, say) must never get there raw. Constructed cases, one per
+    // class: C0 controls, a C1 control, a bidi override, a space, a newline.
+    let cases = [
+        r#"{"token":"QUJD\u001b]52;c;aGk=\u0007","enrolment_id":"e"}"#,
+        r#"{"token":"QUJD\u009b2J","enrolment_id":"e"}"#,
+        r#"{"token":"QUJD\u202eREVA","enrolment_id":"e"}"#,
+        r#"{"token":"QUJD REVG","enrolment_id":"e"}"#,
+        r#"{"token":"QUJD\nREVG","enrolment_id":"e"}"#,
+    ];
+    for body in cases {
+        let (result, _, out, err) = execute_against(
+            &["issue-enrolment", "--user-id", "u-42", "--stdout"],
+            "200 OK",
+            body,
+        )
+        .await;
+        assert!(result.is_err(), "accepted {body}");
+        assert!(
+            out.is_empty(),
+            "{body}: stdout {:?}",
+            String::from_utf8_lossy(&out)
+        );
+        let shown = format!("{}{}", result.unwrap_err(), String::from_utf8_lossy(&err));
+        assert!(
+            !shown.chars().any(|c| c.is_control() && c != '\n'),
+            "{body}: a control character reached the operator: {shown:?}"
+        );
+        assert!(
+            !shown.contains("QUJD"),
+            "{body}: the token was echoed: {shown:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_token_outside_the_issued_alphabet_writes_no_file() {
+    let dir = crate::testserver::scratch_dir("admin-alphabet");
+    let file = dir.join("token");
+    let (result, _, out, _) = execute_against(
+        &[
+            "issue-enrolment",
+            "--user-id",
+            "u-42",
+            "--out",
+            file.to_str().unwrap(),
+        ],
+        "200 OK",
+        r#"{"token":"QUJD\u001b[2J","enrolment_id":"e"}"#,
+    )
+    .await;
+    assert!(result.is_err(), "{result:?}");
+    assert!(!file.exists(), "the token file was written");
+    assert!(out.is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn a_padded_standard_base64_token_still_prints() {
+    // The control: every character class the gateway really emits.
+    let (result, _, out, _) = execute_against(
+        &["issue-enrolment", "--user-id", "u-42", "--stdout"],
+        "200 OK",
+        r#"{"token":"Ab09+/xyz=","enrolment_id":"e"}"#,
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(String::from_utf8(out).unwrap(), "Ab09+/xyz=\n");
+}

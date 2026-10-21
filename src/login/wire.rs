@@ -20,9 +20,15 @@ const LOGIN_PATH: &str = "auth/login";
 /// Where the gateway serves enrolment — the unauthenticated half of D73.
 const ENROL_PATH: &str = "auth/enrol";
 
+/// What `auth/login` answers with.
+///
+/// `expires_at` is RFC 3339 UTC (ADR-0972 (3)). Absent from a gateway older
+/// than gateway#128, and then stored as absent: never guessed.
 #[derive(Debug, Deserialize)]
-struct LoginResponse {
-    token: String,
+pub(super) struct LoginResponse {
+    pub(super) token: String,
+    #[serde(default)]
+    pub(super) expires_at: Option<String>,
 }
 
 /// What `auth/enrol` answers with.
@@ -35,6 +41,8 @@ struct LoginResponse {
 pub(super) struct EnrolResponse {
     pub(super) token: String,
     pub(super) username: String,
+    #[serde(default)]
+    pub(super) expires_at: Option<String>,
 }
 
 /// The URL an enrolment goes to. Same join rule as [`login_url`], same reason.
@@ -66,6 +74,12 @@ pub(super) async fn redeem(
         .map_err(|e| LoginError::Unreachable(url, e))?;
 
     let status = response.status();
+    // ENROL ONLY (ADR-0977): the redemption committed, so the password is
+    // set, but its credential lost the epoch race. The gateway's body is not
+    // echoed; the fixed sentence is the client's own.
+    if status == reqwest::StatusCode::CONFLICT {
+        return Err(LoginError::PasswordSetNoCredential);
+    }
     match verdict(status) {
         // A REPLAYED SECRET AND AN UNKNOWN ONE ANSWER IDENTICALLY, by design —
         // `RedeemEnrolment` is unauthenticated, so telling them apart would say
@@ -116,7 +130,7 @@ pub(super) async fn exchange(
     gateway: &str,
     username: &str,
     password: &str,
-) -> Result<String, LoginError> {
+) -> Result<LoginResponse, LoginError> {
     let url = login_url(gateway);
     let response = client
         .post(&url)
@@ -133,11 +147,7 @@ pub(super) async fn exchange(
 
     let status = response.status();
     match verdict(status) {
-        Verdict::Issued => Ok(response
-            .json::<LoginResponse>()
-            .await
-            .map_err(LoginError::Malformed)?
-            .token),
+        Verdict::Issued => response.json().await.map_err(LoginError::Malformed),
         Verdict::Refused => Err(LoginError::Refused),
         Verdict::Unexpected => Err(LoginError::Unexpected(status)),
     }

@@ -22,6 +22,7 @@ async fn ask_at(
         url: &url,
         bearer: TOKEN,
         instance: Some("inst-1"),
+        expires_at: None,
     };
     let mut out = Vec::new();
     let result = execute(&client, &gateway, &mut out).await;
@@ -189,6 +190,7 @@ async fn an_unreachable_gateway_is_a_transport_error_naming_the_address() {
         url: &url,
         bearer: TOKEN,
         instance: None,
+        expires_at: None,
     };
     let mut out = Vec::new();
     let result = execute(&client, &gateway, &mut out).await;
@@ -198,4 +200,74 @@ async fn an_unreachable_gateway_is_a_transport_error_naming_the_address() {
     );
     let printed = String::from_utf8(out).unwrap();
     assert_no_token(&result, &printed);
+}
+
+// ---- the stored expiry (ADR-0972 (3), ledger 1628) ----
+
+/// [`execute`] against a one-shot server, with *expires_at* stored.
+async fn ask_expiring(
+    status: &'static str,
+    body: &'static str,
+    expires_at: Option<&str>,
+) -> (Result<(), WhoamiError>, String) {
+    let (addr, _served) = crate::testserver::answer_once(status, body).await;
+    let client = crate::trust::client(None, None).unwrap();
+    let url = format!("http://{addr}/");
+    let gateway = Gateway {
+        url: &url,
+        bearer: TOKEN,
+        instance: None,
+        expires_at,
+    };
+    let mut out = Vec::new();
+    let result = execute(&client, &gateway, &mut out).await;
+    (result, String::from_utf8(out).unwrap())
+}
+
+#[tokio::test]
+async fn whoami_prints_the_stored_expiry() {
+    let (result, printed) = ask_expiring("200 OK", HAPPY, Some("2999-01-01T00:00:00Z")).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        printed.contains("expires_at:      2999-01-01T00:00:00Z\n"),
+        "{printed}"
+    );
+}
+
+#[tokio::test]
+async fn whoami_says_unknown_when_no_expiry_is_stored() {
+    let (result, printed) = ask_expiring("200 OK", HAPPY, None).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(printed.contains("expires_at:      unknown\n"), "{printed}");
+}
+
+#[tokio::test]
+async fn a_401_after_the_stored_expiry_names_the_expiry() {
+    let (result, printed) = ask_expiring(
+        "401 Unauthorized",
+        r#"{"error":"unauthenticated"}"#,
+        Some("2020-01-01T00:00:00Z"),
+    )
+    .await;
+    let e = result.as_ref().unwrap_err();
+    assert!(matches!(e, WhoamiError::Expired(_)), "{e:?}");
+    assert_eq!(
+        e.to_string(),
+        "your credential expired at 2020-01-01T00:00:00Z; run `yaadgaar login`"
+    );
+    assert_no_token(&result, &printed);
+}
+
+#[tokio::test]
+async fn a_401_before_the_stored_expiry_keeps_the_gateways_reason() {
+    let (result, _) = ask_expiring(
+        "401 Unauthorized",
+        r#"{"error":"unauthenticated"}"#,
+        Some("2999-01-01T00:00:00Z"),
+    )
+    .await;
+    assert!(
+        matches!(&result, Err(WhoamiError::Refused(m)) if m == "unauthenticated"),
+        "{result:?}"
+    );
 }

@@ -10,6 +10,7 @@
 mod admin;
 mod config;
 mod enrolment;
+mod expiry;
 mod hook;
 mod install;
 mod login;

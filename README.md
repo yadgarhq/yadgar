@@ -46,7 +46,9 @@ lose its tasks with nothing to report.
 | `yaadgaar verify`                   | Reports drift in the installed environment. Scheduled, not remembered — the daemon cannot see `~/.claude/settings.json`, so nothing server-side can ever notice.                                                                                                                                                                                |
 | `yaadgaar hook <event>`             | What `settings.json` invokes. A hook is a dispatch, not a program.                                                                                                                                                                                                                                                                              |
 | `yaadgaar admin issue-enrolment`    | Issues an enrolment token for an existing user (`--user-id`): a first enrolment or a password reset, sent with your own administrator credential. Writes the token only where you name, with `--out <new file>` (0600) or `--stdout`. `--revoke-existing` revokes the user's existing credentials on redemption (a reset after a lost machine). |
-| `yaadgaar admin revoke-credentials` | Revokes every live credential a user holds, now (`--user-id yadgar:user:<uuidv7>`), sent with your own administrator credential. Prints the count revoked. It does not change the password or lock the account. You cannot revoke your own credentials, and it asks no confirmation.                                                            |
+| `yaadgaar admin revoke-credentials` | Revokes every live credential a user holds, now (`--user-id yadgar:user:<uuidv7>`), sent with your own administrator credential. Prints the count revoked and the count of outstanding enrolments voided. It does not change the password or lock the account. You cannot revoke your own credentials, and it asks no confirmation.             |
+| `yaadgaar admin list-credentials`   | Lists a user's live credentials (`--user-id`), one row each: id, created, expires, label. Follows every page. Never lists a token.                                                                                                                                                                                                              |
+| `yaadgaar admin revoke-credential`  | Revokes one credential (`--user-id`, `--credential-id` from `list-credentials`), sent with your own administrator credential. You may revoke your own.                                                                                                                                                                                          |
 
 `enrol` (first machine) or `login` (any other), then `install`, is the whole
 setup, and `verify` is the one to schedule. The project key is read once, from
@@ -158,6 +160,32 @@ account is not locked. It asks no confirmation. The gateway refuses (403) a
 non-administrator, the bootstrap token, and an administrator targeting
 themselves, and answers 404 for an unknown user.
 
+Revoke-all also voids the user's outstanding enrolment tokens (ADR-0972 (5)).
+The command prints that count too, as `voided N outstanding enrolments`. A
+gateway older than gateway#127 does not report it, and then the line is absent.
+
+### Revoking one credential
+
+To log out one machine and keep the others, list the user's credentials and
+revoke one by its id:
+
+```bash
+yaadgaar admin list-credentials --user-id "$USER_ID"
+yaadgaar admin revoke-credential --user-id "$USER_ID" --credential-id "$CREDENTIAL_ID"
+```
+
+`list-credentials` prints one tab-separated row per live credential on stdout:
+the id, the creation time, the expiry, and the label the machine gave at login.
+The expiry is `never` for a credential minted before expiry existed. A count
+goes to stderr. An unknown user gives an empty list, not an error.
+
+`revoke-credential` prints `revoked credential <id>`. It refuses a receipt that
+names another user or another credential. The gateway answers 404 `no such
+credential for this user` for an unknown id and for another user's id alike.
+Unlike `revoke-credentials`, an administrator may revoke their own credential
+here (ADR-0972 (2)). Both commands need gateway#127 or later; an older gateway
+answers 404 and the command says so.
+
 ### Finding your private project prefix
 
 A private project path is `local/<account_segment>/…` (ADR-0954). Ask the
@@ -171,16 +199,37 @@ yaadgaar whoami
 user_id:         yadgar:user:<uuid>
 account_segment: <uuid>
 private prefix:  local/<uuid>/
+expires_at:      2027-01-19T08:00:00Z
 ```
+
+`expires_at` is the expiry the gateway gave at `login` or `enrol`, stored in
+the config (ADR-0972 (3)). It is `unknown` for a config written before this
+field, or from a gateway older than gateway#128.
 
 It uses the saved login and calls the gateway's `GET /auth/whoami`
 (ADR-0959, gateway 0.12.17 or later). It exits non-zero when there is no saved
 login, when the gateway refuses the credential (401: it is invalid or revoked,
-so run `yaadgaar login` again), when the gateway cannot be reached, when the
+so run `yaadgaar login` again; after the stored expiry it names the expiry
+instead), when the gateway cannot be reached, when the
 gateway answers 404 (it is older than 0.12.17 and does not serve the route),
 when the gateway names no account segment (the dev trusted-headers path), and
 when the segment is not one path segment (it holds a `/`, whitespace or a
 control character).
+
+### Credential expiry
+
+A credential from `login` or `enrol` expires (ADR-0972 (3); 90 days by
+default). Both commands store the expiry the gateway answers, and `whoami`
+shows it. The password does not expire, so the fix is always `yaadgaar login`.
+
+- A 401 after the stored expiry names the expiry and says to run
+  `yaadgaar login`. This holds in `serve`, `whoami` and every `admin`
+  command. Before the expiry, or with no stored expiry, the gateway's own
+  reason is shown as before.
+- A credential minted before expiry existed has none and keeps working.
+- `enrol` can answer that the password is set but no credential was issued,
+  because the account changed during the redemption (HTTP 409, ADR-0977). The
+  password is then set and nothing is stored: run `yaadgaar login`.
 
 ## Installing
 

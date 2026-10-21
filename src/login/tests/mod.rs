@@ -347,3 +347,109 @@ fn a_machine_that_will_not_say_its_name_is_labelled_rather_than_left_blank() {
         "unnamed machine"
     );
 }
+
+// ---- expires_at and the enrol 409 (ADR-0972 (3), ADR-0977) ----
+
+#[tokio::test]
+async fn login_keeps_the_expiry_the_gateway_answered() {
+    let (addr, served) = crate::testserver::answer_once(
+        "200 OK",
+        r#"{"token":"tok","expires_at":"2027-01-19T08:00:00.123456Z"}"#,
+    )
+    .await;
+    let issued = exchange(
+        &reqwest::Client::new(),
+        &format!("http://{addr}/"),
+        "someone",
+        "hunter2",
+    )
+    .await
+    .expect("a 200 is a login");
+    let _ = served.await;
+    assert_eq!(issued.token, "tok");
+    assert_eq!(
+        issued.expires_at.as_deref(),
+        Some("2027-01-19T08:00:00.123456Z")
+    );
+}
+
+#[tokio::test]
+async fn a_login_answer_without_an_expiry_is_still_a_login() {
+    // A gateway older than gateway#128, or a credential with no expiry.
+    let (addr, served) = crate::testserver::answer_once("200 OK", r#"{"token":"tok"}"#).await;
+    let issued = exchange(
+        &reqwest::Client::new(),
+        &format!("http://{addr}/"),
+        "someone",
+        "hunter2",
+    )
+    .await
+    .expect("a 200 is a login");
+    let _ = served.await;
+    assert_eq!(issued.expires_at, None);
+}
+
+#[tokio::test]
+async fn enrol_keeps_the_expiry_the_gateway_answered() {
+    let (addr, served) = crate::testserver::answer_once(
+        "200 OK",
+        r#"{"token":"tok","username":"sentinel.person","expires_at":"2027-01-19T08:00:00Z"}"#,
+    )
+    .await;
+    let answer = redeem(
+        &reqwest::Client::new(),
+        &format!("http://{addr}/"),
+        ITS_SECRET,
+        "a-new-password",
+    )
+    .await
+    .expect("a 200 is an enrolment");
+    let _ = served.await;
+    assert_eq!(answer.expires_at.as_deref(), Some("2027-01-19T08:00:00Z"));
+}
+
+#[tokio::test]
+async fn an_enrol_409_says_the_password_is_set_and_to_log_in() {
+    let (addr, served) = crate::testserver::answer_once(
+        "409 Conflict",
+        r#"{"error":"something the client must not echo"}"#,
+    )
+    .await;
+    let err = redeem(
+        &reqwest::Client::new(),
+        &format!("http://{addr}/"),
+        ITS_SECRET,
+        "a-new-password",
+    )
+    .await
+    .expect_err("a 409 is not an enrolment");
+    let _ = served.await;
+    assert!(
+        matches!(err, LoginError::PasswordSetNoCredential),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "your password is set, but the account changed before a credential could be \
+         issued; run `yaadgaar login`"
+    );
+}
+
+#[tokio::test]
+async fn a_login_409_stays_an_unexpected_answer() {
+    // ADR-0977 carves out /auth/enrol only.
+    let (addr, served) = crate::testserver::answer_once("409 Conflict", "{}").await;
+    let err = exchange(
+        &reqwest::Client::new(),
+        &format!("http://{addr}/"),
+        "someone",
+        "hunter2",
+    )
+    .await
+    .expect_err("a 409 is not a login");
+    let _ = served.await;
+    assert!(
+        matches!(err, LoginError::Unexpected(s) if s.as_u16() == 409),
+        "{err:?}"
+    );
+}

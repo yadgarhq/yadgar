@@ -216,6 +216,8 @@ async fn handle(
     // met a host that sends neither.
     let filled = session::fill_meta(parsed, capabilities);
     let outcome = forward(client, config, context, filled.as_deref().unwrap_or(line)).await;
+    let expired = crate::expiry::expired_at(config.expires_at(), crate::expiry::now());
+    let outcome = outcome.naming_expiry(expired);
 
     // The cache is read HERE rather than inside [`respond`], and only when it
     // could possibly be used. That is what keeps `respond` a pure function, and

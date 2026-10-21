@@ -27,6 +27,9 @@ pub enum WhoamiError {
          revoked. Run `yaadgaar login` again"
     )]
     Refused(String),
+    /// 401 after the stored expiry has passed (ADR-0972 (3)).
+    #[error("your credential expired at {0}; run `yaadgaar login`")]
+    Expired(String),
     /// 404: a gateway older than the route.
     #[error("this gateway does not serve /auth/whoami (gateway older than 0.12.17?)")]
     RouteNotServed,
@@ -65,6 +68,7 @@ pub async fn run() -> Result<(), WhoamiError> {
         url: config.gateway_url(),
         bearer: config.token(),
         instance: config.instance(),
+        expires_at: config.expires_at(),
     };
     execute(&client, &gateway, &mut std::io::stdout().lock()).await
 }
@@ -76,7 +80,17 @@ async fn execute(
     gateway: &Gateway<'_>,
     stdout: &mut dyn std::io::Write,
 ) -> Result<(), WhoamiError> {
-    let identity = request(client, gateway).await?;
+    let identity = match request(client, gateway).await {
+        // A 401 after the stored expiry is the expiry, not the guess.
+        Err(WhoamiError::Refused(reason)) => {
+            let expired = crate::expiry::expired_at(gateway.expires_at, crate::expiry::now());
+            return Err(match expired {
+                Some(at) => WhoamiError::Expired(at.to_string()),
+                None => WhoamiError::Refused(reason),
+            });
+        }
+        other => other?,
+    };
     // NO PREFIX WITHOUT A SEGMENT: `local//` is not a path anybody can use.
     let segment = match identity.account_segment.as_deref().map(str::trim) {
         Some(s) if !s.is_empty() => s.to_string(),
@@ -91,6 +105,9 @@ async fn execute(
     writeln!(stdout, "user_id:         {}", identity.user_id)?;
     writeln!(stdout, "account_segment: {segment}")?;
     writeln!(stdout, "private prefix:  local/{segment}/")?;
+    // THE STORED expiry, as `login` or `enrol` received it (ADR-0972 (3)).
+    let expires = crate::expiry::shown(gateway.expires_at);
+    writeln!(stdout, "expires_at:      {expires}")?;
     Ok(())
 }
 

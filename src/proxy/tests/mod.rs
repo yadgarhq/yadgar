@@ -761,3 +761,44 @@ async fn a_legacy_host_s_request_capabilities_never_reach_the_gateway() {
         );
     }
 }
+
+// ---- a 401 after the stored expiry (ADR-0972 (3), ledger 1628) ----
+
+/// The message `respond` gives a refused `tools/call` once *expired* is applied.
+fn refusal_message(status: reqwest::StatusCode, expired: Option<&str>) -> String {
+    let outcome =
+        Outcome::Rejected(status, Some("the gateway's own reason".into())).naming_expiry(expired);
+    let reply = respond("tools/call", Some(&json!(1)), outcome, None, None)
+        .reply
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    v["error"]["message"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn a_401_after_the_stored_expiry_names_the_expiry() {
+    let message = refusal_message(
+        reqwest::StatusCode::UNAUTHORIZED,
+        Some("2020-01-01T00:00:00Z"),
+    );
+    assert!(
+        message.contains("your credential expired at 2020-01-01T00:00:00Z; run `yaadgaar login`"),
+        "{message}"
+    );
+    assert!(!message.contains("own reason"), "{message}");
+}
+
+#[test]
+fn a_401_before_the_stored_expiry_keeps_the_gateways_reason() {
+    let message = refusal_message(reqwest::StatusCode::UNAUTHORIZED, None);
+    assert!(message.contains("the gateway's own reason"), "{message}");
+    assert!(!message.contains("expired"), "{message}");
+}
+
+#[test]
+fn a_403_is_never_read_as_an_expiry() {
+    // A 403 is a resolved credential refused a verb; an expired one is a 401.
+    let message = refusal_message(reqwest::StatusCode::FORBIDDEN, Some("2020-01-01T00:00:00Z"));
+    assert!(message.contains("the gateway's own reason"), "{message}");
+    assert!(!message.contains("expired"), "{message}");
+}

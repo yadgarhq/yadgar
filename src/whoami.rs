@@ -102,7 +102,9 @@ async fn execute(
     {
         return Err(WhoamiError::UnsafeSegment(segment));
     }
-    writeln!(stdout, "user_id:         {}", identity.user_id)?;
+    // The gateway wrote it: escape sequences must not reach the terminal.
+    let user_id = crate::printable::printable(&identity.user_id);
+    writeln!(stdout, "user_id:         {user_id}")?;
     writeln!(stdout, "account_segment: {segment}")?;
     writeln!(stdout, "private prefix:  local/{segment}/")?;
     // THE STORED expiry, as `login` or `enrol` received it (ADR-0972 (3)).

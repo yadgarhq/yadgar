@@ -394,3 +394,58 @@ async fn no_bearer_and_no_user_id_reaches_any_output() {
         assert!(!text.contains(USER), "the user id was printed: {text}");
     }
 }
+
+// ---- terminal escapes from the gateway never print raw ----
+
+#[tokio::test]
+async fn an_escape_sequence_in_any_listed_field_never_prints_raw() {
+    let r = run(
+        &list_args(),
+        vec![(
+            "200 OK",
+            r#"{"credentials":[{"id":"c\u001b]52;c;aGk=\u0007","label":"l\u009b2J","created_at":"\u001b[2J","expires_at":"\u001b]0;title\u0007"}],"next_page_token":""}"#,
+        )],
+    )
+    .await;
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    assert!(
+        !r.out.contains('\u{1b}') && !r.out.contains('\u{7}') && !r.out.contains('\u{9b}'),
+        "{:?}",
+        r.out
+    );
+    assert!(r.out.contains(r"c\u{1b}]52;c;aGk=\u{7}"), "{:?}", r.out);
+}
+
+#[tokio::test]
+async fn an_escape_sequence_in_a_refusal_body_never_reaches_the_error() {
+    let r = run(
+        &revoke_args(),
+        vec![("403 Forbidden", r#"{"error":"x\u001b]52;c;aGk=\u0007"}"#)],
+    )
+    .await;
+    let message = r.result.unwrap_err().to_string();
+    assert!(
+        !message.contains('\u{1b}') && !message.contains('\u{7}'),
+        "{message:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_credential_id_never_prints_raw() {
+    let r = run(
+        &[
+            "revoke-credential",
+            "--user-id",
+            USER,
+            "--credential-id",
+            "c\u{1b}[2J",
+        ],
+        vec![(
+            "200 OK",
+            r#"{"user_id":"yadgar:user:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f","credential_id":"c\u001b[2J"}"#,
+        )],
+    )
+    .await;
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    assert!(!r.out.contains('\u{1b}'), "{:?}", r.out);
+}

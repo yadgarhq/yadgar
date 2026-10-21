@@ -78,3 +78,11 @@ fn the_expired_sentence_names_the_time_and_the_fix() {
         "your credential expired at 2026-10-21T06:22:04Z; run `yaadgaar login`"
     );
 }
+
+#[test]
+fn a_stored_expiry_that_does_not_parse_is_never_shown_raw() {
+    // A tampered config must not reach the terminal: only a value the strict
+    // parser accepts (digits, `-`, `:`, `T`, `.`, `Z`) is shown as stored.
+    assert_eq!(shown(Some("2999-01-01T00:00:00Z\u{1b}[2J")), "unreadable");
+    assert_eq!(shown(Some("\u{1b}]52;c;aGk=\u{7}")), "unreadable");
+}

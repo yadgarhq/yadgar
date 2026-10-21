@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 
 use super::{gateway_error, AdminError, Gateway};
+use crate::printable::printable;
 
 const LIST: &str = "list-credentials";
 const REVOKE: &str = "revoke-credential";
@@ -128,7 +129,7 @@ pub(super) async fn revoke(
     if receipt.user_id != user_id || receipt.credential_id != credential_id {
         return Err(AdminError::CredentialEchoMismatch);
     }
-    writeln!(stdout, "revoked credential {credential_id}")?;
+    writeln!(stdout, "revoked credential {}", printable(credential_id))?;
     Ok(())
 }
 
@@ -164,31 +165,16 @@ async fn post(
     Ok((status, response.text().await.unwrap_or_default()))
 }
 
-/// One row: id, created, expires, label. The label is free text a person
-/// chose, so control characters are escaped rather than sent to a terminal.
+/// One row: id, created, expires, label. Every field is gateway-written, so
+/// each goes through [`printable`] before it reaches a terminal.
 fn render(row: &Row) -> String {
-    let label: String = row
-        .label
-        .chars()
-        .map(|c| {
-            if c.is_control() {
-                c.escape_debug().to_string()
-            } else {
-                c.to_string()
-            }
-        })
-        .collect();
     format!(
-        "{}\t{}\t{}\t{label}",
-        clean(&row.id),
-        clean(row.created_at.as_deref().unwrap_or("unknown")),
-        clean(row.expires_at.as_deref().unwrap_or("never")),
+        "{}\t{}\t{}\t{}",
+        printable(&row.id),
+        printable(row.created_at.as_deref().unwrap_or("unknown")),
+        printable(row.expires_at.as_deref().unwrap_or("never")),
+        printable(&row.label),
     )
-}
-
-/// A gateway-written field, with any control character dropped.
-fn clean(field: &str) -> String {
-    field.chars().filter(|c| !c.is_control()).collect()
 }
 
 #[cfg(test)]

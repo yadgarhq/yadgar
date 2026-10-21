@@ -14,6 +14,7 @@ mod expiry;
 mod hook;
 mod install;
 mod login;
+mod printable;
 mod project;
 mod proxy;
 mod scheme;

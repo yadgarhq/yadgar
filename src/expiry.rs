@@ -85,12 +85,20 @@ pub fn expired_at(stored: Option<&str>, now: i64) -> Option<&str> {
     stored.filter(|text| parse(text).is_some_and(|at| at <= now))
 }
 
-/// The stored expiry for display, or `unknown`.
+/// The stored expiry for display, `unknown`, or `unreadable`.
 ///
 /// `unknown`, not `never`: a config written by an older client, or from an
 /// older gateway's answer, holds no expiry even when the credential has one.
+///
+/// **ONLY A VALUE [`parse`] ACCEPTS IS SHOWN.** Its alphabet is digits, `-`,
+/// `:`, `T`, `.` and `Z`, so a tampered config cannot put an escape sequence
+/// on the terminal through this field.
 pub fn shown(stored: Option<&str>) -> &str {
-    stored.unwrap_or("unknown")
+    match stored {
+        None => "unknown",
+        Some(text) if parse(text).is_some() => text,
+        Some(_) => "unreadable",
+    }
 }
 
 /// What a 401 says once the stored expiry has passed.

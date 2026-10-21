@@ -271,3 +271,41 @@ async fn a_401_before_the_stored_expiry_keeps_the_gateways_reason() {
         "{result:?}"
     );
 }
+
+// ---- terminal escapes from the gateway or the config never print raw ----
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_user_id_or_a_tampered_expiry_never_prints_raw() {
+    let (result, printed) = ask_expiring(
+        "200 OK",
+        "{\"account_segment\":\"0199f1a2-7b3c-7d4e-8f50-123456789abc\",\
+         \"user_id\":\"yadgar:user:\\u001b]52;c;aGk=\\u0007\\u001b[2J\"}",
+        Some("2999-01-01T00:00:00Z\u{1b}[2J"),
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        !printed.contains('\u{1b}') && !printed.contains('\u{7}'),
+        "{printed:?}"
+    );
+    assert!(printed.contains(r"\u{1b}]52;c;aGk="), "{printed:?}");
+    assert!(
+        printed.contains("expires_at:      unreadable\n"),
+        "{printed:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_escape_sequence_in_a_401_reason_never_reaches_the_error() {
+    let (result, _) = ask_expiring(
+        "401 Unauthorized",
+        r#"{"error":"no\u001b]52;c;aGk=\u0007"}"#,
+        None,
+    )
+    .await;
+    let message = result.unwrap_err().to_string();
+    assert!(
+        !message.contains('\u{1b}') && !message.contains('\u{7}'),
+        "{message:?}"
+    );
+}

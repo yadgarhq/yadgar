@@ -433,12 +433,14 @@ fn check_echo(sent: bool, echoed: Option<bool>) -> Result<Option<String>, AdminE
     }
 }
 
-/// The gateway's `{"error": ...}` text, or the raw body when it sent none.
+/// The gateway's `{"error": ...}` text, or the raw body when it sent none,
+/// made [`printable`](crate::printable::printable): it ends up on a terminal.
 pub(crate) fn gateway_error(body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body)
+    let text = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-        .unwrap_or_else(|| body.trim().to_string())
+        .unwrap_or_else(|| body.trim().to_string());
+    crate::printable::printable(&text)
 }
 
 /// Write *token* to a NEW owner-only file at *path*.

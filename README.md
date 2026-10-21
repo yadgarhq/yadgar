@@ -177,7 +177,9 @@ yaadgaar admin revoke-credential --user-id "$USER_ID" --credential-id "$CREDENTI
 `list-credentials` prints one tab-separated row per live credential on stdout:
 the id, the creation time, the expiry, and the label the machine gave at login.
 The expiry is `never` for a credential minted before expiry existed. A count
-goes to stderr. An unknown user gives an empty list, not an error.
+goes to stderr. An unknown user gives an empty list, not an error. A control
+character in any field the gateway sends, as in its error text, prints
+escaped, as `\u{1b}`, so it cannot drive the terminal.
 
 `revoke-credential` prints `revoked credential <id>`. It refuses a receipt that
 names another user or another credential. The gateway answers 404 `no such

@@ -350,6 +350,12 @@ fn a_machine_that_will_not_say_its_name_is_labelled_rather_than_left_blank() {
 
 // ---- expires_at and the enrol 409 (ADR-0972 (3), ADR-0977) ----
 
+/// A password made at run time, so no credential value is written in the
+/// source (CodeQL's hard-coded-credential rule).
+fn throwaway_password() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[tokio::test]
 async fn login_keeps_the_expiry_the_gateway_answered() {
     let (addr, served) = crate::testserver::answer_once(
@@ -361,7 +367,7 @@ async fn login_keeps_the_expiry_the_gateway_answered() {
         &reqwest::Client::new(),
         &format!("http://{addr}/"),
         "someone",
-        "hunter2",
+        &throwaway_password(),
     )
     .await
     .expect("a 200 is a login");
@@ -381,7 +387,7 @@ async fn a_login_answer_without_an_expiry_is_still_a_login() {
         &reqwest::Client::new(),
         &format!("http://{addr}/"),
         "someone",
-        "hunter2",
+        &throwaway_password(),
     )
     .await
     .expect("a 200 is a login");
@@ -400,7 +406,7 @@ async fn enrol_keeps_the_expiry_the_gateway_answered() {
         &reqwest::Client::new(),
         &format!("http://{addr}/"),
         ITS_SECRET,
-        "a-new-password",
+        &throwaway_password(),
     )
     .await
     .expect("a 200 is an enrolment");
@@ -419,7 +425,7 @@ async fn an_enrol_409_says_the_password_is_set_and_to_log_in() {
         &reqwest::Client::new(),
         &format!("http://{addr}/"),
         ITS_SECRET,
-        "a-new-password",
+        &throwaway_password(),
     )
     .await
     .expect_err("a 409 is not an enrolment");
@@ -443,7 +449,7 @@ async fn a_login_409_stays_an_unexpected_answer() {
         &reqwest::Client::new(),
         &format!("http://{addr}/"),
         "someone",
-        "hunter2",
+        &throwaway_password(),
     )
     .await
     .expect_err("a 409 is not a login");

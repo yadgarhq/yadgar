@@ -70,6 +70,13 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ca_pem: Option<String>,
 
+    /// When the credential expires, in RFC 3339 UTC, as the gateway answered
+    /// it at `login` or `enrol` (ADR-0972 (3)). Display and wording only: the
+    /// gateway decides whether a credential is live. `None` for a config
+    /// written before this field, or a gateway that did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expires_at: Option<String>,
+
     /// The directory this config was loaded from, and the only one it writes to.
     ///
     /// A FIELD, not a call to [`base_dir`], and that is the difference between a
@@ -210,6 +217,7 @@ impl Config {
             username: None,
             instance: None,
             ca_pem: None,
+            expires_at: None,
             dir: dir.to_path_buf(),
         }
     }
@@ -224,6 +232,16 @@ impl Config {
     pub fn with_ca_pem(mut self, ca_pem: Option<String>) -> Self {
         self.ca_pem = ca_pem;
         self
+    }
+
+    /// When the new credential expires, as the gateway answered it.
+    pub fn with_expires_at(mut self, expires_at: Option<String>) -> Self {
+        self.expires_at = expires_at;
+        self
+    }
+
+    pub fn expires_at(&self) -> Option<&str> {
+        self.expires_at.as_deref()
     }
 
     pub fn username(&self) -> Option<&str> {

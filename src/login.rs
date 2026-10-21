@@ -44,7 +44,10 @@ use crate::enrolment::{self, EnrolmentError};
 
 mod input;
 mod label;
+mod receipt;
 mod wire;
+
+pub use receipt::{enrolled, logged_in};
 
 use wire::{exchange, redeem};
 
@@ -80,6 +83,13 @@ pub enum LoginError {
     /// yet.
     #[error("that enrolment secret was refused; it may already have been used")]
     SecretRefused,
+    /// 409 from `auth/enrol` (ADR-0977): the password IS set, and only the
+    /// credential was not issued. Nothing is stored; `login` finishes it.
+    #[error(
+        "your password is set, but the account changed before a credential could be \
+         issued; run `yaadgaar login`"
+    )]
+    PasswordSetNoCredential,
     /// Named separately from [`LoginError::Refused`], and it has to be.
     ///
     /// D73 gives an enrolment token 24 hours. An expired one is refused by the
@@ -215,15 +225,16 @@ pub async fn login(
     // the address.
     let ca_pem = choose_ca(ca_file, stored.as_ref(), &gateway);
     let client = crate::trust::client(ca_pem.as_deref(), None).map_err(LoginError::Trust)?;
-    let token = exchange(&client, &gateway, &username, &password).await?;
+    let issued = exchange(&client, &gateway, &username, &password).await?;
 
     let config = reconcile(
         config_dir,
         stored.as_ref(),
         gateway,
-        token,
+        issued.token,
         username,
         ca_pem,
+        issued.expires_at,
     );
     config.save()?;
     Ok(config)
@@ -297,6 +308,9 @@ fn ca_for(previous: Option<&Config>, gateway: &str) -> Option<String> {
 /// along. Best effort: a cache that cannot be deleted must not fail a login,
 /// and the worst case of deleting one that mattered is a single online fetch.
 ///
+/// **THE EXPIRY IS THE NEW CREDENTIAL'S OR NONE**, never the old one's: a
+/// fresh token beside yesterday's expiry would read as expired while live.
+///
 /// TAKES THE PREVIOUS CONFIG AS A PARAMETER rather than loading it, so the rule
 /// is exercisable without a terminal — the same reason `Context::discover` takes
 /// its directory and `hostname_from` takes its sources.
@@ -307,6 +321,7 @@ fn reconcile(
     token: String,
     username: String,
     ca_pem: Option<String>,
+    expires_at: Option<String>,
 ) -> Config {
     // Normalised on both sides, for the reason `ca_for` gives: a hand-edited
     // address that lost its trailing slash must not read as a different
@@ -316,7 +331,8 @@ fn reconcile(
     }
     let mut config = Config::new(config_dir, gateway, token)
         .with_username(Some(username))
-        .with_ca_pem(ca_pem);
+        .with_ca_pem(ca_pem)
+        .with_expires_at(expires_at);
     config.set_instance(previous.and_then(Config::instance).map(str::to_string));
     config
 }
@@ -357,7 +373,7 @@ pub async fn enrol(
     // token an admin built rather than an address a person typed.
     require_https(&gateway)?;
 
-    println!("Enrolling with {}", enrolment.gateway);
+    println!("{}", receipt::enrolling(&enrolment.gateway));
     if enrolment.ca_pem.is_some() {
         // Said out loud, because it is the difference between this machine
         // trusting one certificate for one host and somebody installing a CA
@@ -390,6 +406,7 @@ pub async fn enrol(
         redeemed.token,
         redeemed.username,
         enrolment.ca_pem,
+        redeemed.expires_at,
     );
     config.save()?;
     Ok(config)

@@ -18,6 +18,11 @@ use serde::Deserialize;
 
 use crate::config::Config;
 
+mod credentials;
+mod error;
+
+pub use error::AdminError;
+
 #[derive(Subcommand)]
 pub enum AdminCommand {
     /// Issue an enrolment token for an existing user: their first enrolment,
@@ -72,67 +77,31 @@ pub enum AdminCommand {
         #[arg(long = "user-id")]
         user_id: String,
     },
-}
 
-/// Why an administrative call failed.
-#[derive(Debug, thiserror::Error)]
-pub enum AdminError {
-    #[error(transparent)]
-    Config(#[from] crate::config::ConfigError),
-    #[error(transparent)]
-    Trust(#[from] crate::trust::TrustError),
-    #[error("cannot reach {0}: {1}")]
-    Unreachable(String, reqwest::Error),
-    /// 401: the stored credential did not resolve.
-    #[error("the gateway refused your credential; run `yaadgaar login` again")]
-    Refused,
-    /// 403: the credential resolved, to someone who may not do this. The
-    /// gateway's own text is kept: it says which rule refused (not an
-    /// administrator, or the bootstrap token asking to revoke).
-    #[error("the gateway refused this as not permitted for you: {0}")]
-    NotAdmin(String),
-    #[error("the gateway answered {0}: {1}")]
-    Rejected(reqwest::StatusCode, String),
-    #[error("the gateway's answer was not an enrolment: {0}")]
-    Malformed(String),
-    /// The gateway echoed a different `revoke_existing_credentials` than was
-    /// sent (ledger 1579). The enrolment exists, but it does not do what was
-    /// asked, so it is never reported as a success.
-    #[error(
-        "the gateway issued the enrolment with revoke_existing_credentials={echoed}, \
-         but {sent} was asked for; do not hand this token over"
-    )]
-    EchoMismatch { sent: bool, echoed: bool },
-    #[error("--user-id must not be empty")]
-    EmptyUserId,
-    #[error("--user-id must look like yadgar:user:<lowercase uuidv7>; nothing was sent")]
-    NotCanonicalUserId,
-    /// 403 from `/admin/revoke-credentials`: not an admin, the bootstrap token,
-    /// or the caller targeting themselves (ADR-0945).
-    #[error(
-        "the gateway refused the revocation: {0} (only an administrator may revoke, the \
-         bootstrap token may not, and you cannot revoke your own credentials)"
-    )]
-    RevokeForbidden(String),
-    /// 404 from `/admin/revoke-credentials`.
-    #[error("the gateway has no such user: {0}")]
-    NoSuchUser(String),
-    /// 400 from `/admin/revoke-credentials`.
-    #[error("the gateway rejected the request as malformed: {0}")]
-    BadRequest(String),
-    /// 404 with any body but the gateway's "no such user": the route is absent.
-    #[error("this gateway does not serve /admin/revoke-credentials (gateway older than #120?)")]
-    RouteNotServed,
-    #[error("the gateway's answer was not a revocation receipt: {0}")]
-    MalformedRevocation(String),
-    /// The gateway answered about a different user than the one named. Someone
-    /// else's credentials may have been revoked, so it is never a success.
-    #[error("the gateway answered for a different user than the one named; check who was revoked")]
-    RevokeEchoMismatch,
-    #[error("cannot write the token to {0}: {1}")]
-    TokenFile(PathBuf, std::io::Error),
-    #[error("cannot write to the terminal: {0}")]
-    Output(#[from] std::io::Error),
+    /// List a user's live credentials, one row each: id, created, expires
+    /// (`never` for one minted before expiry existed), label.
+    ///
+    /// Calls `/admin/list-credentials` with YOUR credential, following every
+    /// page, so you must be an administrator. No token is ever listed.
+    ListCredentials {
+        /// The user's id, `yadgar:user:<uuidv7>`.
+        #[arg(long = "user-id")]
+        user_id: String,
+    },
+
+    /// Revoke ONE credential of a user, by the id `list-credentials` showed:
+    /// one lost machine, without logging the user out everywhere.
+    ///
+    /// Calls `/admin/revoke-credential` with YOUR credential, so you must be an
+    /// administrator. You MAY revoke your own credential (ADR-0972 (2)).
+    RevokeCredential {
+        /// The user's id, `yadgar:user:<uuidv7>`.
+        #[arg(long = "user-id")]
+        user_id: String,
+        /// The credential's id, as `list-credentials` printed it.
+        #[arg(long = "credential-id")]
+        credential_id: String,
+    },
 }
 
 /// What `/admin/issue-enrolment` answered.
@@ -152,6 +121,10 @@ pub struct Issued {
 pub struct Revoked {
     pub user_id: String,
     pub revoked: u64,
+    /// Outstanding enrolments revoke-all voided (ADR-0972 (5)). Absent from a
+    /// gateway older than gateway#127, and then not printed.
+    #[serde(default)]
+    pub voided_enrolments: Option<u64>,
 }
 
 /// Where an administrative call goes, and as whom.
@@ -160,6 +133,8 @@ pub struct Gateway<'a> {
     /// The caller's own credential, sent as `Authorization: Bearer`.
     pub bearer: &'a str,
     pub instance: Option<&'a str>,
+    /// The stored expiry of *bearer*, for the wording of a 401 only.
+    pub expires_at: Option<&'a str>,
 }
 
 /// Run one `admin` subcommand against the logged-in gateway.
@@ -173,6 +148,7 @@ pub async fn run(command: AdminCommand) -> Result<(), AdminError> {
         url: config.gateway_url(),
         bearer: config.token(),
         instance: config.instance(),
+        expires_at: config.expires_at(),
     };
     execute(
         command,
@@ -185,12 +161,26 @@ pub async fn run(command: AdminCommand) -> Result<(), AdminError> {
 }
 
 /// [`run`], given its client, gateway and streams, so every path through a
-/// parsed command is reachable from a test.
+/// parsed command is reachable from a test. A 401 after the stored expiry
+/// names the expiry (ADR-0972 (3)).
+async fn execute(
+    command: AdminCommand,
+    client: &reqwest::Client,
+    gateway: &Gateway<'_>,
+    stdout: &mut dyn std::io::Write,
+    stderr: &mut dyn std::io::Write,
+) -> Result<(), AdminError> {
+    let result = dispatch(command, client, gateway, stdout, stderr).await;
+    let expired = crate::expiry::expired_at(gateway.expires_at, crate::expiry::now());
+    result.map_err(|e| e.naming_expiry(expired))
+}
+
+/// One parsed command, run.
 ///
 /// THE RECEIPT NAMES THE ENROLMENT, NEVER THE USER. The operator typed the
 /// user id, and CodeQL's cleartext-logging rule flags it on stderr; the
 /// enrolment id is enough to find the row.
-async fn execute(
+async fn dispatch(
     command: AdminCommand,
     client: &reqwest::Client,
     gateway: &Gateway<'_>,
@@ -232,13 +222,14 @@ async fn execute(
                     writeln!(
                         stderr,
                         "enrolment {} issued; the token is in {}",
-                        issued.enrolment_id,
+                        crate::printable::printable(&issued.enrolment_id),
                         path.display()
                     )?;
                 }
                 None => {
                     writeln!(stdout, "{}", issued.token)?;
-                    writeln!(stderr, "enrolment {} issued", issued.enrolment_id)?;
+                    let id = crate::printable::printable(&issued.enrolment_id);
+                    writeln!(stderr, "enrolment {id} issued")?;
                 }
             }
             writeln!(stderr, "it is single-use and expires in 24 hours")?;
@@ -259,6 +250,14 @@ async fn execute(
                 "credentials"
             };
             writeln!(stdout, "revoked {} {noun}", receipt.revoked)?;
+            if let Some(voided) = receipt.voided_enrolments {
+                let noun = if voided == 1 {
+                    "enrolment"
+                } else {
+                    "enrolments"
+                };
+                writeln!(stdout, "voided {voided} outstanding {noun}")?;
+            }
             if receipt.revoked == 0 {
                 writeln!(
                     stderr,
@@ -267,6 +266,17 @@ async fn execute(
                 )?;
             }
             Ok(())
+        }
+        AdminCommand::ListCredentials { user_id } => {
+            let user_id = canonical_user_id(&user_id)?;
+            credentials::list(client, gateway, &user_id, stdout, stderr).await
+        }
+        AdminCommand::RevokeCredential {
+            user_id,
+            credential_id,
+        } => {
+            let user_id = canonical_user_id(&user_id)?;
+            credentials::revoke(client, gateway, &user_id, &credential_id, stdout).await
         }
     }
 }
@@ -339,7 +349,7 @@ async fn revoke_request(
     let response = builder
         .send()
         .await
-        .map_err(|e| AdminError::Unreachable(url, e))?;
+        .map_err(|e| AdminError::Unreachable(crate::printable::printable(&url), e))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     match status {
@@ -392,7 +402,7 @@ async fn request(
     let response = builder
         .send()
         .await
-        .map_err(|e| AdminError::Unreachable(url, e))?;
+        .map_err(|e| AdminError::Unreachable(crate::printable::printable(&url), e))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     match status {
@@ -424,12 +434,14 @@ fn check_echo(sent: bool, echoed: Option<bool>) -> Result<Option<String>, AdminE
     }
 }
 
-/// The gateway's `{"error": ...}` text, or the raw body when it sent none.
+/// The gateway's `{"error": ...}` text, or the raw body when it sent none,
+/// made [`printable`](crate::printable::printable): it ends up on a terminal.
 pub(crate) fn gateway_error(body: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(body)
+    let text = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-        .unwrap_or_else(|| body.trim().to_string())
+        .unwrap_or_else(|| body.trim().to_string());
+    crate::printable::printable(&text)
 }
 
 /// Write *token* to a NEW owner-only file at *path*.

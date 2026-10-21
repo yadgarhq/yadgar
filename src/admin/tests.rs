@@ -201,7 +201,7 @@ fn revoke_existing_is_an_opt_in_flag() {
             AdminCommand::IssueEnrolment {
                 revoke_existing, ..
             } => revoke_existing,
-            AdminCommand::RevokeCredentials { .. } => unreachable!("parsed issue-enrolment"),
+            _ => unreachable!("parsed issue-enrolment"),
         }
     };
     assert!(!parse(&[]));
@@ -234,6 +234,7 @@ async fn execute_against(
         url: &url,
         bearer: "adm1n-t0ken",
         instance: None,
+        expires_at: None,
     };
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let result = execute(parse(args), &client, &gateway, &mut out, &mut err).await;
@@ -531,4 +532,48 @@ fn revoke_credentials_needs_a_user_id() {
         Probe::try_parse_from(["probe", "revoke-credentials"]).is_err(),
         "--user-id is required"
     );
+}
+
+// ---- the void count (ADR-0972 (5), ledger 1630) ----
+
+#[tokio::test]
+async fn the_void_count_is_printed_beside_the_revoked_count() {
+    let (result, _, out, _) = revoke_against(
+        "200 OK",
+        r#"{"user_id":"yadgar:user:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f","revoked":2,"voided_enrolments":1}"#,
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(out.contains("revoked 2 credentials"), "{out}");
+    assert!(out.contains("voided 1 outstanding enrolment\n"), "{out}");
+
+    let (_, _, out, _) = revoke_against(
+        "200 OK",
+        r#"{"user_id":"yadgar:user:018f3a52-7c1e-7b2a-9d4e-5a6b7c8d9e0f","revoked":0,"voided_enrolments":3}"#,
+    )
+    .await;
+    assert!(out.contains("voided 3 outstanding enrolments"), "{out}");
+}
+
+#[tokio::test]
+async fn a_receipt_from_a_gateway_older_than_the_void_count_is_still_a_receipt() {
+    let (result, _, out, _) = revoke_against("200 OK", ID_JSON).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(!out.contains("voided"), "{out}");
+}
+
+// ---- terminal escapes from the gateway never print raw ----
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_enrolment_id_never_reaches_stderr() {
+    let (result, _, _, err) = execute_against(
+        &["issue-enrolment", "--user-id", "u-42", "--stdout"],
+        "200 OK",
+        r#"{"token":"t","enrolment_id":"e\u001b]52;c;aGk=\u0007","revoke_existing_credentials":false}"#,
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    let err = String::from_utf8(err).unwrap();
+    assert!(!err.contains('\u{1b}') && !err.contains('\u{7}'), "{err:?}");
+    assert!(err.contains(r"e\u{1b}]52;c;aGk="), "{err:?}");
 }

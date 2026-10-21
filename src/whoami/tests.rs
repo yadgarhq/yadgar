@@ -22,6 +22,7 @@ async fn ask_at(
         url: &url,
         bearer: TOKEN,
         instance: Some("inst-1"),
+        expires_at: None,
     };
     let mut out = Vec::new();
     let result = execute(&client, &gateway, &mut out).await;
@@ -189,6 +190,7 @@ async fn an_unreachable_gateway_is_a_transport_error_naming_the_address() {
         url: &url,
         bearer: TOKEN,
         instance: None,
+        expires_at: None,
     };
     let mut out = Vec::new();
     let result = execute(&client, &gateway, &mut out).await;
@@ -198,4 +200,142 @@ async fn an_unreachable_gateway_is_a_transport_error_naming_the_address() {
     );
     let printed = String::from_utf8(out).unwrap();
     assert_no_token(&result, &printed);
+}
+
+// ---- the stored expiry (ADR-0972 (3), ledger 1628) ----
+
+/// [`execute`] against a one-shot server, with *expires_at* stored.
+async fn ask_expiring(
+    status: &'static str,
+    body: &'static str,
+    expires_at: Option<&str>,
+) -> (Result<(), WhoamiError>, String) {
+    let (addr, _served) = crate::testserver::answer_once(status, body).await;
+    let client = crate::trust::client(None, None).unwrap();
+    let url = format!("http://{addr}/");
+    let gateway = Gateway {
+        url: &url,
+        bearer: TOKEN,
+        instance: None,
+        expires_at,
+    };
+    let mut out = Vec::new();
+    let result = execute(&client, &gateway, &mut out).await;
+    (result, String::from_utf8(out).unwrap())
+}
+
+#[tokio::test]
+async fn whoami_prints_the_stored_expiry() {
+    let (result, printed) = ask_expiring("200 OK", HAPPY, Some("2999-01-01T00:00:00Z")).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        printed.contains("expires_at:      2999-01-01T00:00:00Z\n"),
+        "{printed}"
+    );
+}
+
+#[tokio::test]
+async fn whoami_says_unknown_when_no_expiry_is_stored() {
+    let (result, printed) = ask_expiring("200 OK", HAPPY, None).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(printed.contains("expires_at:      unknown\n"), "{printed}");
+}
+
+#[tokio::test]
+async fn a_401_after_the_stored_expiry_names_the_expiry() {
+    let (result, printed) = ask_expiring(
+        "401 Unauthorized",
+        r#"{"error":"unauthenticated"}"#,
+        Some("2020-01-01T00:00:00Z"),
+    )
+    .await;
+    let e = result.as_ref().unwrap_err();
+    assert!(matches!(e, WhoamiError::Expired(_)), "{e:?}");
+    assert_eq!(
+        e.to_string(),
+        "your credential expired at 2020-01-01T00:00:00Z; run `yaadgaar login`"
+    );
+    assert_no_token(&result, &printed);
+}
+
+#[tokio::test]
+async fn a_401_before_the_stored_expiry_keeps_the_gateways_reason() {
+    let (result, _) = ask_expiring(
+        "401 Unauthorized",
+        r#"{"error":"unauthenticated"}"#,
+        Some("2999-01-01T00:00:00Z"),
+    )
+    .await;
+    assert!(
+        matches!(&result, Err(WhoamiError::Refused(m)) if m == "unauthenticated"),
+        "{result:?}"
+    );
+}
+
+// ---- terminal escapes from the gateway or the config never print raw ----
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_user_id_or_a_tampered_expiry_never_prints_raw() {
+    let (result, printed) = ask_expiring(
+        "200 OK",
+        "{\"account_segment\":\"0199f1a2-7b3c-7d4e-8f50-123456789abc\",\
+         \"user_id\":\"yadgar:user:\\u001b]52;c;aGk=\\u0007\\u001b[2J\"}",
+        Some("2999-01-01T00:00:00Z\u{1b}[2J"),
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        !printed.contains('\u{1b}') && !printed.contains('\u{7}'),
+        "{printed:?}"
+    );
+    assert!(printed.contains(r"\u{1b}]52;c;aGk="), "{printed:?}");
+    assert!(
+        printed.contains("expires_at:      unreadable\n"),
+        "{printed:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_escape_sequence_in_a_401_reason_never_reaches_the_error() {
+    let (result, _) = ask_expiring(
+        "401 Unauthorized",
+        r#"{"error":"no\u001b]52;c;aGk=\u0007"}"#,
+        None,
+    )
+    .await;
+    let message = result.unwrap_err().to_string();
+    assert!(
+        !message.contains('\u{1b}') && !message.contains('\u{7}'),
+        "{message:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_user_id_without_a_segment_never_reaches_the_error() {
+    let (result, _) = ask_expiring(
+        "200 OK",
+        r#"{"user_id":"yadgar:user:\u001b]52;c;aGk=\u0007"}"#,
+        None,
+    )
+    .await;
+    let message = result.unwrap_err().to_string();
+    assert!(
+        !message.contains('\u{1b}') && !message.contains('\u{7}'),
+        "{message:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_gateway_address_never_reaches_the_error() {
+    let client = crate::trust::client(None, None).unwrap();
+    let gateway = Gateway {
+        url: "http://127.0.0.1:1/\u{1b}[2J",
+        bearer: TOKEN,
+        instance: None,
+        expires_at: None,
+    };
+    let mut out = Vec::new();
+    let result = execute(&client, &gateway, &mut out).await;
+    let message = result.unwrap_err().to_string();
+    assert!(!message.contains('\u{1b}'), "{message:?}");
 }

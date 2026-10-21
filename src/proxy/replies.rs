@@ -112,6 +112,26 @@ pub(super) fn rejected_error(
     .to_string()
 }
 
+impl super::Outcome {
+    /// Replace a 401's reason with the expiry, when the stored one has passed.
+    ///
+    /// *expired* is the stored expiry ONLY when it is already past
+    /// ([`crate::expiry::expired_at`]); the caller reads the clock, so this
+    /// stays pure. A 401 after the expiry is the expiry, whatever else the
+    /// gateway said (ADR-0972 (3)). A 403 is a live credential refused a verb,
+    /// and is never relabelled.
+    pub(super) fn naming_expiry(self, expired: Option<&str>) -> Self {
+        match (self, expired) {
+            (Self::Rejected(status, _), Some(at))
+                if status == reqwest::StatusCode::UNAUTHORIZED =>
+            {
+                Self::Rejected(status, Some(crate::expiry::expired_sentence(at)))
+            }
+            (outcome, _) => outcome,
+        }
+    }
+}
+
 pub(super) fn unreachable_error(id: &Value, e: &dyn std::fmt::Display) -> String {
     // -32603 internal error, and the message names the GATEWAY rather than
     // reporting a tool failure. The agent should be able to tell "yadgar is

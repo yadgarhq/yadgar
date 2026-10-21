@@ -555,3 +555,34 @@ fn a_config_directory_owned_by_somebody_else_is_refused() {
 fn tempdir() -> PathBuf {
     crate::testserver::scratch_dir("cfg")
 }
+
+// ---- the stored credential expiry (ADR-0972 (3), ledger 1628) ----
+
+#[test]
+fn the_expiry_survives_a_save_and_a_load() {
+    let dir = crate::testserver::scratch_dir("config-expiry");
+    Config::new(&dir, "https://gw/".into(), "tok".into())
+        .with_expires_at(Some("2027-01-19T08:00:00Z".into()))
+        .save()
+        .unwrap();
+    let loaded = Config::load_from(&dir).unwrap();
+    assert_eq!(loaded.expires_at(), Some("2027-01-19T08:00:00Z"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_config_written_before_the_expiry_existed_loads_with_none() {
+    let dir = crate::testserver::scratch_dir("config-expiry-legacy");
+    std::fs::write(
+        dir.join("config.json"),
+        r#"{"gateway":"https://gw/","token":"tok"}"#,
+    )
+    .unwrap();
+    let loaded = Config::load_from(&dir).unwrap();
+    assert_eq!(loaded.expires_at(), None);
+    // And no key is written for it, so an older client reads the file as before.
+    loaded.save().unwrap();
+    let text = std::fs::read_to_string(dir.join("config.json")).unwrap();
+    assert!(!text.contains("expires_at"), "{text}");
+    std::fs::remove_dir_all(&dir).ok();
+}

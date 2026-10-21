@@ -38,6 +38,7 @@ fn a_second_login_keeps_the_install_id_the_first_one_minted() {
         "new-token".into(),
         "sentinel.person".into(),
         previous.ca_pem().map(str::to_string),
+        None,
     );
 
     // The address and the credential are the NEW ones: carrying one half
@@ -86,6 +87,7 @@ fn enrolling_into_another_deployment_does_not_inherit_the_previous_one_s_ca() {
         "https://deployment-b/".into(),
         "b-token".into(),
         "sentinel.person".into(),
+        None,
         None,
     );
 
@@ -161,6 +163,7 @@ fn changing_deployment_drops_the_tool_list_cached_from_the_old_one() {
         "b-token".into(),
         "someone".into(),
         None,
+        None,
     );
     assert_eq!(
         after.read_tool_cache(),
@@ -189,6 +192,7 @@ fn logging_in_again_to_the_same_deployment_keeps_the_cache() {
         "new-token".into(),
         "someone".into(),
         None,
+        None,
     );
     assert!(
         after.read_tool_cache().is_some(),
@@ -204,6 +208,7 @@ fn logging_in_again_to_the_same_deployment_keeps_the_cache() {
         "https://deployment-a/".into(),
         "new-token".into(),
         "someone".into(),
+        None,
         None,
     );
     assert!(
@@ -225,6 +230,7 @@ fn a_first_login_on_a_machine_with_no_config_carries_nothing() {
         "https://gw/".into(),
         "tok".into(),
         "someone".into(),
+        None,
         None,
     );
     assert_eq!(fresh.instance(), None);
@@ -262,4 +268,38 @@ fn a_ca_file_is_used_on_a_machine_that_never_enrolled_and_wins_over_a_stored_one
         None
     );
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn the_new_credentials_expiry_is_stored() {
+    let dir = crate::testserver::scratch_dir("login-expiry");
+    let after = reconcile(
+        &dir,
+        None,
+        "https://gw/".into(),
+        "tok".into(),
+        "sentinel.person".into(),
+        None,
+        Some("2027-01-19T08:00:00Z".into()),
+    );
+    assert_eq!(after.expires_at(), Some("2027-01-19T08:00:00Z"));
+}
+
+#[test]
+fn a_new_credential_without_an_expiry_never_inherits_the_old_one() {
+    // A fresh token paired with yesterday's expiry would print "expired" on a
+    // working credential: the old value belongs to the old token.
+    let dir = crate::testserver::scratch_dir("login-expiry-legacy");
+    let previous = Config::new(&dir, "https://gw/".into(), "old".into())
+        .with_expires_at(Some("2020-01-01T00:00:00Z".into()));
+    let after = reconcile(
+        &dir,
+        Some(&previous),
+        "https://gw/".into(),
+        "new".into(),
+        "sentinel.person".into(),
+        None,
+        None,
+    );
+    assert_eq!(after.expires_at(), None);
 }

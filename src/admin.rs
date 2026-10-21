@@ -209,6 +209,8 @@ async fn dispatch(
                 revoke_existing,
             )
             .await?;
+            // BEFORE the token goes anywhere: `--stdout` hands it to the terminal.
+            check_token_alphabet(&issued.token)?;
             if let Some(warning) = check_echo(revoke_existing, issued.revoke_existing_credentials)?
             {
                 writeln!(stderr, "warning: {warning}")?;
@@ -412,6 +414,19 @@ async fn request(
         reqwest::StatusCode::UNAUTHORIZED => Err(AdminError::Refused),
         reqwest::StatusCode::FORBIDDEN => Err(AdminError::NotAdmin(gateway_error(&body))),
         _ => Err(AdminError::Rejected(status, gateway_error(&body))),
+    }
+}
+
+/// The token is STANDARD base64 with padding (RFC 4648 section 4), the encoding
+/// `iam` issues it in. Anything else is refused whole, with none of it echoed.
+fn check_token_alphabet(token: &str) -> Result<(), AdminError> {
+    if token
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    {
+        Ok(())
+    } else {
+        Err(AdminError::TokenAlphabet)
     }
 }
 

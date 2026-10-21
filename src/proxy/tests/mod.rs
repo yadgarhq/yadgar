@@ -795,6 +795,47 @@ fn a_401_before_the_stored_expiry_keeps_the_gateways_reason() {
     assert!(!message.contains("expired"), "{message}");
 }
 
+/// The full path: `handle` over a real loopback socket, with *expires_at*
+/// stored in the config and the gateway answering *status*. Returns the
+/// JSON-RPC error message the host would be shown.
+async fn handled_refusal(status: &'static str, expires_at: &str, label: &str) -> String {
+    let (addr, served) = crate::testserver::answer_once(
+        status,
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"the gateway's own reason"}}"#,
+    )
+    .await;
+    let dir = crate::testserver::scratch_dir(label);
+    let config = Config::new(&dir, format!("http://{addr}/"), "tok".into())
+        .with_expires_at(Some(expires_at.to_string()));
+    let line = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"recall"}})
+        .to_string();
+    let reply = forwarded(&reqwest::Client::new(), &config, &Context::default(), &line)
+        .await
+        .expect("a request is answered");
+    let _ = served.await;
+    std::fs::remove_dir_all(&dir).ok();
+    let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    v["error"]["message"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn a_loopback_401_after_the_stored_expiry_is_named_through_handle() {
+    let message =
+        handled_refusal("401 Unauthorized", "2020-01-01T00:00:00Z", "proxy-expired").await;
+    assert!(
+        message.contains("your credential expired at 2020-01-01T00:00:00Z; run `yaadgaar login`"),
+        "{message}"
+    );
+    assert!(!message.contains("own reason"), "{message}");
+}
+
+#[tokio::test]
+async fn a_loopback_403_after_the_stored_expiry_is_not_relabelled() {
+    let message = handled_refusal("403 Forbidden", "2020-01-01T00:00:00Z", "proxy-403").await;
+    assert!(message.contains("the gateway's own reason"), "{message}");
+    assert!(!message.contains("expired"), "{message}");
+}
+
 #[test]
 fn a_403_is_never_read_as_an_expiry() {
     // A 403 is a resolved credential refused a verb; an expired one is a 401.

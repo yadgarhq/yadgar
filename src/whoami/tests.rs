@@ -309,3 +309,33 @@ async fn an_escape_sequence_in_a_401_reason_never_reaches_the_error() {
         "{message:?}"
     );
 }
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_user_id_without_a_segment_never_reaches_the_error() {
+    let (result, _) = ask_expiring(
+        "200 OK",
+        r#"{"user_id":"yadgar:user:\u001b]52;c;aGk=\u0007"}"#,
+        None,
+    )
+    .await;
+    let message = result.unwrap_err().to_string();
+    assert!(
+        !message.contains('\u{1b}') && !message.contains('\u{7}'),
+        "{message:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_gateway_address_never_reaches_the_error() {
+    let client = crate::trust::client(None, None).unwrap();
+    let gateway = Gateway {
+        url: "http://127.0.0.1:1/\u{1b}[2J",
+        bearer: TOKEN,
+        instance: None,
+        expires_at: None,
+    };
+    let mut out = Vec::new();
+    let result = execute(&client, &gateway, &mut out).await;
+    let message = result.unwrap_err().to_string();
+    assert!(!message.contains('\u{1b}'), "{message:?}");
+}

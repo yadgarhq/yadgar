@@ -222,13 +222,14 @@ async fn dispatch(
                     writeln!(
                         stderr,
                         "enrolment {} issued; the token is in {}",
-                        issued.enrolment_id,
+                        crate::printable::printable(&issued.enrolment_id),
                         path.display()
                     )?;
                 }
                 None => {
                     writeln!(stdout, "{}", issued.token)?;
-                    writeln!(stderr, "enrolment {} issued", issued.enrolment_id)?;
+                    let id = crate::printable::printable(&issued.enrolment_id);
+                    writeln!(stderr, "enrolment {id} issued")?;
                 }
             }
             writeln!(stderr, "it is single-use and expires in 24 hours")?;
@@ -348,7 +349,7 @@ async fn revoke_request(
     let response = builder
         .send()
         .await
-        .map_err(|e| AdminError::Unreachable(url, e))?;
+        .map_err(|e| AdminError::Unreachable(crate::printable::printable(&url), e))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     match status {
@@ -401,7 +402,7 @@ async fn request(
     let response = builder
         .send()
         .await
-        .map_err(|e| AdminError::Unreachable(url, e))?;
+        .map_err(|e| AdminError::Unreachable(crate::printable::printable(&url), e))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     match status {

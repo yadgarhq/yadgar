@@ -561,3 +561,19 @@ async fn a_receipt_from_a_gateway_older_than_the_void_count_is_still_a_receipt()
     assert!(result.is_ok(), "{result:?}");
     assert!(!out.contains("voided"), "{out}");
 }
+
+// ---- terminal escapes from the gateway never print raw ----
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_enrolment_id_never_reaches_stderr() {
+    let (result, _, _, err) = execute_against(
+        &["issue-enrolment", "--user-id", "u-42", "--stdout"],
+        "200 OK",
+        r#"{"token":"t","enrolment_id":"e\u001b]52;c;aGk=\u0007","revoke_existing_credentials":false}"#,
+    )
+    .await;
+    assert!(result.is_ok(), "{result:?}");
+    let err = String::from_utf8(err).unwrap();
+    assert!(!err.contains('\u{1b}') && !err.contains('\u{7}'), "{err:?}");
+    assert!(err.contains(r"e\u{1b}]52;c;aGk="), "{err:?}");
+}

@@ -449,3 +449,38 @@ async fn an_escape_sequence_in_the_credential_id_never_prints_raw() {
     assert!(r.result.is_ok(), "{:?}", r.result);
     assert!(!r.out.contains('\u{1b}'), "{:?}", r.out);
 }
+
+#[tokio::test]
+async fn a_bidi_override_in_a_label_never_prints_raw() {
+    let r = run(
+        &list_args(),
+        vec![(
+            "200 OK",
+            r#"{"credentials":[{"id":"cred-a","label":"lap\u202etop","created_at":"2026-10-01T08:00:00Z"}],"next_page_token":""}"#,
+        )],
+    )
+    .await;
+    assert!(r.result.is_ok(), "{:?}", r.result);
+    assert!(!r.out.contains('\u{202e}'), "{:?}", r.out);
+    assert!(r.out.contains(r"lap\u{202e}top"), "{:?}", r.out);
+}
+
+#[tokio::test]
+async fn an_escape_sequence_in_the_gateway_address_never_reaches_the_error() {
+    let client = crate::trust::client(None, None).unwrap();
+    let gateway = Gateway {
+        url: "http://127.0.0.1:1/\u{1b}]52;c;aGk=\u{7}",
+        bearer: BEARER,
+        instance: None,
+        expires_at: None,
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let result = execute(parse(&list_args()), &client, &gateway, &mut out, &mut err).await;
+    let e = result.unwrap_err();
+    assert!(matches!(e, AdminError::Unreachable(..)), "{e:?}");
+    let message = e.to_string();
+    assert!(
+        !message.contains('\u{1b}') && !message.contains('\u{7}'),
+        "{message:?}"
+    );
+}

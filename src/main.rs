@@ -257,11 +257,7 @@ async fn real_main() -> anyhow::Result<()> {
             let dir = config::base_dir();
             let config =
                 login::login(&dir, gateway, username, password_stdin, ca_file.as_deref()).await?;
-            println!(
-                "logged in to {} — the credential is stored in {}",
-                config.gateway_url(),
-                dir.display()
-            );
+            println!("{}", login::logged_in(&config, &dir));
             println!("run `yaadgaar install` to register the hooks and the MCP entry");
             Ok(())
         }
@@ -290,11 +286,7 @@ async fn real_main() -> anyhow::Result<()> {
             // THE USERNAME IS SAID HERE AND NOWHERE ELSE. `auth/enrol` is the
             // only place the deployment ever tells a person what they are
             // called, and they need it to log in on any other machine.
-            println!(
-                "enrolled with {} as {}",
-                config.gateway_url(),
-                config.username().unwrap_or("(the gateway named nobody)")
-            );
+            println!("{}", login::enrolled(&config));
             println!("the credential is stored in {}", dir.display());
             println!("run `yaadgaar install` to register the hooks and the MCP entry");
             Ok(())

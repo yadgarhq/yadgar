@@ -94,7 +94,10 @@ async fn execute(
     // NO PREFIX WITHOUT A SEGMENT: `local//` is not a path anybody can use.
     let segment = match identity.account_segment.as_deref().map(str::trim) {
         Some(s) if !s.is_empty() => s.to_string(),
-        _ => return Err(WhoamiError::NoSegment(identity.user_id)),
+        _ => {
+            let user_id = crate::printable::printable(&identity.user_id);
+            return Err(WhoamiError::NoSegment(user_id));
+        }
     };
     if segment
         .chars()
@@ -126,7 +129,7 @@ async fn request(client: &reqwest::Client, gateway: &Gateway<'_>) -> Result<Iden
     let response = builder
         .send()
         .await
-        .map_err(|e| WhoamiError::Unreachable(url, e))?;
+        .map_err(|e| WhoamiError::Unreachable(crate::printable::printable(&url), e))?;
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
     match status {

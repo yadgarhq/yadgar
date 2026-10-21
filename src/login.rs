@@ -44,7 +44,10 @@ use crate::enrolment::{self, EnrolmentError};
 
 mod input;
 mod label;
+mod receipt;
 mod wire;
+
+pub use receipt::{enrolled, logged_in};
 
 use wire::{exchange, redeem};
 
@@ -370,7 +373,7 @@ pub async fn enrol(
     // token an admin built rather than an address a person typed.
     require_https(&gateway)?;
 
-    println!("Enrolling with {}", enrolment.gateway);
+    println!("{}", receipt::enrolling(&enrolment.gateway));
     if enrolment.ca_pem.is_some() {
         // Said out loud, because it is the difference between this machine
         // trusting one certificate for one host and somebody installing a CA

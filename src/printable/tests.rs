@@ -26,3 +26,16 @@ fn a_control_character_is_shown_escaped_not_silently_dropped() {
 fn printable_unicode_is_kept_as_is() {
     assert_eq!(printable("laptop — Zoë's 💻"), "laptop — Zoë's 💻");
 }
+
+#[test]
+fn bidi_overrides_and_zero_width_format_characters_are_escaped() {
+    for c in [
+        '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}',
+        '\u{2068}', '\u{2069}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}',
+        '\u{feff}', '\u{061c}',
+    ] {
+        let out = printable(&format!("a{c}b"));
+        assert!(!out.contains(c), "{c:?} -> {out:?}");
+        assert_eq!(out, format!("a\\u{{{:x}}}b", c as u32));
+    }
+}

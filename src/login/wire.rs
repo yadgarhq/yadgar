@@ -71,7 +71,7 @@ pub(super) async fn redeem(
         }))
         .send()
         .await
-        .map_err(|e| LoginError::Unreachable(url, e))?;
+        .map_err(|e| LoginError::Unreachable(crate::printable::printable(&url), e))?;
 
     let status = response.status();
     // ENROL ONLY (ADR-0977): the redemption committed, so the password is
@@ -143,7 +143,7 @@ pub(super) async fn exchange(
         }))
         .send()
         .await
-        .map_err(|e| LoginError::Unreachable(url, e))?;
+        .map_err(|e| LoginError::Unreachable(crate::printable::printable(&url), e))?;
 
     let status = response.status();
     match verdict(status) {

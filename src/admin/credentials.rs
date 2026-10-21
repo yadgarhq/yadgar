@@ -160,7 +160,7 @@ async fn post(
     let response = builder
         .send()
         .await
-        .map_err(|e| AdminError::Unreachable(url, e))?;
+        .map_err(|e| AdminError::Unreachable(printable(&url), e))?;
     let status = response.status();
     Ok((status, response.text().await.unwrap_or_default()))
 }

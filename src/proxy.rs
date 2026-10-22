@@ -48,6 +48,7 @@
 //! rule above holds wherever there is anything to hold it about.
 
 mod context;
+mod oneshot;
 mod replies;
 mod revision;
 mod session;
@@ -56,6 +57,7 @@ mod watch;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt as _, BufReader};
 
 use crate::config::Config;
+pub(crate) use oneshot::ToolCaller;
 
 use context::{Context, HEADER_INSTANCE, HEADER_PROJECT};
 use replies::{gateway_message, parse_error, rejected_error, retarget, unreachable_error};
@@ -268,7 +270,7 @@ async fn handle(
 /// AND written into `tools-cache.json`, so every later offline start served the
 /// HTML back, permanently, until a good call happened to land.
 #[derive(Debug)]
-enum Outcome {
+pub(crate) enum Outcome {
     /// A success status, and the body that came with it.
     Answered(String),
     /// Reached and refused, and the gateway's own message when it sent one.

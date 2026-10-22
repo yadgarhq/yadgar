@@ -18,8 +18,14 @@ fn settings_text(pre_tool_use: Value) -> String {
         "model": "opus",
         "hooks": {
             "PreToolUse": pre_tool_use,
-            "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command",
-                "command": "/usr/local/bin/audit-shell start" }] }],
+            // Our session-start entry is already in place behind the foreign
+            // one, so every test here is about `PreToolUse` alone.
+            "SessionStart": [
+                { "matcher": "", "hooks": [{ "type": "command",
+                    "command": "/usr/local/bin/audit-shell start" }] },
+                { "matcher": "", "hooks": [{ "type": "command",
+                    "command": format!("{BINARY} hook session-start") }] },
+            ],
         },
     });
     let mut text = serde_json::to_string_pretty(&value).unwrap();

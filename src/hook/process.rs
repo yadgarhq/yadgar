@@ -9,7 +9,7 @@ use std::io::Write as _;
 use std::panic::AssertUnwindSafe;
 use std::sync::Mutex;
 
-use super::{dispatch, read_stdin, Decision, REFUSED_EXIT_CODE};
+use super::{dispatch, read_stdin, session_start, Decision, REFUSED_EXIT_CODE};
 use crate::install;
 
 // A pin by `cfg`, not by searching `Cargo.toml` for a string. The string search
@@ -47,6 +47,11 @@ pub fn planted_setup_fault() {
     }
 }
 
+/// Does [`run`] answer *name* with its own handler, rather than [`dispatch`]?
+pub fn routes(name: &str) -> bool {
+    name == session_start::NAME
+}
+
 /// Run one hook handler and answer the agent client in the format it honours.
 ///
 /// EXITS rather than returns on a refusal, and the asymmetry is the point: a
@@ -56,12 +61,38 @@ pub fn planted_setup_fault() {
 /// *init* is the caller's setup (tracing), run INSIDE the containment so a panic
 /// there refuses too (ledger 1576 (d)).
 pub fn run(name: &str, init: impl FnOnce()) -> anyhow::Result<()> {
+    if routes(name) {
+        return answer(&session_start_output(init));
+    }
     match decide(name, init) {
         // Silence. An allow that printed would add a line to the transcript on
         // every single tool call.
         Decision::Allow => Ok(()),
         Decision::Deny(reason) => refuse(name, &reason),
     }
+}
+
+/// What `session-start` prints: its context, or its notice when it panicked.
+///
+/// Never a refusal. A panic here, *init*'s included, becomes the same
+/// fail-safe notice, so the session still starts and the agent is told why.
+fn session_start_output(init: impl FnOnce()) -> String {
+    contain(
+        || {
+            init();
+            session_start::run()
+        },
+        |what| session_start::panicked(&what),
+    )
+}
+
+/// Print *output* to stdout, flushed, and leave exit status 0.
+fn answer(output: &str) -> anyhow::Result<()> {
+    let mut out = std::io::stdout().lock();
+    // A failed write has nobody left to tell; the session starts regardless.
+    let _ = writeln!(out, "{output}");
+    let _ = out.flush();
+    Ok(())
 }
 
 /// [`run`] without the exit, so a test can read the decision.
@@ -89,14 +120,27 @@ fn decide(name: &str, init: impl FnOnce()) -> Decision {
 /// stderr to the model, so the noise would surround the reason. The reason
 /// below carries the message (ledger 1576 (c)). The previous hook is restored.
 pub fn contain_panic(decide: impl FnOnce() -> Decision) -> Decision {
-    let _held = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    contain_panic_locked(decide)
+    contain(decide, |what| {
+        Decision::Deny(format!(
+            "refused: the hook panicked ({what}), so this tool call was not checked"
+        ))
+    })
 }
 
-fn contain_panic_locked(decide: impl FnOnce() -> Decision) -> Decision {
+/// Run *work*, and turn a panic inside it into `on_panic(message)`.
+///
+/// The containment [`contain_panic`] is built on, for a handler whose answer
+/// to a panic is not a refusal: `session-start` answers with its fail-safe
+/// notice and exit 0, because a panic there must not stop the session.
+pub fn contain<T>(work: impl FnOnce() -> T, on_panic: impl FnOnce(String) -> T) -> T {
+    let _held = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    contain_locked(work, on_panic)
+}
+
+fn contain_locked<T>(work: impl FnOnce() -> T, on_panic: impl FnOnce(String) -> T) -> T {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
-    let caught = std::panic::catch_unwind(AssertUnwindSafe(decide));
+    let caught = std::panic::catch_unwind(AssertUnwindSafe(work));
     std::panic::set_hook(previous);
     caught.unwrap_or_else(|payload| {
         let what = payload
@@ -104,9 +148,7 @@ fn contain_panic_locked(decide: impl FnOnce() -> Decision) -> Decision {
             .map(|s| (*s).to_string())
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "no message".to_string());
-        Decision::Deny(format!(
-            "refused: the hook panicked ({what}), so this tool call was not checked"
-        ))
+        on_panic(what)
     })
 }
 /// Write *reason* to stderr and exit with the blocking status.
@@ -190,7 +232,7 @@ mod tests {
         std::panic::set_hook(Box::new(|_| {
             SEEN.fetch_add(1, Ordering::SeqCst);
         }));
-        let _ = contain_panic_locked(|| panic!("planted"));
+        contain_locked(|| panic!("planted"), |_| ());
         let _ = std::panic::catch_unwind(|| panic!("outside the guard"));
         std::panic::set_hook(outer);
         assert_eq!(SEEN.load(Ordering::SeqCst), 1, "hook not restored");

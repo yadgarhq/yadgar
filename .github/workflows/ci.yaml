@@ -76,7 +76,12 @@ jobs:
   # TWO REPOSITORY-LOCAL CHECKS, for the reason `release.yaml` gives for being
   # local: they guard the wheel release, which only this repository has (D62).
   # NEITHER IS PART OF `ci / passed`, so neither gates the merge on its own; the
-  # ruleset would have to name them for that. Skipped on a body-only edit.
+  # ruleset would have to name them for that. They run on EVERY pull_request
+  # event, `edited` included. GitHub gates on the LATEST check run for a
+  # context, so a skipped run on `edited` would supersede a red `stamp` or
+  # `windows` from the push before it and let a broken head merge once these
+  # are required. Re-running on a text edit costs one runner each and reports a
+  # real verdict on the same head.
 
   # THE RELEASE STAMP, RUN ON EVERY PULL REQUEST (ledger 1521). On a tag,
   # `release.yaml` rewrites the version in Cargo.toml and Cargo.lock; before,
@@ -84,7 +89,7 @@ jobs:
   # fails unless both files agree on the stamped version. NOT `--no-deps`:
   # with it, a Cargo.toml/Cargo.lock root-version mismatch exits 0.
   stamp:
-    if: github.event_name == 'pull_request' && github.event.action != 'edited'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -103,7 +108,7 @@ jobs:
   # `cfg(not(unix))` branch was first compiled by the Windows wheel jobs on
   # the release tag, the worst moment to learn it does not build.
   windows:
-    if: github.event_name == 'pull_request' && github.event.action != 'edited'
+    if: github.event_name == 'pull_request'
     runs-on: windows-latest
     permissions:
       contents: read

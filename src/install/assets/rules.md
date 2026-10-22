@@ -44,13 +44,23 @@ repository root.
 are the authority; read them. Today the tools are task tools, named here
 without the `mcp__yaadgaar__` prefix:
 
-- `find_tasks` lists the project's tasks, newest first, one page at a time.
-  When the answer carries a `next_page_token`, pass it as `page_token` to get
-  the next page.
+- `find_tasks` lists the project's tasks, oldest first (by `id`, a UUIDv7),
+  one page at a time. To get only some statuses, pass `statuses`, for example
+  `["in_progress", "open", "blocked"]`; omit it to get every status. Pass
+  `fields: "summary"` to get only `id`, `number`, `title`, `status` and
+  `version` for each task, with no body. When the answer carries a
+  `next_page_token`, pass it as `page_token` to get the next page.
 - `read_task` reads one task in full, by its `id` or its per-project `number`.
   The answer carries the task's current version.
 - `create_task` files a new task. Give it a `title`, and a `body` that someone
-  can act on without this conversation.
+  can act on without this conversation. To record the task's reference in
+  another tracker, pass `legacy_ref`. Make it URN-shaped, for example
+  `urn:yadgar:ledger:<project>:<id>`. The gateway stores it as given and
+  returns it in `links`; it does not check the shape. To make a retry safe,
+  pass your own `idempotency_key`. The same key with the same arguments
+  returns the first call's task. The same key with different arguments is
+  refused. Keys compare case-insensitively. A replay returns the first call's
+  version, which can be stale: read the task again before you edit it.
 - `edit_task` changes a task's title or body. Send the `id` and the version you
   last read as `expect_version`. It never changes the status.
 - `transition_task` moves a task to another status: `open`, `in_progress`,

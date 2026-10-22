@@ -1,4 +1,5 @@
-//! Installing 0.1.5 over a 0.1.3/0.1.4-shaped home: twelve hooks of ours become one.
+//! Installing 0.1.5 over a 0.1.3/0.1.4-shaped home: twelve hooks of ours become
+//! the current two (the guard, and ADR-0992's session-start listing).
 //!
 //! Up to 0.1.4, `install` registered twelve handlers and only `pre-tool-guard`
 //! did any work. The other eleven spawned this binary on every tool call, prompt
@@ -138,18 +139,32 @@ fn our_commands(settings: &Value) -> Vec<(String, String)> {
     out
 }
 
+/// The two commands of ours a current install writes, as `(event, command)`.
+fn ours() -> Vec<(String, String)> {
+    vec![
+        (
+            "PreToolUse".to_string(),
+            format!("{BINARY} hook pre-tool-guard"),
+        ),
+        (
+            "SessionStart".to_string(),
+            format!("{BINARY} hook session-start"),
+        ),
+    ]
+}
+
+/// File order varies with the seeded home; the SET of commands is the claim.
+fn sorted(mut commands: Vec<(String, String)>) -> Vec<(String, String)> {
+    commands.sort();
+    commands
+}
+
 #[test]
-fn install_registers_only_the_guard() {
+fn install_registers_only_the_guard_and_session_start() {
     let home = scratch("guard-only");
     install_with(&home, Path::new(BINARY)).unwrap();
     let settings = read_json(&Layout::new(&home).settings());
-    assert_eq!(
-        our_commands(&settings),
-        vec![(
-            "PreToolUse".to_string(),
-            format!("{BINARY} hook pre-tool-guard")
-        )]
-    );
+    assert_eq!(sorted(our_commands(&settings)), ours());
     assert_eq!(
         settings["hooks"]["PreToolUse"][0]["matcher"],
         "Bash|Edit|Write|NotebookEdit"
@@ -157,7 +172,7 @@ fn install_registers_only_the_guard() {
 }
 
 #[test]
-fn install_over_a_twelve_hook_install_leaves_exactly_one_of_ours() {
+fn install_over_a_twelve_hook_install_leaves_exactly_our_two() {
     let home = scratch("twelve-to-one");
     seed(&home, upgraded_home_settings());
     assert_eq!(
@@ -168,14 +183,7 @@ fn install_over_a_twelve_hook_install_leaves_exactly_one_of_ours() {
     install_with(&home, Path::new(BINARY)).unwrap();
 
     let settings = read_json(&Layout::new(&home).settings());
-    assert_eq!(
-        our_commands(&settings),
-        vec![(
-            "PreToolUse".to_string(),
-            format!("{BINARY} hook pre-tool-guard")
-        )],
-        "{settings:#?}"
-    );
+    assert_eq!(sorted(our_commands(&settings)), ours(), "{settings:#?}");
     assert!(
         drift(&home)
             .iter()
@@ -267,7 +275,13 @@ fn a_foreign_non_command_hook_sharing_an_entry_with_ours_survives() {
 }
 
 #[test]
-fn the_managed_list_is_the_guard_alone() {
+fn the_managed_list_is_the_guard_and_the_session_start_listing() {
     let names: Vec<_> = MANAGED_HOOKS.iter().map(|h| (h.event, h.name)).collect();
-    assert_eq!(names, vec![("PreToolUse", "pre-tool-guard")]);
+    assert_eq!(
+        names,
+        vec![
+            ("PreToolUse", "pre-tool-guard"),
+            ("SessionStart", "session-start")
+        ]
+    );
 }

@@ -57,7 +57,13 @@ pub struct HookSpec {
     pub fire_and_forget: bool,
 }
 
-/// ONE registration: the guard, the only handler that does any work.
+/// TWO registrations: the guard, and the session-start task listing.
+///
+/// `session-start` (ADR-0992) prints the project's open tasks into the session
+/// before its first prompt. Matcher `""` is every source — startup, resume,
+/// clear and compact — so a compacted session is told its tasks again. It is
+/// synchronous, because the listing must be context before the prompt, and it
+/// bounds its own wait (see `hook::session_start::DEADLINE`).
 ///
 /// Up to 0.1.4 this list held twelve. Eleven of them needed hook endpoints the
 /// gateway does not have, so they did nothing — while still spawning this
@@ -69,17 +75,25 @@ pub struct HookSpec {
 /// Nothing else is needed to retire the eleven: [`merge`] strips EVERY entry of
 /// ours before appending, and "ours" is the invocation shape (see
 /// [`is_managed`]), not a handler name in this list. So the next `install` over
-/// a 0.1.4 machine removes all twelve and writes back this one.
-pub const MANAGED_HOOKS: &[HookSpec] = &[HookSpec {
-    event: "PreToolUse",
-    // Edit/Write/NotebookEdit are in the matcher because of a real incident:
-    // an agent used Edit, not Bash, to add itself to the hook exceptions
-    // file, pushed to a protected branch, then reverted the file to conceal
-    // it. A Bash-only matcher never even routed that call to the guard.
-    name: "pre-tool-guard",
-    matcher: "Bash|Edit|Write|NotebookEdit",
-    fire_and_forget: false,
-}];
+/// a 0.1.4 machine removes all twelve and writes back these.
+pub const MANAGED_HOOKS: &[HookSpec] = &[
+    HookSpec {
+        event: "PreToolUse",
+        // Edit/Write/NotebookEdit are in the matcher because of a real incident:
+        // an agent used Edit, not Bash, to add itself to the hook exceptions
+        // file, pushed to a protected branch, then reverted the file to conceal
+        // it. A Bash-only matcher never even routed that call to the guard.
+        name: "pre-tool-guard",
+        matcher: "Bash|Edit|Write|NotebookEdit",
+        fire_and_forget: false,
+    },
+    HookSpec {
+        event: "SessionStart",
+        name: crate::hook::session_start::NAME,
+        matcher: "",
+        fire_and_forget: false,
+    },
+];
 
 /// The command string written into `settings.json` for one spec.
 pub fn command_for(binary: &Path, name: &str) -> String {

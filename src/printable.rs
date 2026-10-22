@@ -9,14 +9,16 @@
 /// *text* with every control character (C0, DEL and C1, so ESC, BEL and the
 /// 8-bit CSI `U+009B` too) and every invisible format character (bidi
 /// controls, zero-width characters, the BOM) shown escaped, as `\u{1b}` or
-/// `\u{202e}`. Printable Unicode is kept as is. Escaped rather than dropped,
-/// so the operator sees that something odd was sent.
+/// `\u{202e}`, and the line and paragraph separators U+2028 and U+2029, which
+/// are neither (Zl, Zp) yet end a line for a JSON reader or a model. Printable
+/// Unicode is kept as is. Escaped rather than dropped, so the operator sees that
+/// something odd was sent.
 pub fn printable(text: &str) -> String {
     text.chars()
         .map(|c| {
             if c.is_control() {
                 c.escape_debug().to_string()
-            } else if is_format(c) {
+            } else if is_format(c) || matches!(c, '\u{2028}' | '\u{2029}') {
                 c.escape_unicode().to_string()
             } else {
                 c.to_string()

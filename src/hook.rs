@@ -50,6 +50,7 @@ use serde_json::Value;
 mod guard;
 mod policy;
 pub mod process;
+pub mod session_start;
 
 #[cfg(test)]
 #[path = "hook/tests/shape.rs"]
@@ -221,15 +222,20 @@ mod tests {
     fn every_registered_handler_is_a_real_handler_in_the_dispatcher() {
         // The drift this pins: a handler registered in settings.json that this
         // binary does not dispatch fires on every session and does nothing,
-        // silently. Every registration must reach a handler that can refuse.
+        // silently. A PreToolUse registration must reach a handler that can
+        // refuse; any other must be one `process::run` routes by name.
         for spec in crate::install::hooks::MANAGED_HOOKS {
-            assert!(
-                matches!(
+            let handled = match spec.event {
+                "PreToolUse" => matches!(
                     run(spec.name, &bash("terraform apply"), None),
                     Decision::Deny(_)
                 ),
-                "{} is registered but the dispatcher does not run it",
-                spec.name
+                _ => process::routes(spec.name),
+            };
+            assert!(
+                handled,
+                "{}/{} is registered but nothing runs it",
+                spec.event, spec.name
             );
         }
     }

@@ -48,6 +48,8 @@
 //! rule above holds wherever there is anything to hold it about.
 
 mod context;
+mod oneshot;
+mod outcome;
 mod replies;
 mod revision;
 mod session;
@@ -56,6 +58,8 @@ mod watch;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt as _, BufReader};
 
 use crate::config::Config;
+pub(crate) use oneshot::ToolCaller;
+pub(crate) use outcome::Outcome;
 
 use context::{Context, HEADER_INSTANCE, HEADER_PROJECT};
 use replies::{gateway_message, parse_error, rejected_error, retarget, unreachable_error};
@@ -259,28 +263,6 @@ async fn handle(
     answer.reply
 }
 
-/// What one forwarded request produced.
-///
-/// THREE OUTCOMES, not two, and the missing third one was a real defect.
-/// `send().await` returns `Ok` for a 502, and `.text()` then hands back the
-/// proxy's HTML error page — so a gateway that was down looked exactly like a
-/// gateway that had answered. The page was returned to the agent as a result
-/// AND written into `tools-cache.json`, so every later offline start served the
-/// HTML back, permanently, until a good call happened to land.
-#[derive(Debug)]
-enum Outcome {
-    /// A success status, and the body that came with it.
-    Answered(String),
-    /// Reached and refused, and the gateway's own message when it sent one.
-    ///
-    /// The body is still dropped — nothing in an error page is worth showing an
-    /// agent, and it is what poisoned the cache. What survives is one field: the
-    /// `error.message` of a JSON-RPC error, and nothing else.
-    Rejected(reqwest::StatusCode, Option<String>),
-    /// Not reached at all.
-    Unreachable(String),
-}
-
 /// What one message turns into: a line to write, and a body to keep.
 #[derive(Debug, PartialEq, Eq)]
 struct Answer {
@@ -324,7 +306,7 @@ fn respond(
             // a degraded answer — it is a permanent one.
             let reply = match failure {
                 Outcome::Answered(_) => unreachable!("handled above"),
-                Outcome::Rejected(status, detail) => {
+                Outcome::Rejected(status, detail, _) => {
                     // OFFLINE, and the tool list is what makes the difference
                     // between "yadgar is down" and "yadgar was never installed"
                     // (D75). Server-side only: a 4xx means this request was
@@ -478,11 +460,11 @@ async fn forward(
         // capture. An error page is still discarded — [`gateway_message`] keeps
         // nothing that is not a JSON-RPC error message, so the HTML that
         // poisoned the cache has no way back in.
-        let detail = match response.text().await {
-            Ok(body) => gateway_message(&body),
-            Err(_) => None,
+        let (detail, reason) = match response.text().await {
+            Ok(body) => (gateway_message(&body), outcome::gateway_reason(&body)),
+            Err(_) => (None, None),
         };
-        return Outcome::Rejected(status, detail);
+        return Outcome::Rejected(status, detail, reason);
     }
     match response.text().await {
         Ok(body) => Outcome::Answered(body),

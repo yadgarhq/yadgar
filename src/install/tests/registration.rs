@@ -51,12 +51,18 @@ fn foreign_hook_entries_survive_an_install() {
 /// Edit, not Bash, to add itself to a push allowlist — and flipping
 /// `pre-compact-drain` to synchronous was MISSED, after which every compaction
 /// blocks on the drain.
-const EXPECTED_REGISTRATIONS: &[(&str, &str, &str, bool)] = &[(
-    "PreToolUse",
-    "pre-tool-guard",
-    "Bash|Edit|Write|NotebookEdit",
-    false,
-)];
+const EXPECTED_REGISTRATIONS: &[(&str, &str, &str, bool)] = &[
+    (
+        "PreToolUse",
+        "pre-tool-guard",
+        "Bash|Edit|Write|NotebookEdit",
+        false,
+    ),
+    // EVERY source — startup, resume, clear and compact — and SYNCHRONOUS:
+    // the listing is context the session must hold before its first prompt,
+    // and an async hook's output arrives after it (ADR-0992).
+    ("SessionStart", "session-start", "", false),
+];
 
 #[test]
 fn every_managed_hook_is_registered_once_with_the_matcher_and_async_flag_it_needs() {
@@ -129,6 +135,32 @@ fn one_written_entry_is_pinned_as_literal_bytes() {
     assert_eq!(
         settings["hooks"]["PreToolUse"].to_string(),
         r#"[{"matcher":"Bash|Edit|Write|NotebookEdit","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-tool-guard"}]}]"#
+    );
+}
+
+#[test]
+fn the_session_start_entry_is_pinned_beside_a_foreign_one_and_only_it_is_uninstalled() {
+    // ADR-0992's cutover precondition: a SessionStart hook that lists the open
+    // tasks. Appended AFTER the foreign entry already there, idempotent, and
+    // the only thing an uninstall takes back out of that key.
+    let home = scratch("session-start-bytes");
+    seed(&home, foreign_settings());
+    let layout = Layout::new(&home);
+    install_with(&home, Path::new(BINARY)).unwrap();
+    let first = read_json(&layout.settings())["hooks"]["SessionStart"].to_string();
+    assert_eq!(
+        first,
+        r#"[{"matcher":"","hooks":[{"type":"command","command":"find /nix/store/caveman -name caveman.md -exec cat {} +"}]},{"matcher":"","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook session-start"}]}]"#
+    );
+
+    install_with(&home, Path::new(BINARY)).unwrap();
+    let second = read_json(&layout.settings())["hooks"]["SessionStart"].to_string();
+    assert_eq!(first, second, "a reinstall moved or doubled the entry");
+
+    uninstall(&home).unwrap();
+    assert_eq!(
+        read_json(&layout.settings())["hooks"]["SessionStart"].to_string(),
+        r#"[{"matcher":"","hooks":[{"type":"command","command":"find /nix/store/caveman -name caveman.md -exec cat {} +"}]}]"#
     );
 }
 

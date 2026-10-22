@@ -122,10 +122,10 @@ impl super::Outcome {
     /// and is never relabelled.
     pub(super) fn naming_expiry(self, expired: Option<&str>) -> Self {
         match (self, expired) {
-            (Self::Rejected(status, _), Some(at))
+            (Self::Rejected(status, _, reason), Some(at))
                 if status == reqwest::StatusCode::UNAUTHORIZED =>
             {
-                Self::Rejected(status, Some(crate::expiry::expired_sentence(at)))
+                Self::Rejected(status, Some(crate::expiry::expired_sentence(at)), reason)
             }
             (outcome, _) => outcome,
         }

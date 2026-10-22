@@ -77,11 +77,12 @@ jobs:
   # local: they guard the wheel release, which only this repository has (D62).
   # NEITHER IS PART OF `ci / passed`, so neither gates the merge on its own; the
   # ruleset would have to name them for that. They run on EVERY pull_request
-  # event, `edited` included. GitHub gates on the LATEST check run for a
-  # context, so a skipped run on `edited` would supersede a red `stamp` or
-  # `windows` from the push before it and let a broken head merge once these
-  # are required. Re-running on a text edit costs one runner each and reports a
-  # real verdict on the same head.
+  # event, `edited` included. An `edited` event starts a second run on the same
+  # head. If these jobs skipped on it, `stamp` and `windows` would each carry
+  # two check runs on one sha, one of them `skipped`. Once they are required,
+  # the context would no longer carry a single real verdict for that head:
+  # whichever run GitHub weighs, a skipped run is not a verdict. Running them
+  # on `edited` makes every run real. It costs one runner each per text edit.
 
   # THE RELEASE STAMP, RUN ON EVERY PULL REQUEST (ledger 1521). On a tag,
   # `release.yaml` rewrites the version in Cargo.toml and Cargo.lock; before,

@@ -1,9 +1,9 @@
 //! `yaadgaar hook session-start`, read off the built binary (ADR-0992).
 //!
-//! The session must start whatever happens: every path here exits 0 and
-//! prints ONE `hookSpecificOutput` object on stdout telling the agent the tasks
-//! could not be loaded and that it must ask the user. The credential never
-//! appears on stdout or stderr.
+//! The session must start whatever happens: every path here exits 0. Inside a
+//! project, a failure prints ONE `hookSpecificOutput` object on stdout with the
+//! neutral notice; a directory that names no project prints nothing at all.
+//! The credential never appears on stdout or stderr.
 //!
 //! `#![cfg(unix)]` for `tests/cli.rs`'s reason: `HOME` only redirects the home
 //! directory on Unix. Nothing here writes into it, but a test that LOOKS
@@ -29,9 +29,20 @@ fn scratch(label: &str) -> PathBuf {
     dir
 }
 
-fn hook(config_dir: &Path, payload: &str, envs: &[(&str, &str)]) -> Output {
+/// A directory under *dir* whose `.yadgar/project-id` names a project.
+fn project_dir(dir: &Path) -> PathBuf {
+    let work = dir.join("work");
+    std::fs::create_dir_all(work.join(".yadgar")).unwrap();
+    std::fs::write(work.join(".yadgar/project-id"), "sentinel-org/no-such-repo").unwrap();
+    work
+}
+
+/// The hook, run from *cwd* — the PROCESS's directory, which a payload without
+/// a `cwd` falls back to. Never this repository's: it names a project.
+fn hook(config_dir: &Path, cwd: &Path, payload: &str, envs: &[(&str, &str)]) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_yaadgaar"))
         .args(["hook", "session-start"])
+        .current_dir(cwd)
         .env("HOME", config_dir)
         .env("YAADGAAR_CONFIG_DIR", config_dir)
         .envs(envs.iter().copied())
@@ -54,9 +65,18 @@ fn context(out: &Output) -> String {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(text.contains("could not be loaded"), "{text}");
-    assert!(text.contains("Ask the user"), "{text}");
-    assert!(text.contains("Do not record tasks in any other ledger"));
+    assert!(
+        text.starts_with("Open tasks could not be loaded from yaadgaar: "),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(
+            "If this project's tasks are tracked in yaadgaar, ask the user before \
+             tracking work; do not move them to another ledger."
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Tasks for"), "{text}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stdout.contains(SENTINEL_TOKEN), "{stdout}");
     assert!(!stderr.contains(SENTINEL_TOKEN), "{stderr}");
@@ -66,7 +86,8 @@ fn context(out: &Output) -> String {
 #[test]
 fn no_saved_login_starts_the_session_with_a_notice() {
     let dir = scratch("no-login");
-    let text = context(&hook(&dir, "{}", &[]));
+    let work = project_dir(&dir);
+    let text = context(&hook(&dir, &work, "{}", &[]));
     assert!(text.contains("not logged in"), "{text}");
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -74,7 +95,31 @@ fn no_saved_login_starts_the_session_with_a_notice() {
 #[test]
 fn an_unreadable_payload_still_starts_the_session_with_a_notice() {
     let dir = scratch("bad-payload");
-    context(&hook(&dir, "not json", &[]));
+    let work = project_dir(&dir);
+    context(&hook(&dir, &work, "not json", &[]));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Out of scope: no project, so not one byte on stdout — not even a newline —
+/// logged in or not.
+#[test]
+fn a_directory_naming_no_project_prints_nothing() {
+    let dir = scratch("no-project");
+    let payload = format!(r#"{{"cwd":"{}"}}"#, dir.display());
+    for logged_in in [false, true] {
+        if logged_in {
+            std::fs::write(
+                dir.join("config.json"),
+                format!(r#"{{"gateway":"https://127.0.0.1:1/","token":"{SENTINEL_TOKEN}"}}"#),
+            )
+            .unwrap();
+        }
+        let out = hook(&dir, &dir, &payload, &[]);
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert!(out.stdout.is_empty(), "logged in {logged_in}: {out:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains(SENTINEL_TOKEN), "{stderr}");
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -87,18 +132,13 @@ fn an_unreachable_gateway_starts_the_session_with_a_notice_and_no_token() {
         format!(r#"{{"gateway":"https://127.0.0.1:1/","token":"{SENTINEL_TOKEN}"}}"#),
     )
     .unwrap();
-    let work = dir.join("work");
-    std::fs::create_dir_all(work.join(".yadgar")).unwrap();
-    std::fs::write(work.join(".yadgar/project-id"), "sentinel-org/no-such-repo").unwrap();
+    let work = project_dir(&dir);
     let payload = format!(r#"{{"cwd":"{}"}}"#, work.display());
 
-    let text = context(&hook(&dir, &payload, &[]));
+    let text = context(&hook(&dir, &dir, &payload, &[]));
 
-    assert!(text.contains("could not be reached"), "{text}");
-    assert!(
-        text.starts_with("Tasks for sentinel-org/no-such-repo live in yaadgaar"),
-        "{text}"
-    );
+    assert!(text.contains("the gateway could not be reached"), "{text}");
+    assert!(!text.contains("https://"), "{text}");
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -107,7 +147,8 @@ fn an_unreachable_gateway_starts_the_session_with_a_notice_and_no_token() {
 #[test]
 fn a_panic_in_setup_starts_the_session_with_a_notice_not_a_refusal() {
     let dir = scratch("panic");
-    let out = hook(&dir, "{}", &[("YAADGAAR_TEST_PANIC_IN_SETUP", "1")]);
+    let work = project_dir(&dir);
+    let out = hook(&dir, &work, "{}", &[("YAADGAAR_TEST_PANIC_IN_SETUP", "1")]);
     let text = context(&out);
     assert!(text.contains("planted panic in the hook's setup"), "{text}");
     assert!(

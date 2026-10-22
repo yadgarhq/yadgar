@@ -72,22 +72,27 @@ pub fn run(name: &str, init: impl FnOnce()) -> anyhow::Result<()> {
     }
 }
 
-/// What `session-start` prints: its context, or its notice when it panicked.
+/// What `session-start` prints: its context, nothing when the session is out
+/// of scope, or its notice when it panicked.
 ///
 /// Never a refusal. A panic here, *init*'s included, becomes the same
 /// fail-safe notice, so the session still starts and the agent is told why.
-fn session_start_output(init: impl FnOnce()) -> String {
+fn session_start_output(init: impl FnOnce()) -> Option<String> {
     contain(
         || {
             init();
             session_start::run()
         },
-        |what| session_start::panicked(&what),
+        |what| Some(session_start::panicked(&what)),
     )
 }
 
-/// Print *output* to stdout, flushed, and leave exit status 0.
-fn answer(output: &str) -> anyhow::Result<()> {
+/// Print *output* to stdout, flushed, and leave exit status 0. `None` writes
+/// NOT ONE BYTE — an empty line would still be output.
+fn answer(output: &Option<String>) -> anyhow::Result<()> {
+    let Some(output) = output else {
+        return Ok(());
+    };
     let mut out = std::io::stdout().lock();
     // A failed write has nobody left to tell; the session starts regardless.
     let _ = writeln!(out, "{output}");

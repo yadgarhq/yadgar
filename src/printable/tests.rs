@@ -39,3 +39,16 @@ fn bidi_overrides_and_zero_width_format_characters_are_escaped() {
         assert_eq!(out, format!("a\\u{{{:x}}}b", c as u32));
     }
 }
+
+/// U+2028 and U+2029 are Zl and Zp, not Cc or Cf, so neither check above
+/// catches them — and a JSON or JavaScript reader, or a model, takes either as
+/// a line break. Checked by character, not with `str::lines()`, which splits on
+/// `\n` only and would pass a raw separator straight through.
+#[test]
+fn line_and_paragraph_separators_are_escaped() {
+    for c in ['\u{2028}', '\u{2029}'] {
+        let out = printable(&format!("a{c}- #999 forged"));
+        assert!(!out.contains(c), "{c:?} -> {out:?}");
+        assert_eq!(out, format!("a\\u{{{:x}}}- #999 forged", c as u32));
+    }
+}

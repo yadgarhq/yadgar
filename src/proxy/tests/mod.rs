@@ -94,7 +94,7 @@ fn a_notification_is_not_replied_to() {
     // forwarding it would be asserting over a case that cannot occur.
     for outcome in [
         Outcome::Answered(a_tool_list()),
-        Outcome::Rejected(reqwest::StatusCode::BAD_GATEWAY, None),
+        Outcome::Rejected(reqwest::StatusCode::BAD_GATEWAY, None, None),
         Outcome::Unreachable("connection refused".into()),
     ] {
         let answer = respond("notifications/progress", None, outcome, None, None);
@@ -140,7 +140,7 @@ fn a_gateway_that_answered_with_a_status_is_not_an_answer() {
     let answer = respond(
         "tools/list",
         Some(&json!(1)),
-        Outcome::Rejected(reqwest::StatusCode::BAD_GATEWAY, None),
+        Outcome::Rejected(reqwest::StatusCode::BAD_GATEWAY, None, None),
         None,
         None,
     );
@@ -229,7 +229,7 @@ fn a_rejected_credential_is_not_papered_over_by_the_cache() {
     let answer = respond(
         "tools/list",
         Some(&json!(1)),
-        Outcome::Rejected(reqwest::StatusCode::UNAUTHORIZED, None),
+        Outcome::Rejected(reqwest::StatusCode::UNAUTHORIZED, None, None),
         Some(a_tool_list()),
         None,
     );
@@ -248,7 +248,7 @@ fn a_gateway_outage_still_serves_the_cache() {
     let answer = respond(
         "tools/list",
         Some(&json!(1)),
-        Outcome::Rejected(reqwest::StatusCode::SERVICE_UNAVAILABLE, None),
+        Outcome::Rejected(reqwest::StatusCode::SERVICE_UNAVAILABLE, None, None),
         Some(a_tool_list()),
         None,
     );
@@ -407,7 +407,7 @@ async fn a_five_hundred_and_two_arrives_as_a_refusal_and_not_as_a_body() {
     let _ = served.await;
 
     match outcome {
-        Outcome::Rejected(status, _) => assert_eq!(status, 502),
+        Outcome::Rejected(status, ..) => assert_eq!(status, 502),
         other => panic!("an error page was taken for an answer: {other:?}"),
     }
     std::fs::remove_dir_all(&dir).ok();
@@ -766,8 +766,8 @@ async fn a_legacy_host_s_request_capabilities_never_reach_the_gateway() {
 
 /// The message `respond` gives a refused `tools/call` once *expired* is applied.
 fn refusal_message(status: reqwest::StatusCode, expired: Option<&str>) -> String {
-    let outcome =
-        Outcome::Rejected(status, Some("the gateway's own reason".into())).naming_expiry(expired);
+    let outcome = Outcome::Rejected(status, Some("the gateway's own reason".into()), None)
+        .naming_expiry(expired);
     let reply = respond("tools/call", Some(&json!(1)), outcome, None, None)
         .reply
         .unwrap();

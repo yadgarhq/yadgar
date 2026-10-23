@@ -16,7 +16,9 @@
 //!   session-start banner gains one line saying what a sync WOULD do;
 //! - car 2, [`plan`], [`record`], [`state`] and [`sync`]: the SessionStart
 //!   sync. yaadgaar tasks in scope are written into the Claude Code list,
-//!   updated, and deleted when they go terminal. Write-back is car 3.
+//!   updated, and deleted when they go terminal;
+//! - car 3, [`write_back`]: an agent's `TaskUpdate` on a mirrored entry is
+//!   written back to yaadgaar (the hooks are `hook::write_back`).
 
 pub mod adapter;
 pub mod claude_code;
@@ -26,6 +28,7 @@ pub mod scope;
 pub mod shape;
 pub mod state;
 pub mod sync;
+pub mod write_back;
 
 use std::path::PathBuf;
 

@@ -139,7 +139,8 @@ fn our_commands(settings: &Value) -> Vec<(String, String)> {
     out
 }
 
-/// The two commands of ours a current install writes, as `(event, command)`.
+/// The four commands of ours a current install writes, as `(event, command)`,
+/// sorted.
 fn ours() -> Vec<(String, String)> {
     vec![
         (
@@ -147,8 +148,16 @@ fn ours() -> Vec<(String, String)> {
             format!("{BINARY} hook pre-tool-guard"),
         ),
         (
+            "PreToolUse".to_string(),
+            format!("{BINARY} hook task-update"),
+        ),
+        (
             "SessionStart".to_string(),
             format!("{BINARY} hook session-start"),
+        ),
+        (
+            "TaskCompleted".to_string(),
+            format!("{BINARY} hook task-completed"),
         ),
     ]
 }
@@ -160,7 +169,7 @@ fn sorted(mut commands: Vec<(String, String)>) -> Vec<(String, String)> {
 }
 
 #[test]
-fn install_registers_only_the_guard_and_session_start() {
+fn install_registers_only_the_guard_session_start_and_the_write_back_pair() {
     let home = scratch("guard-only");
     install_with(&home, Path::new(BINARY)).unwrap();
     let settings = read_json(&Layout::new(&home).settings());
@@ -172,7 +181,7 @@ fn install_registers_only_the_guard_and_session_start() {
 }
 
 #[test]
-fn install_over_a_twelve_hook_install_leaves_exactly_our_two() {
+fn install_over_a_twelve_hook_install_leaves_exactly_our_four() {
     let home = scratch("twelve-to-one");
     seed(&home, upgraded_home_settings());
     assert_eq!(
@@ -275,13 +284,15 @@ fn a_foreign_non_command_hook_sharing_an_entry_with_ours_survives() {
 }
 
 #[test]
-fn the_managed_list_is_the_guard_and_the_session_start_listing() {
+fn the_managed_list_is_the_guard_the_session_start_listing_and_the_write_back_pair() {
     let names: Vec<_> = MANAGED_HOOKS.iter().map(|h| (h.event, h.name)).collect();
     assert_eq!(
         names,
         vec![
             ("PreToolUse", "pre-tool-guard"),
-            ("SessionStart", "session-start")
+            ("PreToolUse", "task-update"),
+            ("SessionStart", "session-start"),
+            ("TaskCompleted", "task-completed")
         ]
     );
 }

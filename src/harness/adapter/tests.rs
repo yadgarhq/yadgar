@@ -49,6 +49,7 @@ fn report_for<'a>(scope: Option<&str>, project: &'a str, tasks: &'a [Task]) -> R
         project,
         tasks,
         complete: true,
+        completion_ttl: crate::harness::scope::COMPLETION_TTL,
     }
 }
 

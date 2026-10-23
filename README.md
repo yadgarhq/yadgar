@@ -390,8 +390,8 @@ in one reviewed change. `make canary-record` also rewrites
 Which tasks are mirrored is `harness.scope`, set in `harness.json` beside
 `config.json` (`{"scope": "active"}`): `all-open` (every task not done or
 dropped, the default per ADR-1000), `active` (in_progress and blocked), or
-`none`. `scope` is the only key the file may hold: any other key, a typo
-included, is refused and named in the banner, never read as the default. The
+`none`. The file may also hold `completion_ttl_secs` (below). Any other key, a
+typo included, is refused and named in the banner, never read as the default. The
 task tools count as present when `CLAUDE_CODE_ENABLE_TODO_TOOLS` is exactly `1`
 (the documented value), or the model has them by default.
 
@@ -402,9 +402,17 @@ went done, dropped or out of scope. It never touches a task file it did not
 write. What it owns is recorded outside the Claude Code tree, in
 `$XDG_STATE_HOME/yaadgaar/harness/claude-code/<list id>.json` (else
 `~/.local/state/...`; the directory is `0700`, the files `0600`). The banner
-gains one line with the counts, or the reason the list was not synced. An edit
-made in the task list is not yet written back to yaadgaar; change tasks with
-the `mcp__yaadgaar__*` tools.
+gains one line with the counts, or the reason the list was not synced.
+
+An agent's edit to a mirrored task is written back to yaadgaar before it lands:
+`yaadgaar hook task-update` (`PreToolUse`, matcher `TaskUpdate`) sends a subject
+edit as `edit_task` and a `pending`/`in_progress` change as `transition_task`,
+with the version last seen, and refuses (exit 2) what yaadgaar does not take. A
+completion is closed by `yaadgaar hook task-completed` (`TaskCompleted`), and
+only when the same session's same prompt marked it through `task-update` within
+`completion_ttl_secs` (default 600). A state file or `harness.json` that cannot
+be read refuses an edit to a mirrored task, with the reason, rather than let it
+bypass write-back.
 
 `harness.scope = none` and the kill switch `YAADGAAR_HARNESS_SYNC=off` both stop
 the sync. Neither leaves a stale mirror behind: the pass that sees either one

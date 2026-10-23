@@ -77,6 +77,7 @@ fn pass_with(f: &Fixture, tasks: &[Task], complete: bool, scope: Scope) -> Resul
         tasks,
         complete,
         scope,
+        completion_ttl: crate::harness::scope::COMPLETION_TTL,
     };
     run(&f.dir, "s-1", &listing(&f.dir), &f.env, &input)
 }
@@ -208,6 +209,7 @@ fn a_file_that_appeared_after_the_scan_is_not_overwritten() {
         tasks: &[task(9, "open", 1)],
         complete: true,
         scope: Scope::AllOpen,
+        completion_ttl: crate::harness::scope::COMPLETION_TTL,
     };
     run(&f.dir, "s-1", &scanned, &f.env, &input).unwrap();
     assert_eq!(
@@ -324,6 +326,7 @@ fn a_shared_list_that_mirrors_another_project_is_refused() {
         tasks: &[task(7, "open", 1)],
         complete: true,
         scope: Scope::AllOpen,
+        completion_ttl: crate::harness::scope::COMPLETION_TTL,
     };
     let err = run(&f.dir, "s-1", &listing(&f.dir), &f.env, &input).unwrap_err();
     assert!(err.contains(PROJECT), "{err}");
@@ -377,6 +380,7 @@ fn no_state_home_and_no_home_is_refused() {
         tasks: &[task(1, "open", 1)],
         complete: true,
         scope: Scope::AllOpen,
+        completion_ttl: crate::harness::scope::COMPLETION_TTL,
     };
     assert!(run(&f.dir, "s-1", &Listing::default(), &env, &input).is_err());
     assert!(!f.dir.exists());
@@ -523,6 +527,7 @@ fn a_delete_never_lowers_a_high_water_mark_raised_after_the_scan() {
         tasks: &[task(1, "open", 1), task(2, "done", 2)],
         complete: true,
         scope: Scope::AllOpen,
+        completion_ttl: crate::harness::scope::COMPLETION_TTL,
     };
     let out = run(&f.dir, "s-1", &scanned, &f.env, &input).unwrap();
     assert_eq!(out.deleted, 1);
@@ -560,6 +565,7 @@ fn two_config_dirs_sharing_one_list_id_do_not_share_a_state() {
         tasks: &[task(1, "open", 1)],
         complete: true,
         scope: Scope::AllOpen,
+        completion_ttl: crate::harness::scope::COMPLETION_TTL,
     };
     let err = run(&other, "s-1", &Listing::default(), &f.env, &input).unwrap_err();
     assert!(err.contains("other-claude"), "{err}");
@@ -618,4 +624,31 @@ fn a_delete_only_pass_with_no_state_creates_nothing_at_all() {
         !f.root.join("state").exists(),
         "no state dir, no lock, no state file"
     );
+}
+
+#[test]
+fn every_pass_prunes_stale_markers_and_markers_for_tasks_it_no_longer_mirrors() {
+    use crate::harness::state::Marker;
+    let f = fixture("sync-prune-markers");
+    pass(&f, &[task(1, "open", 1), task(2, "open", 1)]).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let marker = |at: u64| Marker {
+        prompt_id: "p".into(),
+        session_id: "s-1".into(),
+        at,
+        tool_use_id: None,
+    };
+    let mut st = state_of(&f);
+    let ttl = crate::harness::scope::COMPLETION_TTL.as_secs();
+    st.pending_completions.insert("1".into(), marker(now));
+    st.pending_completions
+        .insert("2".into(), marker(now - 2 * ttl));
+    st.pending_completions.insert("99".into(), marker(now));
+    save_state(&f, &st);
+    pass(&f, &[task(1, "open", 1), task(2, "open", 1)]).unwrap();
+    let kept: Vec<String> = state_of(&f).pending_completions.into_keys().collect();
+    assert_eq!(kept, ["1"]);
 }

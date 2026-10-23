@@ -26,6 +26,10 @@ fn settings_text(pre_tool_use: Value) -> String {
                 { "matcher": "", "hooks": [{ "type": "command",
                     "command": format!("{BINARY} hook session-start") }] },
             ],
+            "TaskCompleted": [
+                { "matcher": "", "hooks": [{ "type": "command",
+                    "command": format!("{BINARY} hook task-completed") }] },
+            ],
         },
     });
     let mut text = serde_json::to_string_pretty(&value).unwrap();
@@ -36,6 +40,13 @@ fn settings_text(pre_tool_use: Value) -> String {
 fn own_entry(matcher: &str) -> Value {
     serde_json::json!({ "matcher": matcher, "hooks": [{ "type": "command",
         "command": format!("{BINARY} hook pre-tool-guard") }] })
+}
+
+/// Our second `PreToolUse` entry. `merge` places both of ours where the first
+/// one of ours sat, the guard first.
+fn task_update_entry() -> Value {
+    serde_json::json!({ "matcher": "TaskUpdate", "hooks": [{ "type": "command",
+        "command": format!("{BINARY} hook task-update") }] })
 }
 
 fn foreign_entry() -> Value {
@@ -61,6 +72,7 @@ const GUARD_MATCHER: &str = "Bash|Edit|Write|NotebookEdit";
 fn a_reinstall_leaves_our_hook_where_it_was_ahead_of_a_foreign_one() {
     let seeded = settings_text(serde_json::json!([
         own_entry(GUARD_MATCHER),
+        task_update_entry(),
         foreign_entry()
     ]));
     let (after, changed) = install_over("idem-own-first", &seeded);
@@ -72,7 +84,8 @@ fn a_reinstall_leaves_our_hook_where_it_was_ahead_of_a_foreign_one() {
 fn a_reinstall_leaves_our_hook_where_it_was_behind_a_foreign_one() {
     let seeded = settings_text(serde_json::json!([
         foreign_entry(),
-        own_entry(GUARD_MATCHER)
+        own_entry(GUARD_MATCHER),
+        task_update_entry()
     ]));
     let (after, changed) = install_over("idem-own-last", &seeded);
     assert_eq!(after, seeded);
@@ -90,7 +103,10 @@ fn a_reinstall_with_our_event_not_last_keeps_the_event_order() {
     assert!(changed);
     assert_eq!(
         after,
-        settings_text(serde_json::json!([own_entry(GUARD_MATCHER)]))
+        settings_text(serde_json::json!([
+            own_entry(GUARD_MATCHER),
+            task_update_entry()
+        ]))
     );
 }
 
@@ -108,6 +124,7 @@ fn a_changed_entry_of_ours_is_replaced_at_its_index_and_foreign_ones_stay() {
         settings_text(serde_json::json!([
             foreign_entry(),
             own_entry(GUARD_MATCHER),
+            task_update_entry(),
             foreign_entry()
         ]))
     );
@@ -122,7 +139,8 @@ fn a_first_install_appends_after_the_foreign_entries() {
         after,
         settings_text(serde_json::json!([
             foreign_entry(),
-            own_entry(GUARD_MATCHER)
+            own_entry(GUARD_MATCHER),
+            task_update_entry()
         ]))
     );
 }
@@ -139,6 +157,7 @@ fn duplicate_entries_of_ours_collapse_into_the_first_one_position() {
         after,
         settings_text(serde_json::json!([
             own_entry(GUARD_MATCHER),
+            task_update_entry(),
             foreign_entry()
         ]))
     );

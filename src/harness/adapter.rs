@@ -30,6 +30,8 @@ pub struct Report<'a> {
     pub tasks: &'a [Task],
     /// False when the listing stopped early.
     pub complete: bool,
+    /// `completion_ttl_secs` as read (the default when it could not be).
+    pub completion_ttl: std::time::Duration,
 }
 
 /// One harness.
@@ -68,6 +70,7 @@ impl Harness for ClaudeCode {
                     tasks: report.tasks,
                     complete: report.complete,
                     scope,
+                    completion_ttl: report.completion_ttl,
                 };
                 match contained(|| sync::run(&dir, &self.list_id, &listing, env, &input)) {
                     Ok(outcome) => return Some(synced(&outcome, report.complete)),
@@ -102,6 +105,7 @@ impl ClaudeCode {
             tasks: &[],
             complete: true,
             scope: Scope::Off,
+            completion_ttl: report.completion_ttl,
         };
         match contained(|| sync::run(&dir, &self.list_id, &listing, env, &input)) {
             Ok(o) if o.deleted > 0 => format!("{off}; {} mirrored tasks removed.", o.deleted),
@@ -131,7 +135,8 @@ fn synced(o: &Outcome, complete: bool) -> String {
     ];
     if o.diverged > 0 {
         parts.push(format!(
-            "{} edited here and NOT saved to yaadgaar",
+            // Edits the write-back hooks never saw (car 4 writes them back).
+            "{} edited past the write-back hooks and NOT saved to yaadgaar",
             o.diverged
         ));
     }

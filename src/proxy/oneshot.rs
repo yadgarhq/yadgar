@@ -33,6 +33,21 @@ impl ToolCaller {
         }
     }
 
+    /// [`ToolCaller::new`], scoped to *project* rather than to whatever *cwd*
+    /// derives. The write-back hooks call under the project the mirror was
+    /// written for: an agent that `cd`s into another repository moves the
+    /// hook's `cwd`, not the task's project.
+    pub(crate) fn for_project(
+        client: reqwest::Client,
+        config: Config,
+        cwd: &Path,
+        project: &str,
+    ) -> Self {
+        let mut caller = Self::new(client, config, cwd);
+        caller.context.project = Some(project.to_string());
+        caller
+    }
+
     /// The project key the gateway will be told, or `None` when nothing names one.
     pub(crate) fn project(&self) -> Option<&str> {
         self.context.project.as_deref()

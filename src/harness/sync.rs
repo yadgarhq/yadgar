@@ -44,6 +44,8 @@ pub struct Input<'a> {
     /// False when the listing stopped early: nothing is deleted then.
     pub complete: bool,
     pub scope: Scope,
+    /// The freshness bound on a completion marker; staler ones are pruned.
+    pub completion_ttl: std::time::Duration,
 }
 
 /// What a pass did, for the banner.
@@ -141,11 +143,26 @@ pub fn run(
         dir, listing, &files, &desired, &actions, &mut st, &mut out, &save,
     );
     out.mirrored = st.entries.len();
+    prune_markers(&mut st, input.completion_ttl);
     // Saved even after a failed action, so the state records what WAS done.
     if st != before || !spath.exists() {
         save(&st)?;
     }
     applied.map(|()| out)
+}
+
+/// Drop every completion marker that is stale, or whose task this state no
+/// longer mirrors: neither can ever complete anything, and a stale one left
+/// behind could match a later `TaskCompleted` by chance.
+fn prune_markers(st: &mut State, ttl: std::time::Duration) {
+    let now = std::time::SystemTime::now();
+    let owned: Vec<String> = st
+        .entries
+        .values()
+        .map(|e| e.harness_id.to_string())
+        .collect();
+    st.pending_completions
+        .retain(|id, m| owned.contains(id) && m.fresh(now, ttl));
 }
 
 /// The state directory, created `0700` (an existing one is tightened).
@@ -183,7 +200,10 @@ fn adopt(st: &mut State, files: &BTreeMap<u64, Value>) {
 }
 
 /// Hold the client's own lock on one list, waiting at most [`LOCK_WAIT`].
-fn lock(path: &Path) -> Result<std::fs::File, String> {
+///
+/// The write-back hooks take the SAME lock, so a hook and a pass never
+/// interleave their read-modify-write of one state file.
+pub(crate) fn lock(path: &Path) -> Result<std::fs::File, String> {
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(false).write(true);
     #[cfg(unix)]
@@ -219,7 +239,7 @@ fn read_files(dir: &Path, listing: &Listing) -> Result<BTreeMap<u64, Value>, Str
     Ok(files)
 }
 
-fn read_json(path: &Path) -> Result<Value, String> {
+pub(crate) fn read_json(path: &Path) -> Result<Value, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -335,7 +355,7 @@ fn apply(
     }
 }
 
-fn entry(id: u64, d: &Desired) -> state::Entry {
+pub(crate) fn entry(id: u64, d: &Desired) -> state::Entry {
     state::Entry {
         harness_id: id,
         number: d.number,
@@ -417,7 +437,7 @@ fn create(
 
 /// Rewrite an owned file. `false` when it no longer carries the URN: then it
 /// is not ours, and it is left alone.
-fn rewrite(dir: &Path, id: u64, d: &Desired) -> Result<bool, String> {
+pub(crate) fn rewrite(dir: &Path, id: u64, d: &Desired) -> Result<bool, String> {
     let target = dir.join(format!("{id}.json"));
     if record::owner(&read_json(&target)?) != Some(d.urn.as_str()) {
         return Ok(false);
@@ -431,7 +451,7 @@ fn rewrite(dir: &Path, id: u64, d: &Desired) -> Result<bool, String> {
 }
 
 /// Delete an owned file, after checking again that it is ours.
-fn remove(dir: &Path, id: u64, urn: &str) -> Result<bool, String> {
+pub(crate) fn remove(dir: &Path, id: u64, urn: &str) -> Result<bool, String> {
     let target = dir.join(format!("{id}.json"));
     match read_json(&target) {
         Ok(file) if record::owner(&file) == Some(urn) => std::fs::remove_file(&target)
@@ -451,7 +471,9 @@ fn remove(dir: &Path, id: u64, urn: &str) -> Result<bool, String> {
 /// between this read and the rename below is overwritten with the smaller
 /// value. The window is one read and one rename; ids it could hand out again
 /// are only the ones that one delete freed.
-fn stamp_highwatermark(dir: &Path, id: u64) -> Result<(), String> {
+///
+/// The write-back hooks call this too, after a delete outside a pass.
+pub(crate) fn stamp_highwatermark(dir: &Path, id: u64) -> Result<(), String> {
     let target = dir.join(super::shape::HIGHWATERMARK);
     let on_disk = std::fs::read_to_string(&target)
         .ok()

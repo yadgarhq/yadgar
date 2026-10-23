@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -53,6 +54,52 @@ pub struct State {
     /// both match it; a URN file no intent names is never adopted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub creating: BTreeMap<String, Entry>,
+    /// Completion markers, by harness task id (car 3). `task-update` writes
+    /// one when it allows a `TaskUpdate` to `completed` on a mirrored task;
+    /// `task-completed` closes the yaadgaar task only when it finds one for
+    /// the same task, the same `prompt_id` AND the same `session_id`, and the
+    /// marker is fresh ([`Marker::fresh`]). Any other `TaskUpdate` on that task
+    /// clears it, and every sync pass prunes stale markers and markers for
+    /// tasks it no longer mirrors. Optional on disk, so a car-2 state reads
+    /// unchanged and [`FORMAT`] stays 1.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_completions: BTreeMap<String, Marker>,
+}
+
+/// One completion `task-update` allowed and `task-completed` has not seen yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Marker {
+    /// The `prompt_id` of the `TaskUpdate` call. `TaskCompleted` carries the
+    /// same field and no `tool_use_id`, so this is what the match is on.
+    pub prompt_id: String,
+    /// The `session_id` of the `TaskUpdate` call. A named list is shared by
+    /// every session that sets `CLAUDE_CODE_TASK_LIST_ID`, so another
+    /// session's `TaskCompleted` must not consume this one's marker. Absent
+    /// on disk reads as empty, which matches no session.
+    #[serde(default)]
+    pub session_id: String,
+    /// When the marker was written, in seconds since the Unix epoch. A marker
+    /// older than `completion_ttl_secs` is stale and completes nothing.
+    /// Absent on disk reads as 0: stale.
+    #[serde(default)]
+    pub at: u64,
+    /// Kept for a person reading the state; nothing matches on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
+}
+
+impl Marker {
+    /// Is this marker younger than *ttl* at *now*? A marker from the future
+    /// (a clock stepped back) is fresh only while the step is within *ttl*.
+    pub fn fresh(&self, now: SystemTime, ttl: Duration) -> bool {
+        epoch_secs(now).abs_diff(self.at) <= ttl.as_secs()
+    }
+}
+
+/// *now* in whole seconds since the Unix epoch, as [`Marker::at`] stores it.
+pub fn epoch_secs(now: SystemTime) -> u64 {
+    now.duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 impl State {
@@ -63,6 +110,7 @@ impl State {
             dir: dir.to_path_buf(),
             entries: BTreeMap::new(),
             creating: BTreeMap::new(),
+            pending_completions: BTreeMap::new(),
         }
     }
 }

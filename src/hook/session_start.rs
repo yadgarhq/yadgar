@@ -403,7 +403,10 @@ pub fn context_text_in(
         Ok(client) => client,
         Err(e) => return Some(notice(&Failure::Gateway(printable(&e.to_string())))),
     };
-    let scope = crate::harness::scope::Scope::from_dir(config.dir());
+    let (scope, completion_ttl) = match crate::harness::scope::Settings::from_dir(config.dir()) {
+        Ok(s) => (Ok(s.scope), s.completion_ttl),
+        Err(e) => (Err(e), crate::harness::scope::COMPLETION_TTL),
+    };
     let caller = ToolCaller::new(client, config, &cwd);
     let project = caller.project()?.to_string();
     match block_on_bounded(list(&caller, deadline)) {
@@ -415,6 +418,7 @@ pub fn context_text_in(
                 project: &project,
                 tasks: &tasks,
                 complete: listing.complete,
+                completion_ttl,
             };
             if let Some(line) =
                 crate::harness::adapter::session_line(payload.as_ref(), &report, env)

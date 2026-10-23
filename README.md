@@ -400,8 +400,11 @@ each task in scope into the session's task list, keyed by its URN (never by its
 yaadgaar number), updates the ones yaadgaar changed, and deletes the ones that
 went done, dropped or out of scope. It never touches a task file it did not
 write. What it owns is recorded outside the Claude Code tree, in
-`$XDG_STATE_HOME/yaadgaar/harness/claude-code/<list id>.json` (else
-`~/.local/state/...`; the directory is `0700`, the files `0600`). The banner
+`<state>/harness/claude-code/<list id>.json`, where `<state>` is
+`$YAADGAAR_STATE_DIR`, else `$XDG_STATE_HOME/yaadgaar`, else
+`~/.local/state/yaadgaar` (the directory is `0700`, the files `0600`). The same
+`<state>` holds the per-project registry record the memory engine reads
+(`<state>/registry/<key>.json`), so one variable moves both. The banner
 gains one line with the counts, or the reason the list was not synced.
 
 An agent's edit to a mirrored task is written back to yaadgaar before it lands:

@@ -409,7 +409,18 @@ pub fn context_text_in(
     };
     let caller = ToolCaller::new(client, config, &cwd);
     let project = caller.project()?.to_string();
-    match block_on_bounded(list(&caller, deadline)) {
+    let listed = block_on_bounded(list(&caller, deadline));
+    // The registry record (yaadgaar #403), BEFORE the out-of-scope return so
+    // an explicit "no such project" lands too. A fault is not an answer, and
+    // writes nothing. Independent of the harness kill switch: it is the
+    // engine's input, not a write to the harness list.
+    let answer = match &listed {
+        Ok(_) => Some(crate::registry::Answer::Registered),
+        Err(Failure::Unregistered) => Some(crate::registry::Answer::NotRegistered),
+        Err(_) => None,
+    };
+    crate::registry::record(env, &project, answer);
+    match listed {
         Ok(listing) => {
             let mut text = render(&project, &listing);
             let tasks: Vec<_> = listing.rows.iter().map(Row::task).collect();
@@ -479,3 +490,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/session_start_harness.rs"]
 mod harness_tests;
+
+#[cfg(test)]
+#[path = "tests/session_start_registry.rs"]
+mod registry_tests;

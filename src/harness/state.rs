@@ -1,7 +1,8 @@
 //! What the sync owns, per Claude Code list: the state file.
 //!
 //! OUTSIDE the Claude Code tree, at
-//! `<XDG_STATE_HOME or ~/.local/state>/yaadgaar/harness/claude-code/<list-id>.json`,
+//! `<YAADGAAR_STATE_DIR, else XDG_STATE_HOME or ~/.local/state + /yaadgaar>`
+//! `/harness/claude-code/<list-id>.json`,
 //! so nothing Claude Code does to its own directory can edit the record of
 //! what this client wrote there. A file is this client's to change only while
 //! BOTH this state lists it AND the file still carries the URN.
@@ -116,12 +117,11 @@ impl State {
 }
 
 /// The directory every list's state file lives in.
+///
+/// Under the client's ONE state root ([`Env::state_root`]), so
+/// `YAADGAAR_STATE_DIR` moves this state and the registry record together.
 pub fn state_dir(env: &Env) -> Option<PathBuf> {
-    let root = env
-        .state_home
-        .clone()
-        .or_else(|| env.home.as_ref().map(|h| h.join(".local/state")))?;
-    Some(root.join("yaadgaar/harness/claude-code"))
+    Some(env.state_root()?.join("harness/claude-code"))
 }
 
 /// The state file for *list_id* (already checked safe by the probe).

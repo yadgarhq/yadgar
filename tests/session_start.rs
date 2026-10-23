@@ -45,6 +45,11 @@ fn hook(config_dir: &Path, cwd: &Path, payload: &str, envs: &[(&str, &str)]) -> 
         .current_dir(cwd)
         .env("HOME", config_dir)
         .env("YAADGAAR_CONFIG_DIR", config_dir)
+        // The registry record and the sync state follow these; unset, they
+        // land under the scratch HOME rather than the developer's own.
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("YAADGAAR_STATE_DIR")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .envs(envs.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

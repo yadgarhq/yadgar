@@ -96,6 +96,9 @@ fn hook_in(home: &std::path::Path, name: &str, payload: &str, envs: &[(&str, &st
         .args(["hook", name])
         .env("HOME", home)
         .env("XDG_STATE_HOME", home.join("state"))
+        // The client's state root wins over XDG_STATE_HOME, so the caller's
+        // own value must not move this test's state elsewhere.
+        .env_remove("YAADGAAR_STATE_DIR")
         .env("YAADGAAR_CONFIG_DIR", home.join("cfg"))
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CLAUDE_CODE_TASK_LIST_ID")

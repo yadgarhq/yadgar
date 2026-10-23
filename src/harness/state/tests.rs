@@ -62,3 +62,23 @@ fn a_state_that_cannot_be_read_is_an_error_never_a_fresh_start() {
         assert!(load(&p).is_err(), "{body}");
     }
 }
+
+#[test]
+fn yaadgaar_state_dir_moves_the_sync_state_with_the_registry() {
+    // ONE state root for the whole client: the variable that moves the
+    // registry record moves the sync state too.
+    let env = Env {
+        yaadgaar_state_dir: Some("/y".into()),
+        state_home: Some("/s".into()),
+        home: Some("/h".into()),
+        ..Env::default()
+    };
+    assert_eq!(
+        state_dir(&env),
+        Some(PathBuf::from("/y/harness/claude-code"))
+    );
+    assert_eq!(
+        crate::registry::dir(&env).unwrap().parent(),
+        state_dir(&env).unwrap().parent().unwrap().parent()
+    );
+}

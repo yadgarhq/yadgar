@@ -11,6 +11,25 @@ use serde_json::{json, Value};
 
 use super::*;
 
+/// [`super::context_text`], with a scratch environment instead of the
+/// process's own. Shadows the glob import ON PURPOSE: the real one reads the
+/// real environment, and session start now writes the registry record
+/// (yaadgaar #403) under the real state directory.
+fn context_text(
+    payload: Result<Value, String>,
+    config: Result<Config, ConfigError>,
+    process_cwd: Option<PathBuf>,
+    deadline: Duration,
+) -> Option<String> {
+    let home = crate::testserver::scratch_dir("session-start-env");
+    let env = crate::harness::Env {
+        home: Some(home.clone()),
+        state_home: Some(home.join("state")),
+        ..crate::harness::Env::default()
+    };
+    context_text_in(payload, config, process_cwd, deadline, &env)
+}
+
 /// A credential no answer may ever contain.
 const SENTINEL_TOKEN: &str = "sentinel-token-must-never-print";
 

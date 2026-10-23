@@ -53,9 +53,27 @@ pub struct Env {
     pub sync_switch: Option<String>,
     /// `XDG_STATE_HOME`: where the sync state lives (else `~/.local/state`).
     pub state_home: Option<PathBuf>,
+    /// `YAADGAAR_STATE_DIR`: the client's whole state directory, for the
+    /// registry record (`crate::registry`, yaadgaar #403, whose path the
+    /// memory engine reads by the same rule) and the sync state alike.
+    pub yaadgaar_state_dir: Option<PathBuf>,
 }
 
 impl Env {
+    /// The client's one state root: `YAADGAAR_STATE_DIR`, else
+    /// `<XDG_STATE_HOME or ~/.local/state>/yaadgaar`. `None` with no home.
+    pub fn state_root(&self) -> Option<PathBuf> {
+        match &self.yaadgaar_state_dir {
+            Some(dir) => Some(dir.clone()),
+            None => Some(
+                self.state_home
+                    .clone()
+                    .or_else(|| self.home.as_ref().map(|h| h.join(".local/state")))?
+                    .join("yaadgaar"),
+            ),
+        }
+    }
+
     /// The real process environment.
     pub fn from_process() -> Self {
         let var = |name: &str| std::env::var(name).ok();
@@ -67,6 +85,9 @@ impl Env {
             enable_tasks: var("CLAUDE_CODE_ENABLE_TASKS"),
             sync_switch: var(SYNC_SWITCH),
             state_home: std::env::var_os("XDG_STATE_HOME")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
+            yaadgaar_state_dir: std::env::var_os(crate::registry::STATE_DIR_ENV)
                 .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
         }

@@ -18,6 +18,7 @@ mod login;
 mod printable;
 mod project;
 mod proxy;
+mod registry;
 mod scheme;
 mod trust;
 mod whoami;

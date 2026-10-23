@@ -368,3 +368,35 @@ The other five targets are built by `.github/workflows/release.yaml`, which is
 this repository's one piece of local CI. The reason it is not in
 [`yadgarhq/actions`](https://github.com/yadgarhq/actions) with everything else is
 written at the top of that file.
+
+### The Claude Code task-format canary
+
+The client will mirror yaadgaar tasks into Claude Code's own task list
+(ADR-1000, `plans/harness-task-sync.md` in `yadgarhq/docs`). Claude Code does
+not document that list's file format, so the format is recorded in
+`tests/fixtures/claude-code/task-shape-v1.json`, and nothing writes to a list
+that does not match it (`yaadgaar harness check-shape <dir>` runs the check).
+
+`make canary` checks the recording against the real thing. It runs `claude -p`
+on a throwaway list (`CLAUDE_CODE_TASK_LIST_ID=yaadgaar-canary-<random>`) with
+capture hooks from a temporary `--settings` file, then checks the files it
+wrote, the `TaskUpdate` and `TaskCompleted` hook payloads, and the order those
+hooks fire in. It needs `claude` logged in and costs a few cents, so it runs on
+the operator's machine and never in CI. Run it after every Claude Code upgrade.
+A red canary means the format moved: update the fixture and the check together,
+in one reviewed change. `make canary-record` also rewrites
+`tests/fixtures/claude-code/hook-payloads.jsonl` from the run.
+
+The recorded format (Claude Code 2.1.296):
+
+- `<CLAUDE_CONFIG_DIR or ~/.claude>/tasks/<CLAUDE_CODE_TASK_LIST_ID or session id>/`
+  holds one `<N>.json` per task, a 0-byte `.lock`, and `.highwatermark`, a
+  decimal integer written when a task is deleted. Ids are never reused.
+- A task file holds `id` (the file name, as a string), `subject`,
+  `description`, `status` (`pending`, `in_progress` or `completed`), `blocks`
+  and `blockedBy` (arrays of ids), and optionally `activeForm`, `owner` and
+  `metadata` (an object, stored as given).
+- `TaskUpdate` with `status: "deleted"` removes the file.
+- For one completing `TaskUpdate`, the hooks fire as `PreToolUse`, then
+  `TaskCompleted`, then `PostToolUse`. `PreToolUse` and `TaskCompleted` share
+  the same `prompt_id`; `TaskCompleted` carries no `tool_use_id`.

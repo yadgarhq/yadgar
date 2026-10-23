@@ -1,0 +1,11 @@
+{
+  "id": "1",
+  "subject": "canary one renamed",
+  "description": "first canary task",
+  "status": "completed",
+  "blocks": [],
+  "blockedBy": [],
+  "metadata": {
+    "canary": true
+  }
+}

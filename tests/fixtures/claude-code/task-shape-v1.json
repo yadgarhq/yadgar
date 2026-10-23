@@ -1,0 +1,77 @@
+{
+  "format": 1,
+  "recorded_with": "Claude Code 2.1.296",
+  "recorded_on": "2026-10-23",
+  "record": {
+    "required": [
+      "id",
+      "subject",
+      "description",
+      "status",
+      "blocks",
+      "blockedBy"
+    ],
+    "optional": ["activeForm", "owner", "metadata"],
+    "types": {
+      "id": "string",
+      "subject": "string",
+      "description": "string",
+      "status": "string",
+      "activeForm": "string",
+      "owner": "string",
+      "metadata": "object",
+      "blocks": "string_array",
+      "blockedBy": "string_array"
+    },
+    "statuses": ["pending", "in_progress", "completed"]
+  },
+  "files": {
+    "task": "<N>.json, N a decimal integer, id equal to N as a string",
+    "lock": ".lock, a 0-byte regular file",
+    "highwatermark": ".highwatermark, a decimal integer, written on delete"
+  },
+  "hooks": {
+    "order_completing_task_update": [
+      "PreToolUse",
+      "TaskCompleted",
+      "PostToolUse"
+    ],
+    "order_task_create": ["PreToolUse", "TaskCreated", "PostToolUse"],
+    "task_update_input": {
+      "required": ["taskId"],
+      "optional": [
+        "subject",
+        "description",
+        "activeForm",
+        "status",
+        "owner",
+        "metadata",
+        "addBlocks",
+        "addBlockedBy"
+      ]
+    },
+    "task_update_statuses": ["pending", "in_progress", "completed", "deleted"],
+    "task_update_response": {
+      "required": ["success", "taskId", "updatedFields"],
+      "optional": ["statusChange"]
+    },
+    "task_completed": {
+      "required": [
+        "session_id",
+        "prompt_id",
+        "task_id",
+        "task_subject",
+        "hook_event_name",
+        "cwd",
+        "transcript_path"
+      ],
+      "optional": [
+        "task_description",
+        "teammate_name",
+        "team_name",
+        "agent_id",
+        "permission_mode"
+      ]
+    }
+  }
+}

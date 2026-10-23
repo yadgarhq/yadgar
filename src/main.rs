@@ -11,6 +11,7 @@ mod admin;
 mod config;
 mod enrolment;
 mod expiry;
+mod harness;
 mod hook;
 mod install;
 mod login;
@@ -174,6 +175,14 @@ enum Command {
         #[command(subcommand)]
         command: admin::AdminCommand,
     },
+
+    /// Checks on the agent harness's own task list (ADR-1000). HIDDEN: the
+    /// canary (`make canary`) is its caller. It changes nothing.
+    #[command(hide = true)]
+    Harness {
+        #[command(subcommand)]
+        command: harness::HarnessCommand,
+    },
 }
 
 /// NOT `#[tokio::main]`. That macro starts the runtime, and `Cli::parse()` and
@@ -297,6 +306,7 @@ async fn real_main() -> anyhow::Result<()> {
         Command::Hook { name } => hook::process::run(&name, || ()),
         Command::Admin { command } => Ok(admin::run(command).await?),
         Command::Whoami => Ok(whoami::run().await?),
+        Command::Harness { command } => harness::run(command),
     }
 }
 

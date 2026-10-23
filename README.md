@@ -387,6 +387,17 @@ A red canary means the format moved: update the fixture and the check together,
 in one reviewed change. `make canary-record` also rewrites
 `tests/fixtures/claude-code/hook-payloads.jsonl` from the run.
 
+Which tasks are mirrored is `harness.scope`, set in `harness.json` beside
+`config.json` (`{"scope": "active"}`): `all-open` (every task not done or
+dropped, the default per ADR-1000), `active` (in_progress and blocked), or
+`none`. `scope` is the only key the file may hold: any other key, a typo
+included, is refused and named in the banner, never read as the default.
+`YAADGAAR_HARNESS_SYNC=off` turns the sync off as well. The task tools count as
+present when `CLAUDE_CODE_ENABLE_TODO_TOOLS` is exactly `1` (the documented
+value), or the model has them by default. For now the
+`session-start` banner only says how many tasks a sync would write, or why the
+list cannot be synced; nothing is written yet.
+
 The recorded format (Claude Code 2.1.296):
 
 - `<CLAUDE_CONFIG_DIR or ~/.claude>/tasks/<CLAUDE_CODE_TASK_LIST_ID or session id>/`

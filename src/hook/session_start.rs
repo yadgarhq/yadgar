@@ -338,8 +338,31 @@ pub fn context_text(
     process_cwd: Option<PathBuf>,
     deadline: Duration,
 ) -> Option<String> {
+    context_text_in(
+        payload,
+        config,
+        process_cwd,
+        deadline,
+        &crate::harness::Env::from_process(),
+    )
+}
+
+/// [`context_text`], with the process environment the harness adapter reads
+/// handed in, so a test never reads the real one (or the real `~/.claude`).
+///
+/// A listing that loaded gets the banner, then AT MOST ONE harness line
+/// ([`crate::harness::adapter::session_line`]). Every other harness, and every
+/// notice, is exactly what it was before the adapter existed.
+pub fn context_text_in(
+    payload: Result<Value, String>,
+    config: Result<Config, ConfigError>,
+    process_cwd: Option<PathBuf>,
+    deadline: Duration,
+    env: &crate::harness::Env,
+) -> Option<String> {
+    let payload = payload.ok();
     let cwd = payload
-        .ok()
+        .as_ref()
         .and_then(|p| p.get("cwd").and_then(Value::as_str).map(PathBuf::from))
         .or(process_cwd)
         .unwrap_or_default();
@@ -358,10 +381,21 @@ pub fn context_text(
         Ok(client) => client,
         Err(e) => return Some(notice(&Failure::Gateway(printable(&e.to_string())))),
     };
+    let scope = crate::harness::scope::Scope::from_dir(config.dir());
     let caller = ToolCaller::new(client, config, &cwd);
     let project = caller.project()?.to_string();
     match block_on_bounded(list(&caller, deadline)) {
-        Ok(listing) => Some(render(&project, &listing)),
+        Ok(listing) => {
+            let mut text = render(&project, &listing);
+            let statuses: Vec<&str> = listing.rows.iter().map(|r| r.status.as_str()).collect();
+            let line =
+                crate::harness::adapter::session_line(payload.as_ref(), scope, &statuses, env);
+            if let Some(line) = line {
+                text.push('\n');
+                text.push_str(&line);
+            }
+            Some(text)
+        }
         Err(Failure::Unregistered) => None,
         Err(failure) => Some(notice(&failure)),
     }
@@ -409,3 +443,7 @@ pub fn panicked(what: &str) -> String {
 #[cfg(test)]
 #[path = "tests/session_start.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/session_start_harness.rs"]
+mod harness_tests;

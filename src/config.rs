@@ -302,6 +302,12 @@ impl Config {
         &self.gateway
     }
 
+    /// The directory this config was loaded from: where the client's other
+    /// settings (`harness.json`) are read from too.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// The credential.
     ///
     /// A method rather than a public field, so `grep -n 'token()'` finds every

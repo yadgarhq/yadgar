@@ -11,6 +11,25 @@ use serde_json::{json, Value};
 
 use super::*;
 
+/// [`super::context_text`], with a scratch environment instead of the
+/// process's own. Shadows the glob import ON PURPOSE: the real one reads the
+/// real environment, and session start now writes the registry record
+/// (yaadgaar #403) under the real state directory.
+fn context_text(
+    payload: Result<Value, String>,
+    config: Result<Config, ConfigError>,
+    process_cwd: Option<PathBuf>,
+    deadline: Duration,
+) -> Option<String> {
+    let home = crate::testserver::scratch_dir("session-start-env");
+    let env = crate::harness::Env {
+        home: Some(home.clone()),
+        state_home: Some(home.join("state")),
+        ..crate::harness::Env::default()
+    };
+    context_text_in(payload, config, process_cwd, deadline, &env)
+}
+
 /// A credential no answer may ever contain.
 const SENTINEL_TOKEN: &str = "sentinel-token-must-never-print";
 
@@ -21,6 +40,7 @@ fn row(number: i64, status: &str, title: &str) -> Row {
         number,
         status: status.to_string(),
         title: title.to_string(),
+        ..Row::default()
     }
 }
 
@@ -260,10 +280,17 @@ async fn every_page_is_followed_so_the_count_is_the_whole_count() {
         body_of(&requests[1])["params"]["arguments"]["page_token"],
         "page-2"
     );
+    // The banner's fields; `id` and `version` ride along for the harness sync.
+    let shown: Vec<Row> = listing
+        .rows
+        .iter()
+        .map(|r| row(r.number, &r.status, &r.title))
+        .collect();
     assert_eq!(
-        listing.rows,
+        shown,
         vec![row(1, "open", "one"), row(2, "in_progress", "two")]
     );
+    assert_eq!(listing.rows[0].id, Some(json!("a")));
     assert!(listing.complete);
     std::fs::remove_dir_all(&dir).ok();
 }

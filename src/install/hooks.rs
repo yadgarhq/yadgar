@@ -57,13 +57,19 @@ pub struct HookSpec {
     pub fire_and_forget: bool,
 }
 
-/// TWO registrations: the guard, and the session-start task listing.
+/// FOUR registrations: the guard, the session-start task listing, and the two
+/// write-back handlers.
 ///
 /// `session-start` (ADR-0992) prints the project's open tasks into the session
 /// before its first prompt. Matcher `""` is every source — startup, resume,
 /// clear and compact — so a compacted session is told its tasks again. It is
 /// synchronous, because the listing must be context before the prompt, and it
 /// bounds its own wait (see `hook::session_start::DEADLINE`).
+///
+/// `task-update` (`PreToolUse`, matcher `TaskUpdate`) and `task-completed`
+/// (`TaskCompleted`, which takes no matcher) write an agent's edit to a
+/// mirrored task back to yaadgaar before it lands (ADR-1000). Both are
+/// synchronous: a refusal must come before the change, or it is no refusal.
 ///
 /// Up to 0.1.4 this list held twelve. Eleven of them needed hook endpoints the
 /// gateway does not have, so they did nothing — while still spawning this
@@ -88,8 +94,20 @@ pub const MANAGED_HOOKS: &[HookSpec] = &[
         fire_and_forget: false,
     },
     HookSpec {
+        event: "PreToolUse",
+        name: crate::hook::write_back::TASK_UPDATE,
+        matcher: "TaskUpdate",
+        fire_and_forget: false,
+    },
+    HookSpec {
         event: "SessionStart",
         name: crate::hook::session_start::NAME,
+        matcher: "",
+        fire_and_forget: false,
+    },
+    HookSpec {
+        event: "TaskCompleted",
+        name: crate::hook::write_back::TASK_COMPLETED,
         matcher: "",
         fire_and_forget: false,
     },

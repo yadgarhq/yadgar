@@ -97,11 +97,33 @@ const OUT_OF_SCOPE: [&str; 3] = [
 ];
 
 /// One task, in the summary shape the gateway answers with.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+///
+/// `id` and `version` are OPTIONAL and loosely typed on purpose: the banner is
+/// rendered from `number`, `status` and `title` alone, and a row whose id or
+/// version is missing or of an unexpected type must still render. The harness
+/// sync skips such a row instead (see [`Row::task`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Row {
     pub number: i64,
     pub status: String,
     pub title: String,
+    #[serde(default)]
+    pub id: Option<Value>,
+    #[serde(default)]
+    pub version: Option<Value>,
+}
+
+impl Row {
+    /// This row as the harness sync reads it.
+    pub fn task(&self) -> crate::harness::sync::Task {
+        crate::harness::sync::Task {
+            urn: self.id.as_ref().and_then(Value::as_str).map(str::to_string),
+            number: self.number,
+            title: self.title.clone(),
+            status: self.status.clone(),
+            version: self.version.as_ref().and_then(Value::as_u64),
+        }
+    }
 }
 
 /// Every open task the listing reached.
@@ -338,8 +360,31 @@ pub fn context_text(
     process_cwd: Option<PathBuf>,
     deadline: Duration,
 ) -> Option<String> {
+    context_text_in(
+        payload,
+        config,
+        process_cwd,
+        deadline,
+        &crate::harness::Env::from_process(),
+    )
+}
+
+/// [`context_text`], with the process environment the harness adapter reads
+/// handed in, so a test never reads the real one (or the real `~/.claude`).
+///
+/// A listing that loaded gets the banner, then AT MOST ONE harness line
+/// ([`crate::harness::adapter::session_line`]). Every other harness, and every
+/// notice, is exactly what it was before the adapter existed.
+pub fn context_text_in(
+    payload: Result<Value, String>,
+    config: Result<Config, ConfigError>,
+    process_cwd: Option<PathBuf>,
+    deadline: Duration,
+    env: &crate::harness::Env,
+) -> Option<String> {
+    let payload = payload.ok();
     let cwd = payload
-        .ok()
+        .as_ref()
         .and_then(|p| p.get("cwd").and_then(Value::as_str).map(PathBuf::from))
         .or(process_cwd)
         .unwrap_or_default();
@@ -358,10 +403,42 @@ pub fn context_text(
         Ok(client) => client,
         Err(e) => return Some(notice(&Failure::Gateway(printable(&e.to_string())))),
     };
+    let (scope, completion_ttl) = match crate::harness::scope::Settings::from_dir(config.dir()) {
+        Ok(s) => (Ok(s.scope), s.completion_ttl),
+        Err(e) => (Err(e), crate::harness::scope::COMPLETION_TTL),
+    };
     let caller = ToolCaller::new(client, config, &cwd);
     let project = caller.project()?.to_string();
-    match block_on_bounded(list(&caller, deadline)) {
-        Ok(listing) => Some(render(&project, &listing)),
+    let listed = block_on_bounded(list(&caller, deadline));
+    // The registry record (yaadgaar #403), BEFORE the out-of-scope return so
+    // an explicit "no such project" lands too. A fault is not an answer, and
+    // writes nothing. Independent of the harness kill switch: it is the
+    // engine's input, not a write to the harness list.
+    let answer = match &listed {
+        Ok(_) => Some(crate::registry::Answer::Registered),
+        Err(Failure::Unregistered) => Some(crate::registry::Answer::NotRegistered),
+        Err(_) => None,
+    };
+    crate::registry::record(env, &project, answer);
+    match listed {
+        Ok(listing) => {
+            let mut text = render(&project, &listing);
+            let tasks: Vec<_> = listing.rows.iter().map(Row::task).collect();
+            let report = crate::harness::adapter::Report {
+                scope,
+                project: &project,
+                tasks: &tasks,
+                complete: listing.complete,
+                completion_ttl,
+            };
+            if let Some(line) =
+                crate::harness::adapter::session_line(payload.as_ref(), &report, env)
+            {
+                text.push('\n');
+                text.push_str(&line);
+            }
+            Some(text)
+        }
         Err(Failure::Unregistered) => None,
         Err(failure) => Some(notice(&failure)),
     }
@@ -409,3 +486,11 @@ pub fn panicked(what: &str) -> String {
 #[cfg(test)]
 #[path = "tests/session_start.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/session_start_harness.rs"]
+mod harness_tests;
+
+#[cfg(test)]
+#[path = "tests/session_start_registry.rs"]
+mod registry_tests;

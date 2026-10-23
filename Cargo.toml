@@ -149,6 +149,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # machine it was written on.
 dirs = "7"
 
+# FULL UNICODE CASE FOLDING, and only that. The registry record's filename is
+# Python's `quote(project.casefold(), safe="")` (yaadgaar #403), and the
+# memory engine reads it by that name. `str::to_lowercase` is not casefold:
+# `ß` stays `ß` where casefold gives `ss`, and a mismatch fails SILENTLY to
+# the engine's prefix fallback. `UniCase::to_folded_case` maps by Unicode's
+# CaseFolding.txt (statuses C and F), which is what `str.casefold` uses.
+unicase = "2"
+
 # The password prompt at login, which must not echo and must not land in shell
 # history — the two ways a credential leaks from an interactive CLI.
 rpassword = "7"

@@ -105,6 +105,19 @@ fn insteadof_rewrites_are_applied_before_the_url_is_read() {
 }
 
 #[test]
+fn the_registry_record_for_an_insteadof_remote_is_keyed_on_the_rewritten_key() {
+    // yaadgaar #403: the engine reads the record by the key ITS mint derives,
+    // which applies insteadOf, strips the host and `.git`, and lowercases. A
+    // record keyed on the raw remote would fail silently to its prefix.
+    let rules = insteadof_rules_from("url.github-personal:.insteadof git@github.com:");
+    let remote = apply_insteadof(&rules, "git@github.com:YadgarHQ/Yadgar.git");
+    assert_eq!(remote, "github-personal:YadgarHQ/Yadgar.git");
+    let project = normalise_remote(&remote);
+    assert_eq!(project, "yadgarhq/yadgar");
+    assert_eq!(crate::registry::key(&project), "yadgarhq%2Fyadgar");
+}
+
+#[test]
 fn a_rewrite_table_that_chases_its_own_tail_terminates() {
     // Legal git configuration. A client that hangs on startup is worse than one
     // that reports the wrong key, because nothing at all works and there is no

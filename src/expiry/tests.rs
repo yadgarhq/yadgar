@@ -4,6 +4,21 @@
 use super::*;
 
 #[test]
+fn format_utc_is_the_inverse_of_parse_across_eras_and_leap_days() {
+    for text in [
+        "1970-01-01T00:00:00Z",
+        "2000-02-29T23:59:59Z",
+        "2026-10-23T12:34:56Z",
+        "2100-03-01T00:00:01Z",
+        "1969-12-31T23:59:59Z",
+    ] {
+        let secs = parse(text).unwrap();
+        assert_eq!(format_utc(secs), text, "{secs}");
+    }
+    assert_eq!(format_utc(0), "1970-01-01T00:00:00Z");
+}
+
+#[test]
 fn a_whole_second_utc_time_parses_to_its_unix_seconds() {
     assert_eq!(parse("1970-01-01T00:00:00Z"), Some(0));
     assert_eq!(parse("2026-10-21T06:22:04Z"), Some(1_792_563_724));

@@ -62,6 +62,11 @@ const EXPECTED_REGISTRATIONS: &[(&str, &str, &str, bool)] = &[
     // the listing is context the session must hold before its first prompt,
     // and an async hook's output arrives after it (ADR-0992).
     ("SessionStart", "session-start", "", false),
+    // ONLY TaskUpdate, and synchronous: the write-back must refuse BEFORE the
+    // harness writes the file (ADR-1000).
+    ("PreToolUse", "task-update", "TaskUpdate", false),
+    // TaskCompleted takes no matcher; synchronous for the same reason.
+    ("TaskCompleted", "task-completed", "", false),
 ];
 
 #[test]
@@ -134,7 +139,11 @@ fn one_written_entry_is_pinned_as_literal_bytes() {
 
     assert_eq!(
         settings["hooks"]["PreToolUse"].to_string(),
-        r#"[{"matcher":"Bash|Edit|Write|NotebookEdit","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-tool-guard"}]}]"#
+        r#"[{"matcher":"Bash|Edit|Write|NotebookEdit","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-tool-guard"}]},{"matcher":"TaskUpdate","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook task-update"}]}]"#
+    );
+    assert_eq!(
+        settings["hooks"]["TaskCompleted"].to_string(),
+        r#"[{"matcher":"","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook task-completed"}]}]"#
     );
 }
 
@@ -253,8 +262,11 @@ fn a_stale_registration_is_replaced_rather_than_duplicated() {
     install_with(&home, Path::new(BINARY)).unwrap();
     let settings = read_json(&Layout::new(&home).settings());
     let entries = settings["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(entries.len(), 1, "{entries:#?}");
-    assert!(hooks::entry_commands(&entries[0])[0].starts_with(BINARY));
+    // The guard and task-update, once each: the stale guard did not survive.
+    assert_eq!(entries.len(), 2, "{entries:#?}");
+    for entry in entries {
+        assert!(hooks::entry_commands(entry)[0].starts_with(BINARY));
+    }
 }
 
 #[test]

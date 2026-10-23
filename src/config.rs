@@ -13,8 +13,8 @@ mod legacy;
 mod private;
 
 pub use legacy::{hint as legacy_hint, legacy_dir};
-use private::write_private;
-pub(crate) use private::{create_first_free, temp_names};
+pub(crate) use private::write_private;
+pub(crate) use private::{create_first_free, create_private_dir, temp_names};
 
 /// `yaadgaar`, NOT `yadgar`. Up to 0.1.4 this was `yadgar`, the directory the
 /// yadgar memory engine keeps its `config.yaml` and `secrets.env` in. Sharing it
@@ -300,6 +300,12 @@ impl Config {
 
     pub fn gateway_url(&self) -> &str {
         &self.gateway
+    }
+
+    /// The directory this config was loaded from: where the client's other
+    /// settings (`harness.json`) are read from too.
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// The credential.

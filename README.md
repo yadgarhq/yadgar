@@ -391,12 +391,25 @@ Which tasks are mirrored is `harness.scope`, set in `harness.json` beside
 `config.json` (`{"scope": "active"}`): `all-open` (every task not done or
 dropped, the default per ADR-1000), `active` (in_progress and blocked), or
 `none`. `scope` is the only key the file may hold: any other key, a typo
-included, is refused and named in the banner, never read as the default.
-`YAADGAAR_HARNESS_SYNC=off` turns the sync off as well. The task tools count as
-present when `CLAUDE_CODE_ENABLE_TODO_TOOLS` is exactly `1` (the documented
-value), or the model has them by default. For now the
-`session-start` banner only says how many tasks a sync would write, or why the
-list cannot be synced; nothing is written yet.
+included, is refused and named in the banner, never read as the default. The
+task tools count as present when `CLAUDE_CODE_ENABLE_TODO_TOOLS` is exactly `1`
+(the documented value), or the model has them by default.
+
+In a Claude Code session whose list passes the probe, `session-start` writes
+each task in scope into the session's task list, keyed by its URN (never by its
+yaadgaar number), updates the ones yaadgaar changed, and deletes the ones that
+went done, dropped or out of scope. It never touches a task file it did not
+write. What it owns is recorded outside the Claude Code tree, in
+`$XDG_STATE_HOME/yaadgaar/harness/claude-code/<list id>.json` (else
+`~/.local/state/...`; the directory is `0700`, the files `0600`). The banner
+gains one line with the counts, or the reason the list was not synced. An edit
+made in the task list is not yet written back to yaadgaar; change tasks with
+the `mcp__yaadgaar__*` tools.
+
+`harness.scope = none` and the kill switch `YAADGAAR_HARNESS_SYNC=off` both stop
+the sync. Neither leaves a stale mirror behind: the pass that sees either one
+only DELETES the files it owns, and writes nothing new. A list it never wrote
+to, or a session whose list fails the probe, is not touched at all.
 
 The recorded format (Claude Code 2.1.296):
 

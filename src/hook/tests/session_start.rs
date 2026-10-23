@@ -21,6 +21,7 @@ fn row(number: i64, status: &str, title: &str) -> Row {
         number,
         status: status.to_string(),
         title: title.to_string(),
+        ..Row::default()
     }
 }
 
@@ -260,10 +261,17 @@ async fn every_page_is_followed_so_the_count_is_the_whole_count() {
         body_of(&requests[1])["params"]["arguments"]["page_token"],
         "page-2"
     );
+    // The banner's fields; `id` and `version` ride along for the harness sync.
+    let shown: Vec<Row> = listing
+        .rows
+        .iter()
+        .map(|r| row(r.number, &r.status, &r.title))
+        .collect();
     assert_eq!(
-        listing.rows,
+        shown,
         vec![row(1, "open", "one"), row(2, "in_progress", "two")]
     );
+    assert_eq!(listing.rows[0].id, Some(json!("a")));
     assert!(listing.complete);
     std::fs::remove_dir_all(&dir).ok();
 }

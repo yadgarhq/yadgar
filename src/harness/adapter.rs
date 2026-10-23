@@ -1,12 +1,14 @@
 //! One adapter per harness, behind one interface (ADR-1000).
 //!
-//! Claude Code has a task list on disk that this client can mirror, behind the
+//! Claude Code has a task list on disk that this client mirrors, behind the
 //! probe. Every other harness (Codex, OpenCode, anything unknown) is
 //! [`Generic`]: the banner, and nothing else. A Claude Code session whose probe
 //! fails is ALSO reported through the banner only, with one line saying why.
 //!
-//! READ-ONLY in this car. [`Harness::context`] reports what a sync WOULD do;
-//! the car that writes adds `apply`.
+//! [`Harness::context`] runs the sync (car 2) when the probe says the list is
+//! ready, and returns the one line the banner gains. With the sync off
+//! (`harness.scope = none` or the kill switch), it runs a delete-only pass
+//! instead, which removes the files this client mirrored and writes nothing.
 
 use serde_json::Value;
 
@@ -15,14 +17,19 @@ use crate::printable::printable;
 use super::claude_code::{self, ClaudeCode, Probe};
 use super::scope::Scope;
 use super::shape::RecordShape;
+use super::sync::{self, Input, Outcome, Task};
 use super::{Env, SYNC_SWITCH};
 
-/// What the banner needs to know about this session's tasks.
+/// What the banner and the sync need to know about this session's tasks.
 pub struct Report<'a> {
     /// `harness.scope` as read: `Err` carries why it was refused.
     pub scope: Result<Scope, String>,
-    /// The status of every task the listing reached.
-    pub statuses: &'a [&'a str],
+    /// The project the listing was for.
+    pub project: &'a str,
+    /// Every task the listing reached.
+    pub tasks: &'a [Task],
+    /// False when the listing stopped early.
+    pub complete: bool,
 }
 
 /// One harness.
@@ -47,25 +54,25 @@ pub const NOT_SYNCED: &str = "TaskList not synced";
 impl Harness for ClaudeCode {
     fn context(&self, env: &Env, shape: &RecordShape, report: &Report) -> Option<String> {
         if env.sync_switch.as_deref() == Some("off") {
-            return Some(format!("TaskList sync is off ({SYNC_SWITCH}=off)."));
+            return Some(self.off(env, shape, report, &format!("{SYNC_SWITCH}=off")));
         }
         let scope = match &report.scope {
             Err(reason) => return Some(format!("{NOT_SYNCED}: {reason}.")),
-            Ok(Scope::Off) => return Some("TaskList sync is off (harness.scope = none).".into()),
+            Ok(Scope::Off) => return Some(self.off(env, shape, report, "harness.scope = none")),
             Ok(scope) => *scope,
         };
         let why = match self.probe(env, shape) {
-            Probe::Ready { .. } => {
-                let wanted = report.statuses.iter().filter(|s| scope.holds(s)).count();
-                let name = match scope {
-                    Scope::AllOpen => "all-open",
-                    Scope::Active => "active",
-                    Scope::Off => "none",
+            Probe::Ready { dir, listing } => {
+                let input = Input {
+                    project: report.project,
+                    tasks: report.tasks,
+                    complete: report.complete,
+                    scope,
                 };
-                return Some(format!(
-                    "TaskList sync, dry run: would sync {wanted} tasks into this session's \
-                     TaskList (harness.scope = {name}); nothing is written yet."
-                ));
+                match contained(|| sync::run(&dir, &self.list_id, &listing, env, &input)) {
+                    Ok(outcome) => return Some(synced(&outcome, report.complete)),
+                    Err(reason) => reason,
+                }
             }
             Probe::NoTools => "this session has no task tools (CLAUDE_CODE_ENABLE_TODO_TOOLS=1 \
                                turns them on)"
@@ -80,6 +87,70 @@ impl Harness for ClaudeCode {
     }
 }
 
+impl ClaudeCode {
+    /// The sync is off (*why*). A list this client mirrored gets a DELETE-ONLY
+    /// pass, so no stale mirror stays behind for an agent to edit while
+    /// nothing writes its edits back. It creates and rewrites nothing, and a
+    /// list with no state is not touched at all.
+    fn off(&self, env: &Env, shape: &RecordShape, report: &Report, why: &str) -> String {
+        let off = format!("TaskList sync is off ({why})");
+        let Probe::Ready { dir, listing } = self.probe(env, shape) else {
+            return format!("{off}.");
+        };
+        let input = Input {
+            project: report.project,
+            tasks: &[],
+            complete: true,
+            scope: Scope::Off,
+        };
+        match contained(|| sync::run(&dir, &self.list_id, &listing, env, &input)) {
+            Ok(o) if o.deleted > 0 => format!("{off}; {} mirrored tasks removed.", o.deleted),
+            Ok(_) => format!("{off}."),
+            Err(reason) => format!(
+                "{off}; the mirrored tasks were not removed: {}.",
+                printable(&reason)
+            ),
+        }
+    }
+}
+
+/// Run one pass in its OWN containment: a defect in the sync must cost the
+/// sync, never the banner above it. Not `process::contain`, which the whole
+/// hook already runs inside and which holds a lock that is not re-entrant.
+fn contained(pass: impl FnOnce() -> Result<Outcome, String>) -> Result<Outcome, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(pass))
+        .unwrap_or_else(|_| Err("the sync failed with an internal error".to_string()))
+}
+
+/// The line for a pass that ran.
+fn synced(o: &Outcome, complete: bool) -> String {
+    let mut parts = vec![
+        format!("{} new", o.created + o.recreated),
+        format!("{} updated", o.updated + o.refreshed),
+        format!("{} removed", o.deleted),
+    ];
+    if o.diverged > 0 {
+        parts.push(format!(
+            "{} edited here and NOT saved to yaadgaar",
+            o.diverged
+        ));
+    }
+    if o.skipped > 0 {
+        parts.push(format!("{} skipped, no task id", o.skipped));
+    }
+    let partial = if complete {
+        ""
+    } else {
+        " The listing stopped early, so nothing was removed."
+    };
+    format!(
+        "TaskList holds {} yaadgaar tasks ({}). yaadgaar is the source of truth: change a \
+         task with mcp__yaadgaar__edit_task or transition_task.{partial}",
+        o.mirrored,
+        parts.join(", ")
+    )
+}
+
 /// The harness that sent *payload*. Anything not recognised is [`Generic`].
 pub fn detect(payload: Option<&Value>, env: &Env) -> Box<dyn Harness> {
     match payload.and_then(|p| claude_code::detect(p, env)) {
@@ -92,15 +163,9 @@ pub fn detect(payload: Option<&Value>, env: &Env) -> Box<dyn Harness> {
 ///
 /// `None` also when the recorded shape cannot be read, which is a build defect
 /// a test pins; the banner must still go out.
-pub fn session_line(
-    payload: Option<&Value>,
-    scope: Result<Scope, String>,
-    statuses: &[&str],
-    env: &Env,
-) -> Option<String> {
+pub fn session_line(payload: Option<&Value>, report: &Report, env: &Env) -> Option<String> {
     let shape = super::shape::recorded().ok()?;
-    let report = Report { scope, statuses };
-    detect(payload, env).context(env, &shape, &report)
+    detect(payload, env).context(env, &shape, report)
 }
 
 #[cfg(test)]

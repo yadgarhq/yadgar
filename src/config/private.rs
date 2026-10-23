@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 /// The fresh file is also the OWNER PROBE: it belongs to whoever this process
 /// runs as, so a directory with a different owner is refused before a byte is
 /// written or a mode changed. See [`refuse_foreign_owner`].
-pub(super) fn write_private(
+pub(crate) fn write_private(
     dir: &Path,
     name: &str,
     body: &[u8],
@@ -121,7 +121,7 @@ pub(crate) fn create_first_free(
 /// mode, because a missing `~/.config` made 0700 here would be a surprise to
 /// every other program that uses it.
 #[cfg(unix)]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     if !dir.exists() {
         if let Some(parent) = dir.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -207,7 +207,7 @@ pub(super) fn refuse_foreign_owner(dir: &Path, owner: u32, me: u32) -> std::io::
 }
 
 #[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 

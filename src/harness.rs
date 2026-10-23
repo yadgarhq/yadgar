@@ -13,12 +13,19 @@
 //!   the same check, through `yaadgaar harness check-shape`;
 //! - car 1, [`adapter`], [`claude_code`] and [`scope`]: one adapter per
 //!   harness, the Claude Code probe, and `harness.scope`. Read-only: the
-//!   session-start banner gains one line saying what a sync WOULD do.
+//!   session-start banner gains one line saying what a sync WOULD do;
+//! - car 2, [`plan`], [`record`], [`state`] and [`sync`]: the SessionStart
+//!   sync. yaadgaar tasks in scope are written into the Claude Code list,
+//!   updated, and deleted when they go terminal. Write-back is car 3.
 
 pub mod adapter;
 pub mod claude_code;
+pub mod plan;
+pub mod record;
 pub mod scope;
 pub mod shape;
+pub mod state;
+pub mod sync;
 
 use std::path::PathBuf;
 
@@ -41,6 +48,8 @@ pub struct Env {
     pub enable_tasks: Option<String>,
     /// `YAADGAAR_HARNESS_SYNC`: `off` stops every write.
     pub sync_switch: Option<String>,
+    /// `XDG_STATE_HOME`: where the sync state lives (else `~/.local/state`).
+    pub state_home: Option<PathBuf>,
 }
 
 impl Env {
@@ -54,6 +63,9 @@ impl Env {
             enable_todo_tools: var("CLAUDE_CODE_ENABLE_TODO_TOOLS"),
             enable_tasks: var("CLAUDE_CODE_ENABLE_TASKS"),
             sync_switch: var(SYNC_SWITCH),
+            state_home: std::env::var_os("XDG_STATE_HOME")
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
         }
     }
 }

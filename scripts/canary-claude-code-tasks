@@ -25,7 +25,9 @@
 #   --record   also write the scrubbed hook payloads to
 #              tests/fixtures/claude-code/hook-payloads.jsonl
 # Environment:
-#   CANARY_MODEL   the model for `claude -p` (default: haiku)
+#   CANARY_MODEL       the model for `claude -p` (default: haiku)
+#   CANARY_SEED_MODEL  the model for the seeded-list step. It must NOT have the
+#                      task tools by default (default: claude-opus-5-5)
 
 set -euo pipefail
 
@@ -49,7 +51,9 @@ bin="$target_dir/debug/yaadgaar"
 work="$(mktemp -d)"
 list_id="yaadgaar-canary-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
 list_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/$list_id"
-cleanup() { rm -rf -- "$work" "$list_dir"; }
+seed_id="$list_id-seeded"
+seed_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/$seed_id"
+cleanup() { rm -rf -- "$work" "$list_dir" "$seed_dir"; }
 trap cleanup EXIT
 
 mkdir -p "$work/cwd"
@@ -70,6 +74,10 @@ jq -n --arg c "$work/capture" '
   }}' >"$work/settings.json"
 
 model="${CANARY_MODEL:-haiku}"
+# The seeded-list step runs a model WITHOUT the task tools by default, so the
+# tools can only come from the settings `env` block. That is what the probe
+# relies on: `model` is absent from the SessionStart payload under `claude -p`.
+seed_model="${CANARY_SEED_MODEL:-claude-opus-5-5}"
 claude_p() {
   (cd "$work/cwd" &&
     CLAUDE_CODE_TASK_LIST_ID="$list_id" CLAUDE_CODE_ENABLE_TODO_TOOLS=1 \
@@ -161,6 +169,49 @@ Call TaskGet for task id 7. Reply with exactly one line: SUBJECT=<its subject> S
 PROMPT
 grep -q 'SUBJECT=canary handwritten STATUS=in_progress' "$work/read.out" ||
   fail "a hand-written task file was not read back by TaskGet: $(cat "$work/read.out")"
+
+# --- a list a SessionStart hook seeded ---------------------------------------
+# What the sync does (car 2): a SessionStart hook writes task files into a list
+# Claude Code has not created yet, with no .lock and no .highwatermark. The
+# live session must list them, allocate its own next id ABOVE them, and leave
+# them byte for byte. The task tools are turned on through the settings `env`
+# block, as a real machine does, and the hook records whether it inherited it:
+# the probe reads that variable from the hook's own environment.
+echo "canary: a list seeded by a SessionStart hook"
+cat >"$work/seed" <<EOF
+#!/bin/sh
+echo "TODO=\${CLAUDE_CODE_ENABLE_TODO_TOOLS:-unset}" >'$work/seed.env'
+mkdir -p '$seed_dir'
+for n in 1 2 3; do
+  jq -n --arg n "\$n" '{id: \$n, subject: ("#" + \$n + " seeded task " + \$n),
+    description: ("seeded by the canary\nyaadgaar: yadgar:task:canary-" + \$n),
+    status: "pending", blocks: [], blockedBy: [],
+    metadata: {yaadgaar: {urn: ("yadgar:task:canary-" + \$n), number: (\$n | tonumber)}}}' \
+    >'$seed_dir/'"\$n.json"
+done
+cp -r '$seed_dir' '$work/seeded'
+exit 0
+EOF
+chmod +x "$work/seed"
+jq -n --arg c "$work/seed" '{env: {CLAUDE_CODE_ENABLE_TODO_TOOLS: "1"},
+  hooks: {SessionStart: [{matcher: "", hooks: [{type: "command", command: $c}]}]}}' \
+  >"$work/seed-settings.json"
+(cd "$work/cwd" &&
+  env -u CLAUDE_CODE_ENABLE_TODO_TOOLS CLAUDE_CODE_TASK_LIST_ID="$seed_id" \
+    claude -p --model "$seed_model" --setting-sources project \
+    --settings "$work/seed-settings.json" \
+    --allowedTools TaskCreate,TaskGet,TaskUpdate,TaskList) >"$work/seed.out" <<'PROMPT'
+Call TaskList and print every task id with its subject. Then call TaskCreate once with subject 'canary new' and description 'made mid-session'. Finally print the id the new task got as NEWID=<id>.
+PROMPT
+grep -q 'TODO=1' "$work/seed.env" 2>/dev/null ||
+  fail "a SessionStart hook did not inherit CLAUDE_CODE_ENABLE_TODO_TOOLS from the settings env: $(cat "$work/seed.env" 2>/dev/null)"
+for n in 1 2 3; do
+  grep -q "seeded task $n" "$work/seed.out" || fail "TaskList did not show seeded task $n"
+  cmp -s "$seed_dir/$n.json" "$work/seeded/$n.json" || fail "the session changed seeded task $n.json"
+done
+new_id="$(grep -o 'NEWID=[0-9]*' "$work/seed.out" | head -1 | cut -d= -f2)"
+[[ "$new_id" =~ ^[0-9]+$ && "$new_id" -ge 4 ]] ||
+  fail "the session's own TaskCreate got id '$new_id', not one above the seeded 1-3"
 
 if ((record)); then
   jq -c '.session_id = "<session>" | .transcript_path = "<transcript>" | .cwd = "<cwd>"' \

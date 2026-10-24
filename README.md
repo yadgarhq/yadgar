@@ -327,13 +327,18 @@ the file the memory engine's own guard reads, and never writes it. It honours
 three ids, spelled as the engine spells them: `terraform_family` (terraform,
 tofu, tfp and digger comments), `git_commit_flags` (commits that skip hooks or
 signing) and `hook_config_tamper` (writes to that file, and agent writes to
-Claude Code's `settings.json` / `settings.local.json` and to `.git/hooks`).
+Claude Code's `settings.json` / `settings.local.json`, to plugin
+`hooks/hooks.json` files, to `.git/hooks` and submodule hooks, and lines that
+shadow `gh` or write into a PATH directory before it).
 Every other id is ignored. A missing, unreadable or malformed file leaves
 every guard on.
 
 The guard judges the `Bash`, `PowerShell`, `Edit`, `Write`, `MultiEdit` and
 `NotebookEdit` tools (ADR-1005). It reads terraform through wrappers such as
-`timeout` and `xargs`, and refuses nesting deeper than it reads. It judges
+`timeout` and `xargs`, and refuses nesting deeper than it reads. It refuses
+a line that shadows `gh` — a function or alias, a PATH assignment, a file
+named `gh`, or a write into a PATH directory that comes before the real `gh`
+when the hook runs (ADR-1020). It judges
 tool calls only: `yaadgaar install`, run by nix or a person, still writes
 `settings.json`.
 

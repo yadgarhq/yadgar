@@ -53,9 +53,55 @@ use crate::hook::EXCEPTIONS_FILE;
 use crate::install::shellword::{shell_commands, SimpleCommand};
 
 mod allow;
+mod bin_dirs;
 mod gh_api;
 mod protected;
+mod shadow;
+pub(super) use bin_dirs::is_before_gh;
 pub(super) use protected::{bash_touches_a_protected_path, is_protected_path};
+pub(super) use shadow::names_a_gh_file;
+
+/// Whether a Bash *line* shadows gh or writes before it on PATH
+/// (ADR-1020): see `tamper/shadow.rs` and `tamper/bin_dirs.rs`. A data
+/// heredoc's body is not commands, as for every tamper check.
+pub(super) fn shadows_or_plants_gh(
+    line: &str,
+    commands: &[SimpleCommand],
+    env: &super::GuardEnv,
+) -> bool {
+    let stripped = allow::data_heredocs_removed(line);
+    let scanned;
+    let (line, commands) = match &stripped {
+        Some(stripped) => {
+            scanned = shell_commands(stripped);
+            (stripped.as_str(), scanned.as_slice())
+        }
+        None => (line, commands),
+    };
+    // A compound command's opener is not its program: the scanner keeps
+    // `do`, `then`, `!` or an open brace as the first word, where `executed` would read
+    // it as the program and skip what follows.
+    let commands: Vec<SimpleCommand> = commands.iter().map(without_openers).collect();
+    shadow::shadows_gh(line, &commands) || bin_dirs::writes_before_gh(&commands, env)
+}
+
+/// Words that open a compound command before its first simple command.
+const OPENERS: &[&str] = &[
+    "do", "then", "else", "elif", "if", "while", "until", "!", "\u{7b}",
+];
+
+/// *command* without the [`OPENERS`] before its first word.
+fn without_openers(command: &SimpleCommand) -> SimpleCommand {
+    let skip = command
+        .words
+        .iter()
+        .take_while(|w| OPENERS.contains(&w.as_str()))
+        .count();
+    SimpleCommand {
+        words: command.words[skip..].to_vec(),
+        writes_to: command.writes_to.clone(),
+    }
+}
 
 /// Whether *line* names the exceptions file, or may expand into it.
 ///

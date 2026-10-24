@@ -8,11 +8,12 @@ mod disabled;
 mod exceptions_file;
 mod powershell;
 mod protected;
+mod shadow;
 mod widen;
 
 /// The guard with every refusal on: what a machine with no exceptions file gets.
 /// Every refusal a rule gives, for the tests that check them as a set.
-const ALL_REASONS: [&str; 7] = [
+const ALL_REASONS: [&str; 8] = [
     HOOK_BYPASS,
     TERRAFORM,
     DIGGER,
@@ -20,10 +21,11 @@ const ALL_REASONS: [&str; 7] = [
     PROTECTED,
     TOO_DEEP,
     PS_UNJUDGEABLE,
+    SHADOW,
 ];
 
 fn guard(call: &Value) -> Decision {
-    pre_tool_guard(call, &Policy::ALL_ON, None)
+    pre_tool_guard(call, &Policy::ALL_ON, &GuardEnv::default())
 }
 
 fn bash_call(command: &str) -> Value {
@@ -453,6 +455,7 @@ fn a_refusal_names_the_rule_the_call_actually_broke() {
         "register and run",
         "levels deep",
         "hides its text",
+        "real gh",
     ] {
         let carriers = ALL_REASONS.iter().filter(|r| r.contains(needle)).count();
         assert_eq!(carriers, 1, "{needle:?} no longer names one rule only");

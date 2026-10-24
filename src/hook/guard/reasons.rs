@@ -43,8 +43,9 @@ pub(super) const EXCEPTIONS: &str = "Refused under the exceptions-file tamper ru
      included, and any edit of it. To read it, use the Read tool.";
 
 pub(super) const PROTECTED: &str = "Refused under the guard-registration tamper rule (ADR-1005). \
-     Claude Code settings files (`.claude/settings.json`, `.claude/settings.local.json`) \
-     and `.git/hooks` register and run the hooks that enforce the standing rules, so an \
+     Claude Code settings files (`.claude/settings.json`, `.claude/settings.local.json`), \
+     plugin `hooks/hooks.json` files, `.git/hooks` and submodule hooks under `.git/modules` \
+     (ADR-1020) register and run the hooks that enforce the standing rules, so an \
      agent may not edit, overwrite, move, link or delete them. Reading them (the Read tool, \
      `cat`, `jq`, `grep`) is allowed. Settings and hook changes come from nix or \
      `yaadgaar install`: write the change into MIGRATION_NOTES.md for a person.";
@@ -57,3 +58,11 @@ pub(super) const TOO_DEEP: &str = "Refused under the nesting rule (ADR-1005). Th
 pub(super) const PS_UNJUDGEABLE: &str = "Refused under the PowerShell rule (ADR-1005). This \
      PowerShell command hides its text from the guard (`-EncodedCommand` or a base64 \
      decode), so it was not checked. Pass the command as plain text.";
+
+pub(super) const SHADOW: &str = "Refused under the gh-shadowing rule (ADR-1020, amending \
+     ADR-1005). The guard lets some `gh` calls through because `gh` is the real gh, so an \
+     agent may not replace it: no gh function or alias, no PATH assignment, no hash, \
+     enable, source, eval or `command -p` touching gh, no file named gh, and no write into \
+     a PATH directory that comes before the real gh (such as ~/.local/bin, when it does). \
+     Call gh as it is; an install into such a directory goes through its installer \
+     (`pipx install`), or into MIGRATION_NOTES.md for a person.";

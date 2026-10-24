@@ -21,7 +21,9 @@
 //! * `git_commit_flags` — a commit that skips hooks or signing.
 //! * `hook_config_tamper` — an edit of the exceptions file, and any Bash
 //!   command that names it, a read included (#64); and an agent write to a
-//!   Claude Code settings file or `.git/hooks` (ADR-1005).
+//!   Claude Code settings file or `.git/hooks` (ADR-1005), to a plugin's
+//!   `hooks/hooks.json` or a submodule's hooks, and a line that shadows gh
+//!   or writes into a PATH directory before it (ADR-1020).
 //!
 //! Every other id — the engine's `git_push_default` and `db_lockdown`, which this
 //! client does not implement, a misspelling, a different case — changes nothing.

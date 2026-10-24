@@ -66,7 +66,7 @@ pub mod write_back;
 #[path = "hook/tests/shape.rs"]
 mod shape;
 
-pub use guard::pre_tool_guard;
+pub use guard::{pre_tool_guard, GuardEnv};
 pub use policy::{Policy, EXCEPTIONS_FILE};
 
 /// The exit status a positively matched refusal leaves.
@@ -94,20 +94,16 @@ pub enum Decision {
 /// is the path of the exceptions file, for the same reason: `None` when the
 /// home directory could not be found, which leaves every guard on.
 ///
-/// *config_dir* is the `CLAUDE_CONFIG_DIR` the hook process received, whose
-/// settings files the guard protects (ADR-1005).
-pub fn run(
-    name: &str,
-    payload: &Value,
-    exceptions: Option<&Path>,
-    config_dir: Option<&Path>,
-) -> Decision {
+/// *env* is what the hook process knows about its machine: the
+/// `CLAUDE_CONFIG_DIR` whose settings files the guard protects (ADR-1005),
+/// the home, and the `PATH` directories before the real `gh` (ADR-1020).
+pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>, env: &GuardEnv) -> Decision {
     match name {
         // The one handler, and the one that can refuse. Purely local — it
         // inspects the command it was handed and needs nothing from the
         // gateway. The exceptions file is read here and nowhere else, so a
         // stale entry for any other name never opens it.
-        "pre-tool-guard" => pre_tool_guard(payload, &Policy::load(exceptions), config_dir),
+        "pre-tool-guard" => pre_tool_guard(payload, &Policy::load(exceptions), env),
 
         // Write-back (ADR-1000). Only a mirrored task can be refused; every
         // other call passes through without a config read or a gateway call.
@@ -129,10 +125,10 @@ pub fn dispatch(
     name: &str,
     payload: Result<Value, String>,
     exceptions: Option<&Path>,
-    config_dir: Option<&Path>,
+    env: &GuardEnv,
 ) -> Decision {
     match payload {
-        Ok(payload) => run(name, &payload, exceptions, config_dir),
+        Ok(payload) => run(name, &payload, exceptions, env),
         Err(e) if name == "pre-tool-guard" => Decision::Deny(format!(
             "refused: the hook payload could not be read ({e}), so this tool call \
              was not checked. Retry it; if this repeats, run `yaadgaar verify`."
@@ -172,7 +168,7 @@ mod tests {
             "pre-tool-guard",
             &bash("git commit --no-verify -m x"),
             None,
-            None,
+            &GuardEnv::default(),
         );
         let Decision::Deny(reason) = decision else {
             panic!("the dispatcher allowed a command the guard refuses");
@@ -204,7 +200,7 @@ mod tests {
         // nothing, even on a call the guard would refuse.
         for name in RETIRED {
             assert_eq!(
-                run(name, &bash("terraform apply"), None, None),
+                run(name, &bash("terraform apply"), None, &GuardEnv::default()),
                 Decision::Allow,
                 "{name}"
             );
@@ -221,7 +217,7 @@ mod tests {
         std::fs::write(&path, r#"{"disabled_guards":["git_commit_flags"]}"#).unwrap();
         let call = bash("git commit --no-verify -m x");
         assert_eq!(
-            run("pre-tool-guard", &call, Some(&path), None),
+            run("pre-tool-guard", &call, Some(&path), &GuardEnv::default()),
             Decision::Allow
         );
         assert!(matches!(
@@ -229,7 +225,7 @@ mod tests {
                 "pre-tool-guard",
                 &bash("terraform apply"),
                 Some(&path),
-                None
+                &GuardEnv::default()
             ),
             Decision::Deny(_)
         ));
@@ -239,15 +235,25 @@ mod tests {
     #[test]
     fn an_unreadable_payload_refuses_under_the_guard_and_only_there() {
         let err = || Err("not JSON: eof".to_string());
-        let Decision::Deny(reason) = dispatch("pre-tool-guard", err(), None, None) else {
+        let Decision::Deny(reason) = dispatch("pre-tool-guard", err(), None, &GuardEnv::default())
+        else {
             panic!("the guard allowed a call it could not read");
         };
         assert!(reason.contains("not JSON: eof"), "{reason}");
         for name in RETIRED {
-            assert_eq!(dispatch(name, err(), None, None), Decision::Allow, "{name}");
+            assert_eq!(
+                dispatch(name, err(), None, &GuardEnv::default()),
+                Decision::Allow,
+                "{name}"
+            );
         }
         assert!(matches!(
-            dispatch("pre-tool-guard", Ok(bash("terraform apply")), None, None),
+            dispatch(
+                "pre-tool-guard",
+                Ok(bash("terraform apply")),
+                None,
+                &GuardEnv::default()
+            ),
             Decision::Deny(_)
         ));
     }
@@ -270,7 +276,12 @@ mod tests {
             let handled = match (spec.event, spec.name) {
                 ("PreToolUse", write_back::TASK_UPDATE) => spec.matcher == "TaskUpdate",
                 ("PreToolUse", _) => matches!(
-                    run(spec.name, &bash("terraform apply"), None, None),
+                    run(
+                        spec.name,
+                        &bash("terraform apply"),
+                        None,
+                        &GuardEnv::default()
+                    ),
                     Decision::Deny(_)
                 ),
                 ("TaskCompleted", name) => name == write_back::TASK_COMPLETED,
@@ -290,11 +301,11 @@ mod tests {
         // id is no mirrored task: both allow before anything is read.
         for name in write_back::NAMES {
             assert_eq!(
-                run(name, &bash("terraform apply"), None, None),
+                run(name, &bash("terraform apply"), None, &GuardEnv::default()),
                 Decision::Allow
             );
             assert_eq!(
-                dispatch(name, Err("not JSON".into()), None, None),
+                dispatch(name, Err("not JSON".into()), None, &GuardEnv::default()),
                 Decision::Allow,
                 "{name}"
             );

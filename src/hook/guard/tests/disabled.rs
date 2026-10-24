@@ -3,7 +3,7 @@
 use super::*;
 
 fn with(policy: Policy, call: &Value) -> Decision {
-    pre_tool_guard(call, &policy, None)
+    pre_tool_guard(call, &policy, &GuardEnv::default())
 }
 
 fn edit_of_the_exceptions_file(tool: &str) -> Value {

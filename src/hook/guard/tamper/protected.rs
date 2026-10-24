@@ -22,7 +22,10 @@
 //!   directory — the user's, and every project's, since any settings scope
 //!   can set `disableAllHooks` — and directly inside `$CLAUDE_CONFIG_DIR`,
 //!   compared as a whole path, never by its basename;
-//! * `.git/hooks` and everything below it.
+//! * `.git/hooks` and everything below it;
+//! * a plugin's `hooks/hooks.json` below `.claude/plugins/` or
+//!   `$CLAUDE_CONFIG_DIR/plugins/`, and a submodule's hooks below
+//!   `.git/modules/` (ADR-1020): see [`more_hooks`].
 //!
 //! The installer is not locked out: `yaadgaar install` writes these files
 //! from the binary, which is not a tool call, and the command line that runs
@@ -30,7 +33,9 @@
 //!
 //! **WHAT THIS DOES NOT SEE**, as for the exceptions file: a command that
 //! acts on a directory (`cd ~/.claude && rm settings.json`, `cp -r x .git/`),
-//! a path built inside an interpreter, and `git config core.hooksPath`.
+//! a path built inside an interpreter, `git config core.hooksPath`, an
+//! edit of `.git/config`, and a plugin's hooks declared inline in its
+//! `plugin.json` rather than in `hooks/hooks.json`.
 
 use std::path::Path;
 
@@ -146,7 +151,7 @@ pub(in crate::hook::guard) fn bash_touches_a_protected_path(
 
 /// Where the arguments of *command*'s program start in its words, when
 /// that program only reads the files it names: see [`READERS`].
-fn reader_arguments(command: &SimpleCommand) -> Option<usize> {
+pub(super) fn reader_arguments(command: &SimpleCommand) -> Option<usize> {
     let (program, args) = executed(command)?;
     let start = command.words.len() - args.len();
     let reads = match program {
@@ -182,7 +187,13 @@ fn may_be_protected(word: &str, config: Option<&[String]>) -> bool {
     ]
     .iter()
     .any(|s| plain.contains(s))
-        || plain.ends_with(".git/hooks");
+        || plain.ends_with(".git/hooks")
+        || plain
+            .split_once(".git/modules/")
+            .is_some_and(|(_, rest)| rest.contains("/hooks/") || rest.ends_with("/hooks"))
+        || plain
+            .split_once(".claude/plugins/")
+            .is_some_and(|(_, rest)| rest.contains("hooks/hooks.json"));
     let in_config = config.is_some_and(|c| {
         let dir = c.join("/");
         SETTINGS_FILES
@@ -227,7 +238,7 @@ fn globs_may_be_protected(parts: &[String], config: Option<&[String]>) -> bool {
     let settings = SETTINGS_FILES.iter().any(|f| glob_matches(leaf, f))
         && (dirs.last().is_some_and(|d| glob_matches(d, ".claude"))
             || config.is_some_and(|c| glob_matches(&dirs.join("/"), &c.join("/"))));
-    hooks || settings
+    hooks || settings || more_hooks(&path, config, glob_matches)
 }
 
 /// Whether exact, normalized *components* are a protected path.
@@ -240,14 +251,47 @@ fn protected_components(components: &[String], config: Option<&[String]>) -> boo
     };
     let settings = SETTINGS_FILES.contains(&leaf.as_str())
         && (dirs.last().is_some_and(|d| d == ".claude") || config == Some(dirs));
-    hooks || settings
+    hooks || settings || more_hooks(components, config, |c, n| c == n)
+}
+
+/// The hook registration ADR-1020 adds, matched component by component
+/// with *is* (exact, or a glob):
+///
+/// * a plugin's `hooks/hooks.json` at any depth below `.claude/plugins/` or
+///   `$CLAUDE_CONFIG_DIR/plugins/` — the real layouts are
+///   `cache/<market>/<plugin>/<version>/` and
+///   `marketplaces/<market>/plugins/<plugin>/`;
+/// * a submodule's hooks: `hooks` at or below `.git/modules/<name>/`, where
+///   a name may hold `/` and submodules nest (`modules/a/modules/b/hooks`).
+fn more_hooks<S: AsRef<str>>(
+    path: &[S],
+    config: Option<&[String]>,
+    is: impl Fn(&str, &str) -> bool,
+) -> bool {
+    let at = |i: usize, name: &str| path.get(i).is_some_and(|p| is(p.as_ref(), name));
+    let submodule = (0..path.len()).any(|i| {
+        at(i, ".git") && at(i + 1, "modules") && (i + 3..path.len()).any(|k| at(k, "hooks"))
+    });
+    let n = path.len();
+    let hooks_json = n >= 2 && at(n - 1, "hooks.json") && at(n - 2, "hooks");
+    // The plugins directory, then at least one directory of the plugin's.
+    let below_plugins = |plugins: usize| plugins + 1 < n - 2;
+    let in_claude =
+        (0..n).any(|i| at(i, ".claude") && at(i + 1, "plugins") && below_plugins(i + 1));
+    let in_config = config.is_some_and(|c| {
+        c.len() < n
+            && c.iter().enumerate().all(|(i, d)| at(i, d))
+            && at(c.len(), "plugins")
+            && below_plugins(c.len())
+    });
+    submodule || (hooks_json && (in_claude || in_config))
 }
 
 /// *path*'s components, lowercased, with `.` dropped and `..` applied.
 ///
 /// IGNORING ASCII CASE, trailing dots and spaces and a `:stream` suffix, as
 /// `is_the_exceptions_file` does, for the filesystems that ignore them.
-fn normalized(path: &str) -> Vec<String> {
+pub(super) fn normalized(path: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for part in path.split(['/', '\\']) {
         if part == ".." {

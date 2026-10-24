@@ -89,8 +89,10 @@ pub const MANAGED_HOOKS: &[HookSpec] = &[
         // an agent used Edit, not Bash, to add itself to the hook exceptions
         // file, pushed to a protected branch, then reverted the file to conceal
         // it. A Bash-only matcher never even routed that call to the guard.
+        // MultiEdit and PowerShell (ADR-1005, yaadgaar #227) are the same two
+        // routes by another tool name: an edit, and a shell.
         name: "pre-tool-guard",
-        matcher: "Bash|Edit|Write|NotebookEdit",
+        matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell",
         fire_and_forget: false,
     },
     HookSpec {

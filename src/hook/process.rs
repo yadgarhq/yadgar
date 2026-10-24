@@ -113,7 +113,14 @@ fn decide(name: &str, init: impl FnOnce()) -> Decision {
         // hook that merely failed — and lets the tool run. A home that cannot
         // be found is `None`, and `None` leaves every guard on.
         let exceptions = dirs::home_dir().map(|h| install::Layout::new(&h).exceptions());
-        dispatch(name, read_stdin(), exceptions.as_deref())
+        // Its settings files are protected like `~/.claude`'s (ADR-1005).
+        let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from);
+        dispatch(
+            name,
+            read_stdin(),
+            exceptions.as_deref(),
+            config_dir.as_deref(),
+        )
     })
 }
 
@@ -122,7 +129,7 @@ fn decide_open(name: &str, init: impl FnOnce()) -> Decision {
     contain(
         || {
             init();
-            dispatch(name, read_stdin(), None)
+            dispatch(name, read_stdin(), None, None)
         },
         |_| Decision::Allow,
     )

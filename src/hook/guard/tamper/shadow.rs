@@ -6,15 +6,19 @@
 //! into a write. So a line refuses when it:
 //!
 //! * defines a function named gh (`gh() …`, `function gh`) or an alias
-//!   (`alias gh=…`, zsh `aliases[gh]=…`, `functions[gh]=…`, `commands[gh]=…`);
+//!   (`alias gh=…`, `builtin alias gh=…`, zsh `aliases[gh]=…`,
+//!   `functions[gh]=…`, `commands[gh]=…`), or assigns one of those zsh
+//!   tables whole (`aliases+=(gh x)`, `functions+=([gh]=x)`);
 //! * assigns PATH in any spelling bash or zsh reads: `PATH=`, `PATH+=`, zsh
 //!   `path=(…)` and `path[1]=`, through `export`/`declare`/`env`, or via
-//!   `read PATH` and `printf -v PATH`;
+//!   `read PATH`, `printf -v PATH`, `mapfile PATH`/`readarray PATH`, or a
+//!   nameref (`declare -n R=PATH`);
 //! * runs `hash`, `enable`, `source`, `.` or `eval` with an argument that
 //!   names gh, or `command -p` running gh;
 //! * writes a file named gh: a redirect onto one, or a path argument whose
 //!   last component is gh outside a reading command, or a bare `gh` given to
-//!   a command on [`WRITERS`].
+//!   a command on [`WRITERS`]. A brace list in the last component is
+//!   expanded first: `tee /tmp/bin/{g,}h`.
 //!
 //! The program word itself (`gh pr view`, `/usr/bin/gh auth status`) and
 //! the `gh api` endpoint (`repos/cli/gh`) are not writes and are skipped.
@@ -25,8 +29,8 @@
 //! (`cp x ~/bin/`, unless that directory precedes gh on PATH: `bin_dirs.rs`),
 //! and a known over-refusal: a path argument such as `gh repo view cli/gh`.
 
-use super::gh_api;
 use super::protected::reader_arguments;
+use super::{brace_expand, gh_api, CLOSE_BRACE, OPEN_BRACE};
 use crate::hook::guard::runs::executed;
 use crate::install::shellword::SimpleCommand;
 
@@ -74,7 +78,8 @@ fn defines_a_gh_function(line: &str) -> bool {
     NAMES.iter().any(|name| {
         text.match_indices(name).any(|(at, _)| {
             let before = at.checked_sub(1).map(|i| bytes[i]);
-            let opens = before.is_none_or(|b| b.is_ascii_whitespace() || b";&|({`!".contains(&b));
+            let opens =
+                before.is_none_or(|b| b.is_ascii_whitespace() || b";&|(\x7b`!".contains(&b));
             let rest = text[at + name.len()..].trim_start();
             opens
                 && rest
@@ -102,8 +107,10 @@ fn assigned(word: &str) -> Option<(&str, Option<&str>)> {
 fn assigns_a_shadow(word: &str) -> bool {
     match assigned(word) {
         Some(("PATH" | "path", _)) => true,
-        Some(("functions" | "aliases" | "galiases" | "commands" | "builtins", Some(sub))) => {
-            is_name(sub)
+        Some(("functions" | "aliases" | "galiases" | "commands" | "builtins", sub)) => {
+            // A whole-table assignment (`aliases+=(gh x)`, `functions=(…)`)
+            // carries its entries in words the scanner splits off.
+            sub.is_none_or(is_name)
         }
         _ => false,
     }
@@ -133,8 +140,9 @@ fn command_shadows_gh(command: &SimpleCommand) -> bool {
     }
     let arguments_shadow = match program {
         "export" | "declare" | "typeset" | "local" | "readonly" | "integer" | "float" => {
-            args.iter().any(|a| assigns_a_shadow(a))
+            args.iter().any(|a| assigns_a_shadow(a)) || names_path(args)
         }
+        "mapfile" | "readarray" => args.iter().any(|a| a == "PATH" || a == "path"),
         "alias" => args
             .iter()
             .any(|a| a.split_once('=').is_some_and(|(n, _)| is_name(n))),
@@ -147,6 +155,18 @@ fn command_shadows_gh(command: &SimpleCommand) -> bool {
         _ => false,
     };
     arguments_shadow || writes_a_gh_file(command, program, at)
+}
+
+/// Whether *args* make a nameref to PATH: `declare -n R=PATH`.
+fn names_path(args: &[String]) -> bool {
+    let nameref = args
+        .iter()
+        .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('n'));
+    nameref
+        && args.iter().any(|a| {
+            a.split_once('=')
+                .is_some_and(|(_, v)| v == "PATH" || v == "path")
+        })
 }
 
 /// Whether *command*, whose program word is at *at*, writes a file named gh.
@@ -174,6 +194,19 @@ pub(in crate::hook::guard) fn names_a_gh_file(word: &str, bare: bool) -> bool {
     if word.contains("://") {
         return false;
     }
+    // A brace list in the last component may spell the name:
+    // `/tmp/bin/{g,}h`, `/tmp/{x,bin/gh}`. Past the bound it refuses. A
+    // brace left in an alternative is a literal, so each alternative is
+    // judged as it stands, never expanded again: `y}` expands to itself.
+    let leaf = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    if leaf.contains([OPEN_BRACE, CLOSE_BRACE]) {
+        return brace_expand(word).is_none_or(|alts| alts.iter().any(|a| leaf_is_gh(a, bare)));
+    }
+    leaf_is_gh(word, bare)
+}
+
+/// Whether *word*'s last component, as it stands, is named gh.
+fn leaf_is_gh(word: &str, bare: bool) -> bool {
     let pathy = word.contains(['/', '\\']);
     let leaf = word.rsplit(['/', '\\']).next().unwrap_or(word);
     let leaf = leaf.split(':').next().unwrap_or(leaf);

@@ -15,9 +15,14 @@ pub struct GuardEnv {
     pub config_dir: Option<PathBuf>,
     /// `HOME`, which `~` and `$HOME` in a word expand to.
     pub home: Option<PathBuf>,
-    /// The `PATH` directories that come BEFORE the real `gh` (ADR-1020): a
-    /// file written into one of them is found before gh is.
+    /// The `PATH` directories that come BEFORE the real `gh`, and before
+    /// the real `gh-personal` when there is one (ADR-1020): a file written
+    /// into one of them is found before the one the guard trusts.
     pub before_gh: Vec<PathBuf>,
+    /// The hook's `PATH` was unset, empty, or held no absolute directory,
+    /// so nothing says where a planted gh would be found: EVERY absolute
+    /// directory is protected (fail closed).
+    pub path_unknown: bool,
 }
 
 impl GuardEnv {
@@ -46,30 +51,50 @@ impl GuardEnv {
         home: Option<PathBuf>,
         path: Option<&OsStr>,
     ) -> Self {
+        let absolute = path.is_some_and(|p| std::env::split_paths(p).any(|d| d.is_absolute()));
+        let before_gh = match path {
+            Some(path) if absolute => {
+                let (mut dirs, _) = dirs_before(path, "gh");
+                // gh-personal is trusted as gh, so a directory before the real
+                // one is protected too. Absent, it adds nothing: a file NAMED
+                // gh-personal is refused anywhere.
+                if let (personal, true) = dirs_before(path, "gh-personal") {
+                    for dir in personal {
+                        if !dirs.contains(&dir) {
+                            dirs.push(dir);
+                        }
+                    }
+                }
+                dirs
+            }
+            _ => Vec::new(),
+        };
         Self {
             config_dir,
             home,
-            before_gh: path.map(dirs_before_gh).unwrap_or_default(),
+            before_gh,
+            path_unknown: !absolute,
         }
     }
 }
 
 /// The absolute directories of *path* that come before the first one
-/// holding an executable `gh`, each also as its canonical path when that
-/// differs, so a write through a symlink's target is seen too.
+/// holding an executable *name*, each also as its canonical path when that
+/// differs, so a write through a symlink's target is seen too; and whether
+/// *name* was found.
 ///
-/// NO `gh` ON PATH PROTECTS EVERY DIRECTORY: then any of them could be
+/// NO *name* ON PATH LISTS EVERY DIRECTORY: then any of them could be
 /// where a planted one is found first. A RELATIVE entry is not resolved
 /// against a working directory the hook does not share; a file named `gh`
 /// is refused anywhere, which covers it.
-fn dirs_before_gh(path: &OsStr) -> Vec<PathBuf> {
+fn dirs_before(path: &OsStr, name: &str) -> (Vec<PathBuf>, bool) {
     let mut out = Vec::new();
     for dir in std::env::split_paths(path) {
         if !dir.is_absolute() {
             continue;
         }
-        if holds_gh(&dir) {
-            break;
+        if holds(&dir, name) {
+            return (out, true);
         }
         if let Ok(real) = dir.canonicalize() {
             if real != dir && !out.contains(&real) {
@@ -80,14 +105,14 @@ fn dirs_before_gh(path: &OsStr) -> Vec<PathBuf> {
             out.push(dir);
         }
     }
-    out
+    (out, false)
 }
 
-/// Whether *dir* holds an executable file named `gh` (or `gh.exe`).
-fn holds_gh(dir: &Path) -> bool {
-    ["gh", "gh.exe"]
+/// Whether *dir* holds an executable file named *name* (or `name.exe`).
+fn holds(dir: &Path, name: &str) -> bool {
+    [name.to_string(), format!("{name}.exe")]
         .iter()
-        .any(|name| std::fs::metadata(dir.join(name)).is_ok_and(|m| m.is_file() && executable(&m)))
+        .any(|n| std::fs::metadata(dir.join(n)).is_ok_and(|m| m.is_file() && executable(&m)))
 }
 
 #[cfg(unix)]

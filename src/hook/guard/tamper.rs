@@ -85,20 +85,17 @@ pub(super) fn shadows_or_plants_gh(
     // `do`, `then`, `!` or an open brace as the first word, where `executed` would read
     // it as the program and skip what follows.
     let commands: Vec<SimpleCommand> = commands.iter().map(without_openers).collect();
+    let commands = super::runs::split_at_braces(commands);
+    let commands: Vec<SimpleCommand> = commands.iter().map(without_openers).collect();
     shadow::shadows_gh(line, &commands) || bin_dirs::writes_before_gh(&commands, env)
 }
 
-/// Words that open a compound command before its first simple command.
-const OPENERS: &[&str] = &[
-    "do", "then", "else", "elif", "if", "while", "until", "!", "\u{7b}",
-];
-
-/// *command* without the [`OPENERS`] before its first word.
+/// *command* without the openers (`runs::OPENERS`) before its first word.
 fn without_openers(command: &SimpleCommand) -> SimpleCommand {
     let skip = command
         .words
         .iter()
-        .take_while(|w| OPENERS.contains(&w.as_str()))
+        .take_while(|w| super::runs::OPENERS.contains(&w.as_str()))
         .count();
     SimpleCommand {
         words: command.words[skip..].to_vec(),

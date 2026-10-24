@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+# The Claude Code task-format canary (yadgarhq/docs plans/harness-task-sync.md,
+# ADR-1000). Run it with `make canary`, on a machine where `claude` is logged in.
+#
+# NOT IN CI, by ruling: it runs a REAL `claude -p`, which needs Claude Code
+# credentials and spends a few cents per run.
+#
+# What it does:
+#   1. Runs `claude -p` on a throwaway named list
+#      (CLAUDE_CODE_TASK_LIST_ID=yaadgaar-canary-<random>), so no real session
+#      list is touched. Its capture hooks come from a temporary `--settings`
+#      file; `~/.claude/settings.json` is never edited.
+#   2. Checks the directory Claude Code wrote with `yaadgaar harness
+#      check-shape`, which reads the committed fixture
+#      tests/fixtures/claude-code/task-shape-v1.json.
+#   3. Checks the hook payloads (TaskUpdate tool_input / tool_response, the
+#      TaskCompleted keys) and the hook order against the same fixture.
+#   4. Hand-writes a task file in the recorded shape and checks a second
+#      `claude -p` reads it back through TaskGet.
+#
+# RED means the format moved. Update the fixture and the probe together, in
+# one reviewed change; never loosen the check to make it pass.
+#
+# Options:
+#   --record   also write the scrubbed hook payloads to
+#              tests/fixtures/claude-code/hook-payloads.jsonl
+# Environment:
+#   CANARY_MODEL       the model for `claude -p` (default: haiku)
+#   CANARY_SEED_MODEL  the model for the seeded-list step. It must NOT have the
+#                      task tools by default (default: claude-opus-5-5)
+
+set -euo pipefail
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+fixture="$repo/tests/fixtures/claude-code/task-shape-v1.json"
+record=0
+[[ "${1:-}" == "--record" ]] && record=1
+
+for tool in claude jq cargo; do
+  command -v "$tool" >/dev/null || {
+    echo "canary: $tool is not on PATH" >&2
+    exit 2
+  }
+done
+
+cargo build --quiet --manifest-path "$repo/Cargo.toml"
+# The binary cargo just built, wherever CARGO_TARGET_DIR (or a config) puts it.
+target_dir="$(cargo metadata --quiet --format-version 1 --no-deps --manifest-path "$repo/Cargo.toml" | jq -r .target_directory)"
+bin="$target_dir/debug/yaadgaar"
+
+work="$(mktemp -d)"
+list_id="yaadgaar-canary-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+list_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/$list_id"
+seed_id="$list_id-seeded"
+seed_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/$seed_id"
+cleanup() { rm -rf -- "$work" "$list_dir" "$seed_dir"; }
+trap cleanup EXIT
+
+mkdir -p "$work/cwd"
+log="$work/hooks.log"
+cat >"$work/capture" <<EOF
+#!/bin/sh
+jq -c . >>'$log'
+exit 0
+EOF
+chmod +x "$work/capture"
+jq -n --arg c "$work/capture" '
+  def hook: [{type: "command", command: $c}];
+  {hooks: {
+    PreToolUse:    [{matcher: "TaskCreate|TaskUpdate", hooks: hook}],
+    PostToolUse:   [{matcher: "TaskCreate|TaskUpdate", hooks: hook}],
+    TaskCreated:   [{hooks: hook}],
+    TaskCompleted: [{hooks: hook}]
+  }}' >"$work/settings.json"
+
+model="${CANARY_MODEL:-haiku}"
+# The seeded-list step runs a model WITHOUT the task tools by default, so the
+# tools can only come from the settings `env` block. That is what the probe
+# relies on: `model` is absent from the SessionStart payload under `claude -p`.
+seed_model="${CANARY_SEED_MODEL:-claude-opus-5-5}"
+claude_p() {
+  (cd "$work/cwd" &&
+    CLAUDE_CODE_TASK_LIST_ID="$list_id" CLAUDE_CODE_ENABLE_TODO_TOOLS=1 \
+      claude -p --model "$model" --setting-sources project \
+      --settings "$work/settings.json" \
+      --allowedTools TaskCreate,TaskGet,TaskUpdate,TaskList)
+}
+
+failures=()
+fail() { failures+=("$1"); }
+
+echo "canary: write direction (list $list_id, model $model)"
+claude_p >"$work/write.out" <<'PROMPT'
+Use only the task tools, in this exact order, one call at a time:
+1) TaskCreate with subject 'canary one', description 'first canary task', metadata {"canary": true}.
+2) TaskUpdate that task to status in_progress.
+3) TaskUpdate that task's subject to 'canary one renamed'.
+4) TaskUpdate that task to status completed.
+5) TaskCreate with subject 'canary two', description 'second'.
+6) TaskUpdate the second task to status deleted.
+Then reply DONE.
+PROMPT
+
+# --- the files ---------------------------------------------------------------
+if ! shape="$("$bin" harness check-shape "$list_dir" 2>&1)"; then
+  fail "file shape: $shape"
+else
+  echo "canary: $shape"
+fi
+one="$list_dir/1.json"
+if [[ -f "$one" ]]; then
+  jq -e '.subject == "canary one renamed" and .status == "completed" and .metadata.canary == true' \
+    "$one" >/dev/null || fail "1.json does not hold the subject, status and metadata the run set: $(cat "$one")"
+else
+  fail "1.json was not written"
+fi
+[[ -e "$list_dir/2.json" ]] && fail "2.json survived its TaskUpdate status=deleted"
+hwm="$(cat "$list_dir/.highwatermark" 2>/dev/null || echo missing)"
+[[ "$hwm" =~ ^[0-9]+$ && "$hwm" -ge 2 ]] || fail ".highwatermark after deleting task 2 is '$hwm', not >= 2"
+
+# --- the hook payloads -------------------------------------------------------
+# Every check below reads the log. With no log, jq would abort the script
+# under `set -e` before the RED list prints, so they run only on a log.
+if [[ -s "$log" ]]; then
+  keys_ok() { # <label> <fixture key under .hooks> <jq event filter> <jq projection>
+    local bad
+    bad="$(jq -c --slurpfile f "$fixture" --arg key "$2" "
+      \$f[0].hooks[\$key] as \$s | select($3) | $4 | keys as \$k
+      | { k: \$k, missing: (\$s.required - \$k), extra: (\$k - \$s.required - \$s.optional) }
+      | select((.missing | length) > 0 or (.extra | length) > 0)" "$log")"
+    [[ -z "$bad" ]] || fail "$1 keys differ from the fixture: $bad"
+  }
+  update='.tool_name == "TaskUpdate"'
+  keys_ok "TaskUpdate tool_input" task_update_input ".hook_event_name == \"PreToolUse\" and $update" .tool_input
+  keys_ok "TaskUpdate tool_response" task_update_response ".hook_event_name == \"PostToolUse\" and $update" .tool_response
+  keys_ok "TaskCompleted" task_completed '.hook_event_name == "TaskCompleted"' .
+  bad_status="$(jq -c --slurpfile f "$fixture" '
+    select(.hook_event_name == "PreToolUse" and .tool_name == "TaskUpdate" and (.tool_input.status != null))
+    | select(.tool_input.status as $s | $f[0].hooks.task_update_statuses | index($s) | not)
+    | .tool_input' "$log")"
+  [[ -z "$bad_status" ]] || fail "TaskUpdate status values outside the fixture: $bad_status"
+
+  # The order write-back rests on: for the completing TaskUpdate, PreToolUse,
+  # then TaskCompleted with the same prompt_id, then PostToolUse.
+  order="$(jq -sc '
+    [ to_entries[] | .key as $i | .value
+      | if .hook_event_name == "TaskCompleted" and .task_id == "1" then {e: "TaskCompleted", i: $i, p: .prompt_id}
+        elif .tool_name == "TaskUpdate" and .tool_input.taskId == "1" and .tool_input.status == "completed"
+          then {e: .hook_event_name, i: $i, p: .prompt_id}
+        else empty end ]' "$log")"
+  want="$(jq -c '.hooks.order_completing_task_update' "$fixture")"
+  got="$(jq -c '[.[].e]' <<<"$order")"
+  [[ "$got" == "$want" ]] || fail "hook order for the completing TaskUpdate is $got, the fixture records $want"
+  same_prompt="$(jq -r '[.[].p] | unique | length' <<<"$order")"
+  [[ "$same_prompt" == 1 ]] || fail "PreToolUse and TaskCompleted do not share one prompt_id: $order"
+else
+  fail "no hook fired at all"
+fi
+
+# --- the read direction ------------------------------------------------------
+echo "canary: read direction"
+# The write step may have left no list at all; that is already a failure, and
+# this step must still run so the RED list prints.
+mkdir -p "$list_dir"
+jq -n '{id: "7", subject: "canary handwritten", description: "written by the canary",
+        status: "in_progress", blocks: [], blockedBy: []}' >"$list_dir/7.json"
+claude_p >"$work/read.out" <<'PROMPT'
+Call TaskGet for task id 7. Reply with exactly one line: SUBJECT=<its subject> STATUS=<its status>
+PROMPT
+grep -q 'SUBJECT=canary handwritten STATUS=in_progress' "$work/read.out" ||
+  fail "a hand-written task file was not read back by TaskGet: $(cat "$work/read.out")"
+
+# --- a list a SessionStart hook seeded ---------------------------------------
+# What the sync does (car 2): a SessionStart hook writes task files into a list
+# Claude Code has not created yet, with no .lock and no .highwatermark. The
+# live session must list them, allocate its own next id ABOVE them, and leave
+# them byte for byte. The task tools are turned on through the settings `env`
+# block, as a real machine does, and the hook records whether it inherited it:
+# the probe reads that variable from the hook's own environment.
+echo "canary: a list seeded by a SessionStart hook"
+cat >"$work/seed" <<EOF
+#!/bin/sh
+echo "TODO=\${CLAUDE_CODE_ENABLE_TODO_TOOLS:-unset}" >'$work/seed.env'
+mkdir -p '$seed_dir'
+for n in 1 2 3; do
+  jq -n --arg n "\$n" '{id: \$n, subject: ("#" + \$n + " seeded task " + \$n),
+    description: ("seeded by the canary\nyaadgaar: yadgar:task:canary-" + \$n),
+    status: "pending", blocks: [], blockedBy: [],
+    metadata: {yaadgaar: {urn: ("yadgar:task:canary-" + \$n), number: (\$n | tonumber)}}}' \
+    >'$seed_dir/'"\$n.json"
+done
+cp -r '$seed_dir' '$work/seeded'
+exit 0
+EOF
+chmod +x "$work/seed"
+jq -n --arg c "$work/seed" '{env: {CLAUDE_CODE_ENABLE_TODO_TOOLS: "1"},
+  hooks: {SessionStart: [{matcher: "", hooks: [{type: "command", command: $c}]}]}}' \
+  >"$work/seed-settings.json"
+(cd "$work/cwd" &&
+  env -u CLAUDE_CODE_ENABLE_TODO_TOOLS CLAUDE_CODE_TASK_LIST_ID="$seed_id" \
+    claude -p --model "$seed_model" --setting-sources project \
+    --settings "$work/seed-settings.json" \
+    --allowedTools TaskCreate,TaskGet,TaskUpdate,TaskList) >"$work/seed.out" <<'PROMPT'
+Call TaskList and print every task id with its subject. Then call TaskCreate once with subject 'canary new' and description 'made mid-session'. Finally print the id the new task got as NEWID=<id>.
+PROMPT
+grep -q 'TODO=1' "$work/seed.env" 2>/dev/null ||
+  fail "a SessionStart hook did not inherit CLAUDE_CODE_ENABLE_TODO_TOOLS from the settings env: $(cat "$work/seed.env" 2>/dev/null)"
+for n in 1 2 3; do
+  grep -q "seeded task $n" "$work/seed.out" || fail "TaskList did not show seeded task $n"
+  cmp -s "$seed_dir/$n.json" "$work/seeded/$n.json" || fail "the session changed seeded task $n.json"
+done
+new_id="$(grep -o 'NEWID=[0-9]*' "$work/seed.out" | head -1 | cut -d= -f2)"
+[[ "$new_id" =~ ^[0-9]+$ && "$new_id" -ge 4 ]] ||
+  fail "the session's own TaskCreate got id '$new_id', not one above the seeded 1-3"
+
+if ((record)); then
+  jq -c '.session_id = "<session>" | .transcript_path = "<transcript>" | .cwd = "<cwd>"' \
+    "$log" >"$repo/tests/fixtures/claude-code/hook-payloads.jsonl"
+  echo "canary: recorded tests/fixtures/claude-code/hook-payloads.jsonl"
+fi
+
+if ((${#failures[@]})); then
+  echo "canary: RED on $(claude --version)" >&2
+  printf '  - %s\n' "${failures[@]}" >&2
+  exit 1
+fi
+echo "canary: GREEN on $(claude --version)"

@@ -12,20 +12,29 @@
 //! is the one list; this dispatches on the same strings, so a handler that is
 //! registered and a handler that exists cannot drift apart unnoticed.
 //!
-//! ## The guard fails closed; nothing else can refuse
+//! ## Who can refuse
 //!
-//! [`pre_tool_guard`] is the only handler that can exit non-zero. It refuses a
-//! positively matched dangerous command, and it also refuses when it cannot
-//! judge the call at all: a payload that is not JSON (see [`dispatch`]) or a
-//! panic (see [`process::contain_panic`]). Both used to let the tool run — exit 0
-//! for the payload, and status 101 for the panic, which Claude Code reads as a
+//! [`pre_tool_guard`] fails CLOSED. It refuses a positively matched dangerous
+//! command, and it also refuses when it cannot judge the call at all: a
+//! payload that is not JSON (see [`dispatch`]) or a panic (see
+//! [`process::contain_panic`]). Both used to let the tool run — exit 0 for the
+//! payload, and status 101 for the panic, which Claude Code reads as a
 //! non-blocking error (ledger 1570). A guard that allows what it could not read
 //! is a guard any malformed call walks past.
 //!
 //! A command the guard reads but cannot DECIDE (a script file, an alias) still
-//! allows; `guard.rs` lists those cases. Every other handler name allows,
-//! whatever its payload: a retired handler judges nothing, and refusing on its
-//! behalf would block a session over a no-op.
+//! allows; `guard.rs` lists those cases.
+//!
+//! The write-back handlers, [`write_back::TASK_UPDATE`] (`PreToolUse` on
+//! `TaskUpdate`) and [`write_back::TASK_COMPLETED`] (`TaskCompleted`), refuse
+//! too, but only a change to a MIRRORED task that yaadgaar did not take
+//! (ADR-1000). They fail OPEN: an unreadable payload and a panic allow,
+//! because refusing every `TaskUpdate` on a client defect would lock the agent
+//! out of its own checklist, and the next sync sees the edit.
+//!
+//! Every other handler name allows, whatever its payload: a retired handler
+//! judges nothing, and refusing on its behalf would block a session over a
+//! no-op.
 //!
 //! ## How a refusal reaches the agent client
 //!
@@ -51,6 +60,7 @@ mod guard;
 mod policy;
 pub mod process;
 pub mod session_start;
+pub mod write_back;
 
 #[cfg(test)]
 #[path = "hook/tests/shape.rs"]
@@ -61,9 +71,10 @@ pub use policy::{Policy, EXCEPTIONS_FILE};
 
 /// The exit status a positively matched refusal leaves.
 ///
-/// TWO, and only ever from [`pre_tool_guard`]. Claude Code treats 2 as a
-/// blocking error; every other non-zero status is a hook that merely failed, is
-/// reported as a non-blocking error, and lets the tool run.
+/// TWO, and only ever from [`pre_tool_guard`] and the write-back handlers
+/// ([`write_back`]). Claude Code treats 2 as a blocking error, on `PreToolUse`
+/// and on `TaskCompleted` alike; every other non-zero status is a hook that
+/// merely failed, is reported as a non-blocking error, and lets the tool run.
 pub const REFUSED_EXIT_CODE: i32 = 2; // ADR-0569-EXCEPTION(CB): Claude Code's own contract — exit 2 is the status it treats as a blocking refusal.
 
 /// What a handler decided. Anything but [`Decision::Deny`] lets the tool run.
@@ -89,6 +100,10 @@ pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>) -> Decision {
         // gateway. The exceptions file is read here and nowhere else, so a
         // stale entry for any other name never opens it.
         "pre-tool-guard" => pre_tool_guard(payload, &Policy::load(exceptions)),
+
+        // Write-back (ADR-1000). Only a mirrored task can be refused; every
+        // other call passes through without a config read or a gateway call.
+        write_back::TASK_UPDATE | write_back::TASK_COMPLETED => write_back::run(name, payload),
 
         // Any other name is an entry an older install left behind: up to 0.1.4
         // `install` registered eleven more handlers, all of them inert, and they
@@ -222,20 +237,37 @@ mod tests {
     fn every_registered_handler_is_a_real_handler_in_the_dispatcher() {
         // The drift this pins: a handler registered in settings.json that this
         // binary does not dispatch fires on every session and does nothing,
-        // silently. A PreToolUse registration must reach a handler that can
-        // refuse; any other must be one `process::run` routes by name.
+        // silently. A PreToolUse registration is the guard (it must refuse) or
+        // task-update; a TaskCompleted one is task-completed; any other must be
+        // one `process::run` routes by name.
         for spec in crate::install::hooks::MANAGED_HOOKS {
-            let handled = match spec.event {
-                "PreToolUse" => matches!(
+            let handled = match (spec.event, spec.name) {
+                ("PreToolUse", write_back::TASK_UPDATE) => spec.matcher == "TaskUpdate",
+                ("PreToolUse", _) => matches!(
                     run(spec.name, &bash("terraform apply"), None),
                     Decision::Deny(_)
                 ),
+                ("TaskCompleted", name) => name == write_back::TASK_COMPLETED,
                 _ => process::routes(spec.name),
             };
             assert!(
                 handled,
                 "{}/{} is registered but nothing runs it",
                 spec.event, spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_write_back_handlers_pass_a_foreign_call_through_the_dispatcher() {
+        // A Bash call is never a TaskUpdate, and a TaskCompleted with no task
+        // id is no mirrored task: both allow before anything is read.
+        for name in write_back::NAMES {
+            assert_eq!(run(name, &bash("terraform apply"), None), Decision::Allow);
+            assert_eq!(
+                dispatch(name, Err("not JSON".into()), None),
+                Decision::Allow,
+                "{name}"
             );
         }
     }

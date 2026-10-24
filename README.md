@@ -368,3 +368,70 @@ The other five targets are built by `.github/workflows/release.yaml`, which is
 this repository's one piece of local CI. The reason it is not in
 [`yadgarhq/actions`](https://github.com/yadgarhq/actions) with everything else is
 written at the top of that file.
+
+### The Claude Code task-format canary
+
+The client will mirror yaadgaar tasks into Claude Code's own task list
+(ADR-1000, `plans/harness-task-sync.md` in `yadgarhq/docs`). Claude Code does
+not document that list's file format, so the format is recorded in
+`tests/fixtures/claude-code/task-shape-v1.json`, and nothing writes to a list
+that does not match it (`yaadgaar harness check-shape <dir>` runs the check).
+
+`make canary` checks the recording against the real thing. It runs `claude -p`
+on a throwaway list (`CLAUDE_CODE_TASK_LIST_ID=yaadgaar-canary-<random>`) with
+capture hooks from a temporary `--settings` file, then checks the files it
+wrote, the `TaskUpdate` and `TaskCompleted` hook payloads, and the order those
+hooks fire in. It needs `claude` logged in and costs a few cents, so it runs on
+the operator's machine and never in CI. Run it after every Claude Code upgrade.
+A red canary means the format moved: update the fixture and the check together,
+in one reviewed change. `make canary-record` also rewrites
+`tests/fixtures/claude-code/hook-payloads.jsonl` from the run.
+
+Which tasks are mirrored is `harness.scope`, set in `harness.json` beside
+`config.json` (`{"scope": "active"}`): `all-open` (every task not done or
+dropped, the default per ADR-1000), `active` (in_progress and blocked), or
+`none`. The file may also hold `completion_ttl_secs` (below). Any other key, a
+typo included, is refused and named in the banner, never read as the default. The
+task tools count as present when `CLAUDE_CODE_ENABLE_TODO_TOOLS` is exactly `1`
+(the documented value), or the model has them by default.
+
+In a Claude Code session whose list passes the probe, `session-start` writes
+each task in scope into the session's task list, keyed by its URN (never by its
+yaadgaar number), updates the ones yaadgaar changed, and deletes the ones that
+went done, dropped or out of scope. It never touches a task file it did not
+write. What it owns is recorded outside the Claude Code tree, in
+`<state>/harness/claude-code/<list id>.json`, where `<state>` is
+`$YAADGAAR_STATE_DIR`, else `$XDG_STATE_HOME/yaadgaar`, else
+`~/.local/state/yaadgaar` (the directory is `0700`, the files `0600`). The same
+`<state>` holds the per-project registry record the memory engine reads
+(`<state>/registry/<key>.json`), so one variable moves both. The banner
+gains one line with the counts, or the reason the list was not synced.
+
+An agent's edit to a mirrored task is written back to yaadgaar before it lands:
+`yaadgaar hook task-update` (`PreToolUse`, matcher `TaskUpdate`) sends a subject
+edit as `edit_task` and a `pending`/`in_progress` change as `transition_task`,
+with the version last seen, and refuses (exit 2) what yaadgaar does not take. A
+completion is closed by `yaadgaar hook task-completed` (`TaskCompleted`), and
+only when the same session's same prompt marked it through `task-update` within
+`completion_ttl_secs` (default 600). A state file or `harness.json` that cannot
+be read refuses an edit to a mirrored task, with the reason, rather than let it
+bypass write-back.
+
+`harness.scope = none` and the kill switch `YAADGAAR_HARNESS_SYNC=off` both stop
+the sync. Neither leaves a stale mirror behind: the pass that sees either one
+only DELETES the files it owns, and writes nothing new. A list it never wrote
+to, or a session whose list fails the probe, is not touched at all.
+
+The recorded format (Claude Code 2.1.296):
+
+- `<CLAUDE_CONFIG_DIR or ~/.claude>/tasks/<CLAUDE_CODE_TASK_LIST_ID or session id>/`
+  holds one `<N>.json` per task, a 0-byte `.lock`, and `.highwatermark`, a
+  decimal integer written when a task is deleted. Ids are never reused.
+- A task file holds `id` (the file name, as a string), `subject`,
+  `description`, `status` (`pending`, `in_progress` or `completed`), `blocks`
+  and `blockedBy` (arrays of ids), and optionally `activeForm`, `owner` and
+  `metadata` (an object, stored as given).
+- `TaskUpdate` with `status: "deleted"` removes the file.
+- For one completing `TaskUpdate`, the hooks fire as `PreToolUse`, then
+  `TaskCompleted`, then `PostToolUse`. `PreToolUse` and `TaskCompleted` share
+  the same `prompt_id`; `TaskCompleted` carries no `tool_use_id`.

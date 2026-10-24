@@ -9,7 +9,7 @@ use std::io::Write as _;
 use std::panic::AssertUnwindSafe;
 use std::sync::Mutex;
 
-use super::{dispatch, read_stdin, session_start, Decision, REFUSED_EXIT_CODE};
+use super::{dispatch, read_stdin, session_start, write_back, Decision, REFUSED_EXIT_CODE};
 use crate::install;
 
 // A pin by `cfg`, not by searching `Cargo.toml` for a string. The string search
@@ -64,7 +64,12 @@ pub fn run(name: &str, init: impl FnOnce()) -> anyhow::Result<()> {
     if routes(name) {
         return answer(&session_start_output(init));
     }
-    match decide(name, init) {
+    let decision = if write_back::NAMES.contains(&name) {
+        decide_open(name, init)
+    } else {
+        decide(name, init)
+    };
+    match decision {
         // Silence. An allow that printed would add a line to the transcript on
         // every single tool call.
         Decision::Allow => Ok(()),
@@ -110,6 +115,17 @@ fn decide(name: &str, init: impl FnOnce()) -> Decision {
         let exceptions = dirs::home_dir().map(|h| install::Layout::new(&h).exceptions());
         dispatch(name, read_stdin(), exceptions.as_deref())
     })
+}
+
+/// [`decide`] for a write-back handler: a panic ALLOWS (see `hook.rs`).
+fn decide_open(name: &str, init: impl FnOnce()) -> Decision {
+    contain(
+        || {
+            init();
+            dispatch(name, read_stdin(), None)
+        },
+        |_| Decision::Allow,
+    )
 }
 
 /// Run *decide*, and turn a panic inside it into a refusal.
@@ -250,6 +266,24 @@ mod tests {
             panic!("a panic in setup was let through as an allow");
         };
         assert!(reason.contains("init broke"), "{reason}");
+    }
+
+    #[test]
+    fn a_panic_in_a_write_back_handler_allows() {
+        // The deliberate fail-open (plan, handler `task-update`): TaskCompleted
+        // has no matcher, so a deny-on-panic would block every completion.
+        for name in write_back::NAMES {
+            assert_eq!(
+                decide_open(name, || panic!("planted")),
+                Decision::Allow,
+                "{name}"
+            );
+        }
+        // And the guard still refuses on the same panic.
+        assert!(matches!(
+            decide("pre-tool-guard", || panic!("planted")),
+            Decision::Deny(_)
+        ));
     }
 
     #[test]

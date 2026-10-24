@@ -53,6 +53,15 @@ fn banner() -> String {
     )
 }
 
+/// The banner when the harness mirror holds *n* of the tasks: the count line
+/// and the mirror count, with no titles (yaadgaar #398).
+fn mirrored_banner(n: usize) -> String {
+    format!(
+        "Tasks for {PROJECT} live in yaadgaar (mcp__yaadgaar__*).\n\
+         3 open tasks: 1 in_progress, 1 blocked, 1 open. {n} mirrored into the task list."
+    )
+}
+
 fn claude_payload(dir: &Path, home: &Path) -> Value {
     json!({
         "hook_event_name": "SessionStart",
@@ -135,7 +144,7 @@ fn a_claude_code_session_gets_the_banner_then_one_line_and_the_tasks_are_mirrore
     let home = home("ssh-cc-home");
     let text = run(claude_payload(&dir, &home), &dir, &env(&home));
     let (head, rest) = text.split_once("\nTaskList holds").expect("two parts");
-    assert_eq!(head, banner());
+    assert_eq!(head, mirrored_banner(3));
     assert!(rest.starts_with(" 3 yaadgaar tasks"), "{rest}");
     // The first sync wrote entries, so the harness part gains the panel line.
     let (_, nudge) = rest.rsplit_once('\n').expect("the panel line");
@@ -219,4 +228,29 @@ fn a_row_with_no_usable_id_or_version_still_renders_the_full_banner() {
     assert!(text.contains("- #3 [open] Write the runbook"), "{text}");
     assert!(text.contains("1 skipped, no task id"), "{text}");
     assert!(mirrored(&home).is_empty());
+}
+
+#[test]
+fn a_mirrored_banner_carries_no_titles_and_no_framing() {
+    let dir = workspace("ssh-cc-compact");
+    let home = home("ssh-cc-compact-home");
+    let text = run(claude_payload(&dir, &home), &dir, &env(&home));
+    for title in ["Write the runbook", "Cut over", "The hook"] {
+        assert!(!text.contains(title), "{text}");
+    }
+    assert!(!text.contains(FRAMING), "{text}");
+    assert!(text.contains("3 mirrored into the task list"), "{text}");
+}
+
+#[test]
+fn a_banner_keeps_its_titles_when_the_mirror_is_off() {
+    let dir = workspace("ssh-cc-off");
+    let home = home("ssh-cc-off-home");
+    let off = Env {
+        sync_switch: Some("off".into()),
+        ..env(&home)
+    };
+    let text = run(claude_payload(&dir, &home), &dir, &off);
+    assert!(text.contains("- #3 [open] Write the runbook"), "{text}");
+    assert!(!text.contains("mirrored into the task list"), "{text}");
 }

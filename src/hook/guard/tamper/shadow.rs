@@ -195,14 +195,18 @@ pub(in crate::hook::guard) fn names_a_gh_file(word: &str, bare: bool) -> bool {
         return false;
     }
     // A brace list in the last component may spell the name:
-    // `/tmp/bin/{g,}h`, `/tmp/{x,bin/gh}`. Past the bound it refuses.
+    // `/tmp/bin/{g,}h`, `/tmp/{x,bin/gh}`. Past the bound it refuses. A
+    // brace left in an alternative is a literal, so each alternative is
+    // judged as it stands, never expanded again: `y}` expands to itself.
     let leaf = word.rsplit(['/', '\\']).next().unwrap_or(word);
     if leaf.contains([OPEN_BRACE, CLOSE_BRACE]) {
-        return brace_expand(word).is_none_or(|alts| {
-            alts.iter()
-                .any(|a| !a.contains(OPEN_BRACE) && names_a_gh_file(a, bare))
-        });
+        return brace_expand(word).is_none_or(|alts| alts.iter().any(|a| leaf_is_gh(a, bare)));
     }
+    leaf_is_gh(word, bare)
+}
+
+/// Whether *word*'s last component, as it stands, is named gh.
+fn leaf_is_gh(word: &str, bare: bool) -> bool {
     let pathy = word.contains(['/', '\\']);
     let leaf = word.rsplit(['/', '\\']).next().unwrap_or(word);
     let leaf = leaf.split(':').next().unwrap_or(leaf);

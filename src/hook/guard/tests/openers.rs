@@ -17,6 +17,8 @@ const BEHIND_AN_OPENER: &[(&str, &str)] = &[
     ("if terraform plan; then :; fi", TERRAFORM),
     ("while true; do tofu apply; done", TERRAFORM),
     ("until false; do tfp; done", TERRAFORM),
+    ("while terraform plan; do :; done", TERRAFORM),
+    ("until tofu apply; do :; done", TERRAFORM),
     ("! terraform apply", TERRAFORM),
     ("for i in 1; do sudo terraform apply; done", TERRAFORM),
     (

@@ -49,6 +49,37 @@ fn near_misses_of_those_shapes_are_not_refused() {
     assert!(wrong.is_empty(), "over-refused: {wrong:#?}");
 }
 
+/// A `}` with no list to close is a literal to the shell. The brace arm of
+/// `names_a_gh_file` recursed on such a word forever, and the stack
+/// overflow aborted the hook: an exit that is not 2, so Claude Code ran
+/// the call unchecked, and a line that also shadowed gh went through.
+const LONE_BRACES: &[&str] = &[
+    "cp x y}",
+    "touch }",
+    "mv a b}",
+    "tee y{a,b}} < /dev/null",
+    "cp x /tmp/{a,b}}",
+];
+
+#[test]
+fn a_lone_close_brace_is_judged_rather_than_crashed_on() {
+    let over = refused(&bash_calls(LONE_BRACES), guard);
+    assert!(over.is_empty(), "over-refused: {over:#?}");
+    let hidden = bash_calls(&[
+        "cp x y}; alias gh=x",
+        "touch }; PATH=/tmp/evil:$PATH",
+        "cp x /tmp/{a,b}}; tee /tmp/bin/{g,}h",
+        // A list-free `{x}` stays literal, so the name is still gh.
+        "cp e /tmp/{x}/{g,}h",
+    ]);
+    let wrong = not_refused_as(&hidden, SHADOW, guard);
+    assert!(wrong.is_empty(), "not refused as shadowing: {wrong:#?}");
+    let m = Machine::new("lonebrace", Some(0o755));
+    let plant = format!("touch }}; cp /tmp/e {}/t", m.dir("home/.local/bin"));
+    let wrong = not_refused_as(&bash_calls(&[&plant]), SHADOW, |c| m.judge(c));
+    assert!(wrong.is_empty(), "not refused: {wrong:#?}");
+}
+
 // ── PATH directories before gh ───────────────────────────────────────────────
 
 #[test]

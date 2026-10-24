@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
 
+#[path = "clobber.rs"]
+mod clobber;
+
 fn edit(tool: &str, path: &str) -> Value {
     json!({"tool_name": tool, "tool_input": {"file_path": path, "content": "x"}})
 }

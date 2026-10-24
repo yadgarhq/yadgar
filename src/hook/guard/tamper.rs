@@ -56,6 +56,7 @@ mod allow;
 mod bin_dirs;
 mod gh_api;
 mod protected;
+mod redirects;
 mod shadow;
 pub(super) use bin_dirs::is_before_gh;
 pub(super) use protected::{bash_touches_a_protected_path, is_protected_path};
@@ -63,13 +64,15 @@ pub(super) use shadow::names_a_gh_file;
 
 /// Whether a Bash *line* shadows gh or writes before it on PATH
 /// (ADR-1020): see `tamper/shadow.rs` and `tamper/bin_dirs.rs`. A data
-/// heredoc's body is not commands, as for every tamper check.
+/// heredoc's body is not commands, as for every tamper check, and a `>|`,
+/// `>!` or `>&file` redirect reads as `>` (`tamper/redirects.rs`).
 pub(super) fn shadows_or_plants_gh(
     line: &str,
     commands: &[SimpleCommand],
     env: &super::GuardEnv,
 ) -> bool {
-    let stripped = allow::data_heredocs_removed(line);
+    let base = allow::data_heredocs_removed(line);
+    let stripped = redirects::plain(base.as_deref().unwrap_or(line)).or(base);
     let scanned;
     let (line, commands) = match &stripped {
         Some(stripped) => {

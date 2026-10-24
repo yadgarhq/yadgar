@@ -115,8 +115,10 @@ fn command_shadows_gh(command: &SimpleCommand) -> bool {
         return true;
     }
     let Some((program, args)) = executed(command) else {
-        // Assignments only: `PATH=/x`, `path=(…)`.
-        return words.iter().any(|w| assigns_a_shadow(w));
+        // Assignments only: `PATH=/x`, `path=(…)`. Or a redirect only:
+        // `> gh`, and the tail of `&> gh`, which scans as its own command.
+        return words.iter().any(|w| assigns_a_shadow(w))
+            || command.writes_to.iter().any(|w| names_a_gh_file(w, true));
     };
     let at = command.words.len() - args.len() - 1;
     // Before the program: assignments, and wrapper words (`env PATH=…`).

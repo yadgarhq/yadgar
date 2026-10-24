@@ -192,3 +192,23 @@ fn a_refusal_never_says_a_file_is_missing() {
         assert!(!refuse(input).contains("No such file"));
     }
 }
+
+#[test]
+fn a_same_status_task_update_sends_nothing_to_yaadgaar() {
+    // The no-op the SessionStart line asks for (it makes Claude Code's task
+    // panel re-read its list): the harness status a mirrored task already has.
+    for (yaadgaar, harness) in [
+        ("open", "pending"),
+        ("blocked", "pending"),
+        ("in_progress", "in_progress"),
+    ] {
+        let c = apply(yaadgaar, json!({"taskId": "4", "status": harness}));
+        assert_eq!(
+            (c.title, c.to, c.complete),
+            (None, None, false),
+            "{yaadgaar}"
+        );
+    }
+    let c = apply("open", json!({"taskId": "4", "activeForm": "Looking"}));
+    assert_eq!((c.title, c.to, c.complete), (None, None, false));
+}

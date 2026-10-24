@@ -372,8 +372,9 @@ pub fn context_text(
 /// [`context_text`], with the process environment the harness adapter reads
 /// handed in, so a test never reads the real one (or the real `~/.claude`).
 ///
-/// A listing that loaded gets the banner, then AT MOST ONE harness line
-/// ([`crate::harness::adapter::session_line`]). Every other harness, and every
+/// A listing that loaded gets the banner, then AT MOST ONE harness part
+/// ([`crate::harness::adapter::session_line`]): one line, or two when the
+/// sync wrote entries and asks for a no-op `TaskUpdate`. Every other harness, and every
 /// notice, is exactly what it was before the adapter existed.
 pub fn context_text_in(
     payload: Result<Value, String>,

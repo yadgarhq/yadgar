@@ -251,3 +251,171 @@ fn a_panic_inside_the_sync_is_contained_to_its_line() {
         "{text}"
     );
 }
+
+#[test]
+fn a_pass_that_wrote_entries_asks_for_one_no_op_task_update_on_the_lowest_id() {
+    let home = home("adapter-panel-nudge");
+    let env = env(&home);
+    let first = line(&home, None, &env).expect("a line");
+    let (_, nudge) = first.split_once('\n').expect("a second line");
+    assert!(!nudge.contains('\n'), "{nudge}");
+    assert!(nudge.contains("TaskUpdate"), "{nudge}");
+    assert!(nudge.contains("taskId \"1\""), "{nudge}");
+    assert!(nudge.contains("sends nothing to yaadgaar"), "{nudge}");
+    assert!(nudge.contains("task panel"), "{nudge}");
+}
+
+#[test]
+fn a_pass_that_wrote_nothing_adds_no_task_update_request() {
+    let home = home("adapter-panel-quiet");
+    let env = env(&home);
+    line(&home, None, &env).expect("a line");
+    let again = line(&home, None, &env).expect("a line");
+    assert!(again.contains("0 new, 0 updated"), "{again}");
+    assert!(!again.contains("TaskUpdate"), "{again}");
+    assert!(!again.contains('\n'), "{again}");
+}
+
+#[test]
+fn a_pass_that_only_removed_entries_adds_no_task_update_request() {
+    let home = home("adapter-panel-removed");
+    let env = env(&home);
+    line(&home, None, &env).expect("a line");
+    let active = line(&home, Some("active"), &env).expect("a line");
+    assert!(active.contains("2 removed"), "{active}");
+    assert!(!active.contains("TaskUpdate"), "{active}");
+}
+
+#[test]
+fn a_sync_that_is_off_or_refused_adds_no_task_update_request() {
+    let home = home("adapter-panel-off");
+    let off = Env {
+        sync_switch: Some("off".into()),
+        ..env(&home)
+    };
+    let l = line(&home, None, &off).expect("a line");
+    assert!(!l.contains("TaskUpdate"), "{l}");
+    let l = line(&home, Some("none"), &env(&home)).expect("a line");
+    assert!(!l.contains("TaskUpdate"), "{l}");
+    let no_tools = Env {
+        enable_todo_tools: None,
+        ..env(&home)
+    };
+    let l = line(&home, None, &no_tools).expect("a line");
+    assert!(!l.contains("TaskUpdate"), "{l}");
+}
+
+#[test]
+fn a_pass_that_only_updated_entries_still_asks_for_the_task_update() {
+    let home = home("adapter-panel-updated");
+    let env = env(&home);
+    line(&home, None, &env).expect("a line");
+    let mut moved = tasks();
+    for t in &mut moved {
+        t.title = format!("{} renamed", t.title);
+        t.version = Some(2);
+    }
+    let l = session_line(
+        Some(&payload(&home)),
+        &report_for(None, "yadgarhq/docs", &moved),
+        &env,
+    )
+    .expect("a line");
+    assert!(l.contains("0 new, 4 updated"), "{l}");
+    assert!(l.contains("TaskUpdate once on taskId"), "{l}");
+}
+
+/// The taskId and status the TaskUpdate request names, read from the line.
+fn requested(line: &str) -> (String, String) {
+    let (_, rest) = line.split_once("taskId \"").expect("a taskId");
+    let (id, rest) = rest.split_once('"').expect("a closing quote");
+    let (_, rest) = rest.split_once("with status \"").expect("a named status");
+    let (status, _) = rest.split_once('"').expect("a closing quote");
+    (id.to_string(), status.to_string())
+}
+
+/// Run the TaskUpdate the line asks for through the write-back's own
+/// [`decide`](crate::harness::write_back::decide), against the state and the
+/// file the pass left: what yaadgaar would be told.
+fn ask_and_decide(home: &Path, env: &Env, line: &str) -> crate::harness::write_back::Change {
+    use crate::harness::{state, write_back};
+    let (id, status) = requested(line);
+    let spath = state::path(&state::state_dir(env).unwrap(), "s-1");
+    let st = state::load(&spath).unwrap().expect("a state");
+    let entry = st.entries.values().find(|e| e.harness_id.to_string() == id);
+    let entry = entry.expect("the named id is mirrored");
+    let file: Value =
+        serde_json::from_slice(&std::fs::read(list(home).join(format!("{id}.json"))).unwrap())
+            .unwrap();
+    let input = json!({"taskId": id, "status": status});
+    match write_back::decide(entry, &file, &input) {
+        write_back::Verdict::Apply(c) => c,
+        write_back::Verdict::Refuse(r) => panic!("refused: {r}"),
+    }
+}
+
+fn first_is(status: &str) -> Vec<Task> {
+    let mut t = tasks();
+    t[0].status = status.into();
+    t
+}
+
+#[test]
+fn the_task_update_the_line_asks_for_sends_nothing_to_yaadgaar_for_every_status() {
+    for status in ["open", "blocked", "in_progress"] {
+        let home = home(&format!("adapter-panel-noop-{status}"));
+        let env = env(&home);
+        let t = first_is(status);
+        let report = report_for(None, "yadgarhq/docs", &t);
+        let l = session_line(Some(&payload(&home)), &report, &env).expect("a line");
+        let c = ask_and_decide(&home, &env, &l);
+        assert_eq!(
+            (c.title, c.to, c.complete),
+            (None, None, false),
+            "{status}: {l}"
+        );
+    }
+}
+
+#[test]
+fn the_task_update_the_line_asks_for_sends_nothing_when_the_file_diverged() {
+    // The lowest file is edited past the hooks (open in yaadgaar, in_progress
+    // on disk); a rename of another task makes the next pass write. The line
+    // must name the state's status, not the file's.
+    let home = home("adapter-panel-noop-diverged");
+    let env = env(&home);
+    let t = first_is("open");
+    let report = report_for(None, "yadgarhq/docs", &t);
+    session_line(Some(&payload(&home)), &report, &env).expect("a line");
+    let path = list(&home).join("1.json");
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    file["status"] = json!("in_progress");
+    std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+    let mut t = t;
+    t[1].title = "task 2 renamed".into();
+    t[1].version = Some(2);
+    let report = report_for(None, "yadgarhq/docs", &t);
+    let l = session_line(Some(&payload(&home)), &report, &env).expect("a line");
+    assert!(l.contains("1 edited past the write-back hooks"), "{l}");
+    let c = ask_and_decide(&home, &env, &l);
+    assert_eq!((c.title, c.to, c.complete), (None, None, false), "{l}");
+}
+
+#[test]
+fn the_task_update_request_names_the_status_to_send() {
+    for (yaadgaar, harness) in [
+        ("open", "pending"),
+        ("blocked", "pending"),
+        ("in_progress", "in_progress"),
+    ] {
+        let home = home(&format!("adapter-panel-named-{yaadgaar}"));
+        let env = env(&home);
+        let t = first_is(yaadgaar);
+        let report = report_for(None, "yadgarhq/docs", &t);
+        let l = session_line(Some(&payload(&home)), &report, &env).expect("a line");
+        assert!(
+            l.contains(&format!("taskId \"1\" with status \"{harness}\"")),
+            "{yaadgaar}: {l}"
+        );
+    }
+}

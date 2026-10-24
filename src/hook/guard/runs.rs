@@ -10,10 +10,15 @@ use crate::install::shellword::SimpleCommand;
 ///
 /// `sudo`, `env`, `timeout`, `xargs` and friends are stripped because they do
 /// not change what runs (`timeout 5 X` runs X), and a leading `FOO=1` is an
-/// assignment rather than a program.
+/// assignment rather than a program. So is a compound command's opener
+/// ([`OPENERS`]): the scanner keeps `do` in `for …; do X; done` as the
+/// first word, and reading it as the program skipped X for every rule.
 pub(super) fn executed(command: &SimpleCommand) -> Option<(&str, &[String])> {
     let mut rest = command.words.as_slice();
     loop {
+        while rest.first().is_some_and(|w| OPENERS.contains(&w.as_str())) {
+            rest = &rest[1..];
+        }
         // Environment assignments precede the program: `TF_LOG=trace X`.
         while rest
             .first()
@@ -61,7 +66,7 @@ fn wrapper_options(wrapper: &str) -> Option<WrapperOptions> {
         "timeout" => ("sk", "", &["--signal", "--kill-after"], 1),
         "xargs" => ("adEILnPs", "eil", XARGS_LONG, 0),
         // Multi-call binaries: `busybox cp` runs cp.
-        "nohup" | "command" | "setsid" | "busybox" | "toybox" => ("", "", &[], 0),
+        "nohup" | "command" | "builtin" | "setsid" | "busybox" | "toybox" => ("", "", &[], 0),
         _ => return None,
     };
     Some(WrapperOptions {
@@ -243,5 +248,11 @@ pub(super) fn shell_scripts(args: &[String]) -> Vec<&str> {
         .chain(args[at + 1..].iter().map(String::as_str))
         .collect()
 }
+
+/// Reserved words that open a compound command before its first simple
+/// command. `time` is a wrapper, read with its options above.
+pub(super) const OPENERS: &[&str] = &[
+    "do", "then", "else", "elif", "if", "while", "until", "!", "\u{7b}", "(",
+];
 
 pub(super) const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];

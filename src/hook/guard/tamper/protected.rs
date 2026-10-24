@@ -23,7 +23,8 @@
 //!   can set `disableAllHooks` — and directly inside `$CLAUDE_CONFIG_DIR`,
 //!   compared as a whole path, never by its basename;
 //! * `.git/hooks` and everything below it;
-//! * a plugin's `hooks/hooks.json` below `.claude/plugins/` or
+//! * a plugin's `hooks` directory and everything below it, and
+//!   `installed_plugins.json`, below `.claude/plugins/` or
 //!   `$CLAUDE_CONFIG_DIR/plugins/`, and a submodule's hooks below
 //!   `.git/modules/` (ADR-1020): see [`more_hooks`].
 //!
@@ -193,7 +194,11 @@ fn may_be_protected(word: &str, config: Option<&[String]>) -> bool {
             .is_some_and(|(_, rest)| rest.contains("/hooks/") || rest.ends_with("/hooks"))
         || plain
             .split_once(".claude/plugins/")
-            .is_some_and(|(_, rest)| rest.contains("hooks/hooks.json"));
+            .is_some_and(|(_, rest)| {
+                rest.contains("/hooks/")
+                    || rest.ends_with("/hooks")
+                    || rest.starts_with("installed_plugins.json")
+            });
     let in_config = config.is_some_and(|c| {
         let dir = c.join("/");
         SETTINGS_FILES
@@ -257,10 +262,12 @@ fn protected_components(components: &[String], config: Option<&[String]>) -> boo
 /// The hook registration ADR-1020 adds, matched component by component
 /// with *is* (exact, or a glob):
 ///
-/// * a plugin's `hooks/hooks.json` at any depth below `.claude/plugins/` or
+/// * a plugin's `hooks` directory and everything below it (`hooks.json`
+///   and the scripts it runs) at any depth below `.claude/plugins/` or
 ///   `$CLAUDE_CONFIG_DIR/plugins/` — the real layouts are
 ///   `cache/<market>/<plugin>/<version>/` and
-///   `marketplaces/<market>/plugins/<plugin>/`;
+///   `marketplaces/<market>/plugins/<plugin>/` — and that directory's
+///   `installed_plugins.json`, which says which plugins load;
 /// * a submodule's hooks: `hooks` at or below `.git/modules/<name>/`, where
 ///   a name may hold `/` and submodules nest (`modules/a/modules/b/hooks`).
 fn more_hooks<S: AsRef<str>>(
@@ -273,18 +280,20 @@ fn more_hooks<S: AsRef<str>>(
         at(i, ".git") && at(i + 1, "modules") && (i + 3..path.len()).any(|k| at(k, "hooks"))
     });
     let n = path.len();
-    let hooks_json = n >= 2 && at(n - 1, "hooks.json") && at(n - 2, "hooks");
-    // The plugins directory, then at least one directory of the plugin's.
-    let below_plugins = |plugins: usize| plugins + 1 < n - 2;
-    let in_claude =
-        (0..n).any(|i| at(i, ".claude") && at(i + 1, "plugins") && below_plugins(i + 1));
+    // Below the plugins directory at *plugins*: `installed_plugins.json`
+    // directly, or a `hooks` component after at least one plugin directory.
+    let registers = |plugins: usize| {
+        (n == plugins + 2 && at(plugins + 1, "installed_plugins.json"))
+            || (plugins + 2..n).any(|h| at(h, "hooks"))
+    };
+    let in_claude = (0..n).any(|i| at(i, ".claude") && at(i + 1, "plugins") && registers(i + 1));
     let in_config = config.is_some_and(|c| {
         c.len() < n
             && c.iter().enumerate().all(|(i, d)| at(i, d))
             && at(c.len(), "plugins")
-            && below_plugins(c.len())
+            && registers(c.len())
     });
-    submodule || (hooks_json && (in_claude || in_config))
+    submodule || in_claude || in_config
 }
 
 /// *path*'s components, lowercased, with `.` dropped and `..` applied.

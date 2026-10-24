@@ -12,7 +12,7 @@ use super::*;
 #[path = "clobber.rs"]
 mod clobber;
 
-fn edit(tool: &str, path: &str) -> Value {
+pub(super) fn edit(tool: &str, path: &str) -> Value {
     json!({"tool_name": tool, "tool_input": {"file_path": path, "content": "x"}})
 }
 
@@ -21,7 +21,7 @@ fn ps_call(command: &str) -> Value {
 }
 
 /// The calls in *calls* that `judge` does not refuse with *reason*.
-fn not_refused_as(
+pub(super) fn not_refused_as(
     calls: &[Value],
     reason: &str,
     judge: impl Fn(&Value) -> Decision,
@@ -36,7 +36,7 @@ fn not_refused_as(
 }
 
 /// The calls in *calls* that `judge` refuses.
-fn refused(calls: &[Value], judge: impl Fn(&Value) -> Decision) -> Vec<String> {
+pub(super) fn refused(calls: &[Value], judge: impl Fn(&Value) -> Decision) -> Vec<String> {
     calls
         .iter()
         .filter_map(|c| match judge(c) {
@@ -46,7 +46,7 @@ fn refused(calls: &[Value], judge: impl Fn(&Value) -> Decision) -> Vec<String> {
         .collect()
 }
 
-fn bash_calls(lines: &[&str]) -> Vec<Value> {
+pub(super) fn bash_calls(lines: &[&str]) -> Vec<Value> {
     lines.iter().map(|l| bash_call(l)).collect()
 }
 
@@ -226,13 +226,13 @@ fn powershell_shadowing_gh_is_refused() {
 
 /// A temporary home with `~/.local/bin` (no gh), `real` (an executable gh)
 /// and `late`, on a PATH in that order. Never the live environment.
-struct Machine {
-    root: PathBuf,
-    env: GuardEnv,
+pub(super) struct Machine {
+    pub(super) root: PathBuf,
+    pub(super) env: GuardEnv,
 }
 
 impl Machine {
-    fn new(tag: &str, gh_mode: Option<u32>) -> Self {
+    pub(super) fn new(tag: &str, gh_mode: Option<u32>) -> Self {
         // A plain name: a literal path the line may assign must hold no `(`.
         static N: AtomicUsize = AtomicUsize::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
@@ -257,11 +257,11 @@ impl Machine {
         Self { root, env }
     }
 
-    fn dir(&self, rel: &str) -> String {
+    pub(super) fn dir(&self, rel: &str) -> String {
         self.root.join(rel).to_string_lossy().into_owned()
     }
 
-    fn judge(&self, call: &Value) -> Decision {
+    pub(super) fn judge(&self, call: &Value) -> Decision {
         pre_tool_guard(call, &Policy::ALL_ON, &self.env)
     }
 }
@@ -421,7 +421,6 @@ const HOOK_FILES: &[&str] = &[
 ];
 
 const NOT_HOOK_FILES: &[&str] = &[
-    "/home/x/.claude/plugins/cache/m/p/1.0.0/hooks/notes.md",
     "/home/x/.claude/plugins/marketplaces/m/.codex/hooks.json",
     "/home/x/repo/hooks/hooks.json",
     "/home/x/repo/.git/modules/sub/config",

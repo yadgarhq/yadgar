@@ -4,8 +4,10 @@ use super::*;
 use serde_json::json;
 
 mod allowlist;
+mod bypass;
 mod disabled;
 mod exceptions_file;
+mod openers;
 mod powershell;
 mod protected;
 mod shadow;

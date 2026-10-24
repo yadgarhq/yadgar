@@ -45,7 +45,9 @@
 //! a wrapper with an operand (`timeout 5`, `xargs -n1`) is read through to
 //! the program it runs, and nesting past [`MAX_NESTING`] refuses instead of
 //! being skipped. `command -v terraform` is refused with it, a known
-//! over-refusal: `command` is a wrapper.
+//! over-refusal: `command` is a wrapper. A compound command's opener
+//! (`do`, `then`, `if`, `!`, an open brace) is not its program: the
+//! command after it is judged.
 //!
 //! **PowerShell and MultiEdit** are judged too (#227): see
 //! `guard/powershell.rs`. **The guard's own registration** — Claude Code

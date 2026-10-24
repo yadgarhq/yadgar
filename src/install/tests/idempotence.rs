@@ -162,3 +162,27 @@ fn duplicate_entries_of_ours_collapse_into_the_first_one_position() {
         ]))
     );
 }
+
+#[test]
+fn a_mixed_entry_keeps_its_foreign_hook_and_our_fresh_entries_go_after_it() {
+    // ONE entry holding a foreign hook AND ours (mutant M2). Ours comes out of
+    // it, the foreign hook stays where the entry was, and the fresh entries
+    // land after that surviving entry, never in front of it.
+    let foreign_hook = serde_json::json!({ "type": "command",
+        "command": "/home/u/.claude/hooks/yadgar-pretooluse-router.py" });
+    let mixed = serde_json::json!({ "matcher": "Bash", "hooks": [
+        foreign_hook,
+        { "type": "command", "command": format!("{BINARY} hook pre-tool-guard") },
+    ] });
+    let seeded = settings_text(serde_json::json!([mixed]));
+    let (after, changed) = install_over("idem-mixed", &seeded);
+    assert!(changed);
+    assert_eq!(
+        after,
+        settings_text(serde_json::json!([
+            { "matcher": "Bash", "hooks": [foreign_hook] },
+            own_entry(GUARD_MATCHER),
+            task_update_entry()
+        ]))
+    );
+}

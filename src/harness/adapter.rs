@@ -36,17 +36,31 @@ pub struct Report<'a> {
     pub completion_ttl: std::time::Duration,
 }
 
+/// The line a harness adds to the banner.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Line {
+    pub text: String,
+    /// How many tasks are now in the harness's list: `0` unless a sync ran.
+    pub mirrored: usize,
+}
+
+impl Line {
+    fn note(text: String) -> Option<Self> {
+        Some(Self { text, mirrored: 0 })
+    }
+}
+
 /// One harness.
 pub trait Harness {
     /// The line this harness adds to the banner, or `None` for no line.
-    fn context(&self, env: &Env, shape: &RecordShape, report: &Report) -> Option<String>;
+    fn context(&self, env: &Env, shape: &RecordShape, report: &Report) -> Option<Line>;
 }
 
 /// Any harness with no task list this client can write.
 pub struct Generic;
 
 impl Harness for Generic {
-    fn context(&self, _: &Env, _: &RecordShape, _: &Report) -> Option<String> {
+    fn context(&self, _: &Env, _: &RecordShape, _: &Report) -> Option<Line> {
         None
     }
 }
@@ -56,13 +70,15 @@ impl Harness for Generic {
 pub const NOT_SYNCED: &str = "TaskList not synced";
 
 impl Harness for ClaudeCode {
-    fn context(&self, env: &Env, shape: &RecordShape, report: &Report) -> Option<String> {
+    fn context(&self, env: &Env, shape: &RecordShape, report: &Report) -> Option<Line> {
         if env.sync_switch.as_deref() == Some("off") {
-            return Some(self.off(env, shape, report, &format!("{SYNC_SWITCH}=off")));
+            return Line::note(self.off(env, shape, report, &format!("{SYNC_SWITCH}=off")));
         }
         let scope = match &report.scope {
-            Err(reason) => return Some(format!("{NOT_SYNCED}: {reason}.")),
-            Ok(Scope::Off) => return Some(self.off(env, shape, report, "harness.scope = none")),
+            Err(reason) => return Line::note(format!("{NOT_SYNCED}: {reason}.")),
+            Ok(Scope::Off) => {
+                return Line::note(self.off(env, shape, report, "harness.scope = none"))
+            }
             Ok(scope) => *scope,
         };
         let why = match self.probe(env, shape) {
@@ -75,7 +91,12 @@ impl Harness for ClaudeCode {
                     completion_ttl: report.completion_ttl,
                 };
                 match contained(|| sync::run(&dir, &self.list_id, &listing, env, &input)) {
-                    Ok(outcome) => return Some(synced(&outcome, report.complete)),
+                    Ok(outcome) => {
+                        return Some(Line {
+                            text: synced(&outcome, report.complete),
+                            mirrored: outcome.mirrored,
+                        })
+                    }
                     Err(reason) => reason,
                 }
             }
@@ -88,7 +109,7 @@ impl Harness for ClaudeCode {
                 format!("the task list is off the recorded Claude Code format ({m})")
             }
         };
-        Some(format!("{NOT_SYNCED}: {}.", printable(&why)))
+        Line::note(format!("{NOT_SYNCED}: {}.", printable(&why)))
     }
 }
 
@@ -184,7 +205,13 @@ pub fn detect(payload: Option<&Value>, env: &Env) -> Box<dyn Harness> {
 ///
 /// `None` also when the recorded shape cannot be read, which is a build defect
 /// a test pins; the banner must still go out.
+#[cfg(test)]
 pub fn session_line(payload: Option<&Value>, report: &Report, env: &Env) -> Option<String> {
+    session_report(payload, report, env).map(|l| l.text)
+}
+
+/// [`session_line`], with the count of tasks the sync left in the harness list.
+pub fn session_report(payload: Option<&Value>, report: &Report, env: &Env) -> Option<Line> {
     let shape = super::shape::recorded().ok()?;
     detect(payload, env).context(env, &shape, report)
 }

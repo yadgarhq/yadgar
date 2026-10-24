@@ -48,12 +48,15 @@ without the `mcp__yaadgaar__` prefix:
   one page at a time. To get only some statuses, pass `statuses`, for example
   `["in_progress", "open", "blocked"]`; omit it to get every status. Pass
   `fields: "summary"` to get only `id`, `number`, `title`, `status` and
-  `version` for each task, with no body. When the answer carries a
+  `version` for each task, with no body. Pass `fields: "index"` to get only
+  `number`, `status` and `title`; a row from another project also carries
+  `project_id`. Use `index` to scan a list, then read the one task you need
+  for its `version`. When the answer carries a
   `next_page_token`, pass it as `page_token` to get the next page.
 - `read_task` reads one task in full, by its `id` or its per-project `number`.
   The answer carries the task's current version.
-- `create_task` files a new task. Give it a `title`, and a `body` that someone
-  can act on without this conversation. To record the task's reference in
+- `create_task` files a new task. Give it a `title` of at most 128 code
+  points, and a `body` that someone can act on without this conversation. To record the task's reference in
   another tracker, pass `legacy_ref`. Make it URN-shaped, for example
   `urn:yadgar:ledger:<project>:<id>`. The gateway stores it as given and
   returns it in `links`; it does not check the shape. To make a retry safe,
@@ -61,10 +64,20 @@ without the `mcp__yaadgaar__` prefix:
   returns the first call's task. The same key with different arguments is
   refused. Keys compare case-insensitively. A replay returns the first call's
   version, which can be stale: read the task again before you edit it.
-- `edit_task` changes a task's title or body. Send the `id` and the version you
-  last read as `expect_version`. It never changes the status.
+- `edit_task` changes a task's title or body. Send the `id` (or the `number`)
+  and the version you last read as `expect_version`. It never changes the status. A title has at
+  most 128 code points; a longer title is refused. To detect a body that was
+  cut off in transit, send `expect_body_sha256` with the new `body`: the
+  SHA-256 of that body as 64 lowercase hex characters. The gateway refuses the
+  edit when the digest does not match.
 - `transition_task` moves a task to another status: `open`, `in_progress`,
   `blocked`, `done`, or `dropped`. It also takes `expect_version`.
+- `read_task`, `edit_task` and `transition_task` each take either the `id` or
+  the `number` of the task, never both. A `number` is the task's number in the
+  caller's own project.
+
+This section describes gateway version 0.12.27. A newer gateway can serve
+more; its tool list is the authority.
 
 **When a call is refused, read the message.** If the task's version changed
 after you read it, read the task again and retry once with the new version.

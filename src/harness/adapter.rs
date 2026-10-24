@@ -6,7 +6,9 @@
 //! fails is ALSO reported through the banner only, with one line saying why.
 //!
 //! [`Harness::context`] runs the sync (car 2) when the probe says the list is
-//! ready, and returns the one line the banner gains. With the sync off
+//! ready, and returns the harness part the banner gains: one line, or two
+//! when the pass wrote entries (the second asks for one no-op `TaskUpdate`
+//! so the Claude Code task panel shows the list). With the sync off
 //! (`harness.scope = none` or the kill switch), it runs a delete-only pass
 //! instead, which removes the files this client mirrored and writes nothing.
 
@@ -148,9 +150,23 @@ fn synced(o: &Outcome, complete: bool) -> String {
     } else {
         " The listing stopped early, so nothing was removed."
     };
+    // A list created after startup is not shown by the Claude Code task panel
+    // until an in-process TaskUpdate (even a no-op) makes it re-read the list.
+    // The line NAMES the status: the harness status of the yaadgaar status the
+    // state holds, which `write_back::transition` maps to no move for every
+    // yaadgaar status. "Unchanged" alone left the agent to guess, and a wrong
+    // guess (or the status of a file edited past the hooks) is a real
+    // transition_task.
+    let panel = o.first.map_or_else(String::new, |(id, status)| {
+        format!(
+            "\nBefore other work, call TaskUpdate once on taskId \"{id}\" with status \
+             \"{status}\" (it sends nothing to yaadgaar), so the Claude Code task panel shows \
+             this list (it misses a list created after startup)."
+        )
+    });
     format!(
         "TaskList holds {} yaadgaar tasks ({}). yaadgaar is the source of truth: change a \
-         task with mcp__yaadgaar__edit_task or transition_task.{partial}",
+         task with mcp__yaadgaar__edit_task or transition_task.{partial}{panel}",
         o.mirrored,
         parts.join(", ")
     )

@@ -134,12 +134,12 @@ fn a_claude_code_session_gets_the_banner_then_one_line_and_the_tasks_are_mirrore
     let dir = workspace("ssh-cc");
     let home = home("ssh-cc-home");
     let text = run(claude_payload(&dir, &home), &dir, &env(&home));
-    let (head, last) = text.rsplit_once('\n').expect("two parts");
+    let (head, rest) = text.split_once("\nTaskList holds").expect("two parts");
     assert_eq!(head, banner());
-    assert!(
-        last.starts_with("TaskList holds 3 yaadgaar tasks"),
-        "{last}"
-    );
+    assert!(rest.starts_with(" 3 yaadgaar tasks"), "{rest}");
+    // The first sync wrote entries, so the harness part gains the panel line.
+    let (_, nudge) = rest.rsplit_once('\n').expect("the panel line");
+    assert!(nudge.contains("TaskUpdate once on taskId"), "{nudge}");
     assert_eq!(
         mirrored(&home),
         ["yadgar:task:a", "yadgar:task:b", "yadgar:task:c"]

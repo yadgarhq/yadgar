@@ -61,6 +61,8 @@ pub struct Outcome {
     pub diverged: usize,
     /// In-scope rows with no usable URN or version.
     pub skipped: usize,
+    /// The lowest owned task id and its state's harness status; set when the pass wrote.
+    pub first: Option<(u64, &'static str)>,
 }
 
 /// TEST-ONLY: a project name that makes [`run`] panic, so the adapter's
@@ -143,6 +145,10 @@ pub fn run(
         dir, listing, &files, &desired, &actions, &mut st, &mut out, &save,
     );
     out.mirrored = st.entries.len();
+    if out.created + out.recreated + out.updated + out.refreshed > 0 {
+        let low = st.entries.values().min_by_key(|e| e.harness_id);
+        out.first = low.map(|e| (e.harness_id, record::harness_status(&e.status)));
+    }
     prune_markers(&mut st, input.completion_ttl);
     // Saved even after a failed action, so the state records what WAS done.
     if st != before || !spath.exists() {

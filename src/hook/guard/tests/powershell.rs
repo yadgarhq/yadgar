@@ -55,7 +55,8 @@ fn powershell_is_judged_by_every_bash_rule_too() {
         (r"Remove-Item -Recurse .git\hooks", PROTECTED),
         ("'{}' | Out-File .claude/settings.local.json", PROTECTED),
     ] {
-        assert_eq!(reason_for(&ps(command)), reason, "{command}");
+        let got = reason_for(&ps(command));
+        assert!(got.starts_with(reason), "{command}: {got}");
     }
 }
 

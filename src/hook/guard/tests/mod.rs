@@ -3,6 +3,7 @@
 use super::*;
 use serde_json::json;
 
+mod allowlist;
 mod disabled;
 mod exceptions_file;
 mod powershell;

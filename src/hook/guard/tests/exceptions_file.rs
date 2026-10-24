@@ -331,7 +331,7 @@ fn every_way_of_naming_the_exceptions_file_is_refused() {
     let allowed: Vec<&&str> = MUST_BE_DENIED
         .iter()
         .chain(BYPASSES)
-        .filter(|c| !matches!(guard(&bash_call(c)), Decision::Deny(r) if r == EXCEPTIONS))
+        .filter(|c| !matches!(guard(&bash_call(c)), Decision::Deny(r) if r.starts_with(EXCEPTIONS)))
         .collect();
     assert!(
         allowed.is_empty(),

@@ -108,3 +108,35 @@ fn shape_c_stays_refused_under_claude_worktrees() {
         exceptions_reason(command);
     }
 }
+
+/// The security review of #87, end to end. Each endpoint below is no longer
+/// the gh-api shape (`gh_api.rs` pins that), so its verdict is MAIN'S OWN
+/// check's, the same before #87 and after it: `..` under a literal refuses,
+/// and the others main's check already allowed. Pinned so a change to either
+/// side shows here.
+const REVIEWED_ENDPOINTS: &[(&str, bool)] = &[
+    ("gh api repos/../../.claude/$f", true),
+    ("gh api repos/$r/../$t", true),
+    ("gh api repos/$r/..", true),
+    ("gh api repos/$r/x*", false),
+    ("gh api repos/$r/?", false),
+    ("gh api repos/$r/[a-z]", false),
+    ("gh api repos/$r/x$t", false),
+    ("gh api repos/$r/${t}x", false),
+    ("gh api repos/$r/git/refs/tags/$t?per_page=1", false),
+    // Still the shape, and still allowed.
+    ("gh api repos/$r/git/refs/tags/$t", false),
+    (
+        "for r in a:b c:d; do gh api repos/yadgarhq/${r%%:*}/git/ref/tags/${r#*:}; done",
+        false,
+    ),
+];
+
+#[test]
+fn the_reviewed_endpoints_keep_their_verdicts() {
+    let wrong: Vec<&(&str, bool)> = REVIEWED_ENDPOINTS
+        .iter()
+        .filter(|(c, refused)| denies(c) != *refused)
+        .collect();
+    assert!(wrong.is_empty(), "verdict changed: {wrong:#?}");
+}

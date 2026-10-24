@@ -326,8 +326,16 @@ The guard reads `disabled_guards` from `~/.claude/yadgar-hook-exceptions.json`,
 the file the memory engine's own guard reads, and never writes it. It honours
 three ids, spelled as the engine spells them: `terraform_family` (terraform,
 tofu, tfp and digger comments), `git_commit_flags` (commits that skip hooks or
-signing) and `hook_config_tamper` (writes to that file). Every other id is
-ignored. A missing, unreadable or malformed file leaves every guard on.
+signing) and `hook_config_tamper` (writes to that file, and agent writes to
+Claude Code's `settings.json` / `settings.local.json` and to `.git/hooks`).
+Every other id is ignored. A missing, unreadable or malformed file leaves
+every guard on.
+
+The guard judges the `Bash`, `PowerShell`, `Edit`, `Write`, `MultiEdit` and
+`NotebookEdit` tools (ADR-1005). It reads terraform through wrappers such as
+`timeout` and `xargs`, and refuses nesting deeper than it reads. It judges
+tool calls only: `yaadgaar install`, run by nix or a person, still writes
+`settings.json`.
 
 ## Packaging
 

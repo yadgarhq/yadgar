@@ -176,7 +176,7 @@ fn install_registers_only_the_guard_session_start_and_the_write_back_pair() {
     assert_eq!(sorted(our_commands(&settings)), ours());
     assert_eq!(
         settings["hooks"]["PreToolUse"][0]["matcher"],
-        "Bash|Edit|Write|NotebookEdit"
+        "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell"
     );
 }
 

@@ -55,7 +55,7 @@ const EXPECTED_REGISTRATIONS: &[(&str, &str, &str, bool)] = &[
     (
         "PreToolUse",
         "pre-tool-guard",
-        "Bash|Edit|Write|NotebookEdit",
+        "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell",
         false,
     ),
     // EVERY source — startup, resume, clear and compact — and SYNCHRONOUS:
@@ -139,7 +139,7 @@ fn one_written_entry_is_pinned_as_literal_bytes() {
 
     assert_eq!(
         settings["hooks"]["PreToolUse"].to_string(),
-        r#"[{"matcher":"Bash|Edit|Write|NotebookEdit","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-tool-guard"}]},{"matcher":"TaskUpdate","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook task-update"}]}]"#
+        r#"[{"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-tool-guard"}]},{"matcher":"TaskUpdate","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook task-update"}]}]"#
     );
     assert_eq!(
         settings["hooks"]["TaskCompleted"].to_string(),

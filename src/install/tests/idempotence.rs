@@ -66,7 +66,7 @@ fn install_over(name: &str, seeded: &str) -> (String, bool) {
     )
 }
 
-const GUARD_MATCHER: &str = "Bash|Edit|Write|NotebookEdit";
+const GUARD_MATCHER: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell";
 
 #[test]
 fn a_reinstall_leaves_our_hook_where_it_was_ahead_of_a_foreign_one() {

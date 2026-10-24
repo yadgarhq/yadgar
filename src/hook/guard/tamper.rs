@@ -45,6 +45,8 @@ use crate::hook::EXCEPTIONS_FILE;
 use crate::install::shellword::{shell_commands, SimpleCommand};
 
 mod allow;
+mod protected;
+pub(super) use protected::{bash_touches_a_protected_path, is_protected_path};
 
 /// Whether *line* names the exceptions file, or may expand into it.
 ///

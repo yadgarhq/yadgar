@@ -8,13 +8,13 @@ use crate::install::shellword::SimpleCommand;
 
 /// The program a simple command runs, and the arguments it gets.
 ///
-/// `sudo`, `env` and friends are stripped because they do not change what runs
-/// — `sudo terraform apply` is terraform — and a leading `FOO=1` is an
+/// `sudo`, `env`, `timeout`, `xargs` and friends are stripped because they do
+/// not change what runs (`timeout 5 X` runs X), and a leading `FOO=1` is an
 /// assignment rather than a program.
 pub(super) fn executed(command: &SimpleCommand) -> Option<(&str, &[String])> {
     let mut rest = command.words.as_slice();
     loop {
-        // Environment assignments precede the program: `TF_LOG=trace terraform`.
+        // Environment assignments precede the program: `TF_LOG=trace X`.
         while rest
             .first()
             .is_some_and(|w| w.contains('=') && !w.starts_with('-'))
@@ -22,20 +22,143 @@ pub(super) fn executed(command: &SimpleCommand) -> Option<(&str, &[String])> {
             rest = &rest[1..];
         }
         let wrapper = program_name(rest.first()?);
-        if !TRANSPARENT.contains(&wrapper) {
+        let Some(options) = wrapper_options(wrapper) else {
             return Some((wrapper, &rest[1..]));
+        };
+        rest = skip_options(&rest[1..], &options);
+        // A positional operand before the command: `timeout 5`.
+        rest = rest.get(options.operands..)?;
+    }
+}
+
+/// How one wrapper's options read, as `getopt` reads them.
+struct WrapperOptions {
+    /// Short options that take a value, attached (`-n1`) or as the next word.
+    short_values: &'static str,
+    /// Short options whose value may only be attached (`xargs -i{}`).
+    short_attached: &'static str,
+    /// Long options that take the next word as their value without `=`.
+    long_values: &'static [&'static str],
+    /// Operands the wrapper takes before the command it runs.
+    operands: usize,
+}
+
+/// The option grammar of *wrapper*, or `None` when it is not a wrapper.
+///
+/// Per wrapper, because the same letter means different things: `env -i`
+/// ignores the environment and takes nothing, while `env -u` names a variable
+/// to unset. Getting that backwards eats the program name and the guard sees
+/// something harmless where terraform was about to run.
+fn wrapper_options(wrapper: &str) -> Option<WrapperOptions> {
+    let (short_values, short_attached, long_values, operands): (_, _, &[&str], _) = match wrapper {
+        "sudo" | "doas" => ("ugpChrtUTD", "", SUDO_LONG, 0),
+        "env" => ("uSC", "", &["--unset", "--split-string", "--chdir"], 0),
+        "nice" => ("n", "", &["--adjustment"], 0),
+        "ionice" => ("ncp", "", &["--class", "--classdata", "--pid"], 0),
+        "stdbuf" => ("ioe", "", &["--input", "--output", "--error"], 0),
+        "time" => ("fo", "", &["--format", "--output"], 0),
+        "exec" => ("a", "", &[], 0),
+        "timeout" => ("sk", "", &["--signal", "--kill-after"], 1),
+        "xargs" => ("adEILnPs", "eil", XARGS_LONG, 0),
+        // Multi-call binaries: `busybox cp` runs cp.
+        "nohup" | "command" | "setsid" | "busybox" | "toybox" => ("", "", &[], 0),
+        _ => return None,
+    };
+    Some(WrapperOptions {
+        short_values,
+        short_attached,
+        long_values,
+        operands,
+    })
+}
+
+const SUDO_LONG: &[&str] = &[
+    "--user",
+    "--group",
+    "--prompt",
+    "--close-from",
+    "--host",
+    "--role",
+    "--type",
+    "--other-user",
+    "--command-timeout",
+    "--chdir",
+];
+
+const XARGS_LONG: &[&str] = &[
+    "--arg-file",
+    "--delimiter",
+    // NOT `--max-lines`: its value is optional, so only `--max-lines=N`
+    // carries one, and `xargs --max-lines X` runs X.
+    "--max-args",
+    "--max-procs",
+    "--max-chars",
+    "--process-slot-var",
+];
+
+/// Whether long option *word* (no `=`) takes the next word as its value:
+/// it is one of *long_values*, or a prefix of one, since `getopt_long`
+/// accepts any unambiguous prefix (`--sig KILL` is `--signal KILL`).
+pub(super) fn long_takes_a_value(word: &str, long_values: &[&str]) -> bool {
+    word.len() > 2 && !word.contains('=') && long_values.iter().any(|l| l.starts_with(word))
+}
+
+/// *words* after the wrapper's leading options, `getopt`-style: a short
+/// cluster is read letter by letter up to its first value-taking option, and
+/// `--` ends the options. A lone `-` is skipped as main skipped it: to `env`
+/// it means `-i`.
+fn skip_options<'a>(mut words: &'a [String], options: &WrapperOptions) -> &'a [String] {
+    while let Some(word) = words.first() {
+        if word == "--" {
+            return &words[1..];
         }
-        rest = &rest[1..];
-        // The wrapper's own options. A value-taking one consumes the word after
-        // it, and skipping that word is the difference between reading
-        // `sudo -u ops terraform` as terraform and reading it as `ops`.
-        while let Some(flag) = rest.first().filter(|w| w.starts_with('-')).cloned() {
-            rest = &rest[1..];
-            if takes_a_value(wrapper, &flag) && !flag.contains('=') {
-                rest = rest.get(1..).unwrap_or(&[]);
+        let Some(flags) = word.strip_prefix('-') else {
+            return words;
+        };
+        words = &words[1..];
+        if flags.starts_with('-') {
+            if long_takes_a_value(word, options.long_values) {
+                words = words.get(1..).unwrap_or(&[]);
+            }
+            continue;
+        }
+        for (at, letter) in flags.char_indices() {
+            if options.short_attached.contains(letter) {
+                break;
+            }
+            if options.short_values.contains(letter) {
+                if at + letter.len_utf8() == flags.len() {
+                    words = words.get(1..).unwrap_or(&[]);
+                }
+                break;
             }
         }
     }
+    words
+}
+
+/// How deeply `$(...)` substitutions nest in *line*, quoted or not, as
+/// [`substitutions`] reads them: `echo $(a $(b))` is 2.
+pub(super) fn substitution_depth(line: &str) -> usize {
+    // One entry per open paren: whether it opened a substitution.
+    let mut open: Vec<bool> = Vec::new();
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                open.push(true);
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            '(' => open.push(false),
+            // The guard pops whatever the `)` closes.
+            ')' if open.pop() == Some(true) => depth -= 1,
+            _ => {}
+        }
+    }
+    deepest
 }
 
 /// The text of every outermost `$(...)` and backtick substitution in
@@ -80,23 +203,6 @@ pub(super) fn substitutions(line: &str) -> Vec<String> {
     found
 }
 
-/// Does this wrapper's option consume the word after it?
-///
-/// Per wrapper, because the same letter means different things: `env -i`
-/// ignores the environment and takes nothing, while `env -u` names a variable
-/// to unset. Getting that backwards eats the program name and the guard sees
-/// something harmless where terraform was about to run.
-fn takes_a_value(wrapper: &str, flag: &str) -> bool {
-    match wrapper {
-        "sudo" | "doas" => matches!(flag, "-u" | "-g" | "-p" | "-C" | "-h" | "-r" | "-t" | "-U"),
-        "env" => matches!(flag, "-u" | "-S" | "-C"),
-        "nice" | "ionice" => matches!(flag, "-n" | "-c" | "-p"),
-        "stdbuf" => matches!(flag, "-i" | "-o" | "-e"),
-        "time" => matches!(flag, "-f" | "-o"),
-        _ => false,
-    }
-}
-
 /// The name a shell would resolve, without its directory or its extension.
 ///
 /// BOTH SEPARATORS, because this client ships to Windows and
@@ -117,11 +223,25 @@ pub(super) fn value_of<'a>(args: &'a [String], option: &str) -> Option<&'a str> 
     })
 }
 
-/// Wrappers that run something else without changing what it is.
-const TRANSPARENT: &[&str] = &[
-    "sudo", "doas", "env", "nohup", "time", "command", "nice", "ionice", "stdbuf", "setsid",
-    "exec", // Multi-call binaries: `busybox cp` runs cp.
-    "busybox", "toybox",
-];
+/// What a shell's `-c` may run: every word after the first option cluster
+/// that carries `c` (`-c`, `-lc`, `-ec`), plus a value attached to `-c`.
+///
+/// EVERY word, not the next one: the script is the first OPERAND, so
+/// `bash -c -e 'X'` runs X, and the guard does not model which word that
+/// is. A later word is `$0`, `$1`…, so reading it too only over-refuses.
+pub(super) fn shell_scripts(args: &[String]) -> Vec<&str> {
+    let cluster = |a: &String| {
+        a.strip_prefix('-')
+            .is_some_and(|f| !f.starts_with('-') && f.contains('c'))
+    };
+    let Some(at) = args.iter().position(cluster) else {
+        return Vec::new();
+    };
+    let attached = value_of(&args[at..at + 1], "-c");
+    attached
+        .into_iter()
+        .chain(args[at + 1..].iter().map(String::as_str))
+        .collect()
+}
 
 pub(super) const SHELLS: &[&str] = &["sh", "bash", "zsh", "dash", "ksh", "ash"];

@@ -26,7 +26,13 @@ pub(super) fn executed(command: &SimpleCommand) -> Option<(&str, &[String])> {
         {
             rest = &rest[1..];
         }
-        let wrapper = program_name(rest.first()?);
+        // zsh reads `{cmd;}` as a group with no space after the brace.
+        let first = rest.first()?;
+        let first = first
+            .strip_prefix(OPEN_BRACE)
+            .filter(|w| !w.is_empty())
+            .unwrap_or(first);
+        let wrapper = program_name(first);
         let Some(options) = wrapper_options(wrapper) else {
             return Some((wrapper, &rest[1..]));
         };
@@ -67,6 +73,11 @@ fn wrapper_options(wrapper: &str) -> Option<WrapperOptions> {
         "xargs" => ("adEILnPs", "eil", XARGS_LONG, 0),
         // Multi-call binaries: `busybox cp` runs cp.
         "nohup" | "command" | "builtin" | "setsid" | "busybox" | "toybox" => ("", "", &[], 0),
+        // `coproc cmd` runs cmd; `coproc NAME { cmd; }` is split at the brace
+        // (see [`split_at_braces`]). zsh's precommand modifiers run what
+        // follows; `repeat N` takes the count first.
+        "coproc" | "noglob" | "nocorrect" | "-" => ("", "", &[], 0),
+        "repeat" => ("", "", &[], 1),
         _ => return None,
     };
     Some(WrapperOptions {
@@ -247,6 +258,38 @@ pub(super) fn shell_scripts(args: &[String]) -> Vec<&str> {
         .into_iter()
         .chain(args[at + 1..].iter().map(String::as_str))
         .collect()
+}
+
+const OPEN_BRACE: char = '\u{7b}';
+const OPEN_WORD: &str = "\u{7b}";
+const CLOSE_WORD: &str = "\u{7d}";
+
+/// *commands* with each one split at a standalone open-brace word after
+/// its first: what follows the brace is a command of its own, and a
+/// trailing close brace is dropped. `coproc NAME`, `function f`, and zsh's
+/// `if cond` / `while cond` keep the words before it. Splitting can only
+/// add commands to judge.
+pub(super) fn split_at_braces(commands: Vec<SimpleCommand>) -> Vec<SimpleCommand> {
+    let mut out = Vec::with_capacity(commands.len());
+    for command in commands {
+        let mut writes_to = command.writes_to;
+        let mut words: Vec<String> = Vec::new();
+        for (n, word) in command.words.into_iter().enumerate() {
+            if n > 0 && word == OPEN_WORD {
+                out.push(SimpleCommand {
+                    words: std::mem::take(&mut words),
+                    writes_to: std::mem::take(&mut writes_to),
+                });
+                continue;
+            }
+            words.push(word);
+        }
+        while words.len() > 1 && words.last().is_some_and(|w| w == CLOSE_WORD) {
+            words.pop();
+        }
+        out.push(SimpleCommand { words, writes_to });
+    }
+    out
 }
 
 /// Reserved words that open a compound command before its first simple

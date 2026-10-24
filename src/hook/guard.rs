@@ -76,7 +76,8 @@ mod runs;
 mod tamper;
 use reasons::*;
 use runs::{
-    executed, long_takes_a_value, shell_scripts, substitution_depth, substitutions, SHELLS,
+    executed, long_takes_a_value, shell_scripts, split_at_braces, substitution_depth,
+    substitutions, SHELLS,
 };
 use tamper::{
     bash_touches_a_protected_path, is_before_gh, is_protected_path, is_the_exceptions_file,
@@ -224,7 +225,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &GuardEnv) -> Decision {
     // here, before any check reads the line.
     let joined = line.replace("\\\n", "");
     let line = joined.as_str();
-    let commands = shell_commands(line);
+    let commands = split_at_braces(shell_commands(line));
     let inner = substitutions(line);
 
     // THE EXCEPTIONS FILE: ANY MENTION REFUSES, READ OR WRITE. A text

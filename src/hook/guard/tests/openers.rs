@@ -40,6 +40,22 @@ const BEHIND_AN_OPENER: &[(&str, &str)] = &[
         r#"for i in 1; do gh pr comment 1 --body "digger apply"; done"#,
         DIGGER,
     ),
+    // coproc, the function keyword form, zsh's unspaced group, its
+    // precommand modifiers and its brace-bodied `if` and `while`.
+    ("coproc terraform apply", TERRAFORM),
+    ("coproc NAME { terraform apply; }", TERRAFORM),
+    ("function f { terraform apply; }", TERRAFORM),
+    ("function f() { terraform apply; }", TERRAFORM),
+    ("{terraform apply;}", TERRAFORM),
+    ("repeat 3 terraform apply", TERRAFORM),
+    ("noglob terraform apply", TERRAFORM),
+    ("nocorrect terraform apply", TERRAFORM),
+    ("- terraform apply", TERRAFORM),
+    ("if true { terraform apply }", TERRAFORM),
+    ("while true { tofu apply }", TERRAFORM),
+    ("if [[ -f x ]] { git commit --no-verify -m x }", HOOK_BYPASS),
+    ("coproc git commit -n -m x", HOOK_BYPASS),
+    ("noglob git commit --no-verify -m x", HOOK_BYPASS),
 ];
 
 #[test]
@@ -67,6 +83,15 @@ const ORDINARY_COMPOUNDS: &[&str] = &[
     "for r in a b; do gh api repos/$r/tags; done",
     "! git diff --quiet",
     "if true; then git log -n 5; fi",
+    r"find . -name '*.tf' -exec cat {} \;",
+    "coproc cat /tmp/x",
+    "noglob ls *.tf",
+    "repeat 3 echo hi",
+    "function f { echo hi; }",
+    "if true { echo ok }",
+    "{echo hi;}",
+    "echo '{' terraform-notes.md",
+    "jq '{a: .b}' /tmp/x.json",
 ];
 
 #[test]

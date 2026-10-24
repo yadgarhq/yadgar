@@ -85,6 +85,8 @@ pub(super) fn shadows_or_plants_gh(
     // `do`, `then`, `!` or an open brace as the first word, where `executed` would read
     // it as the program and skip what follows.
     let commands: Vec<SimpleCommand> = commands.iter().map(without_openers).collect();
+    let commands = super::runs::split_at_braces(commands);
+    let commands: Vec<SimpleCommand> = commands.iter().map(without_openers).collect();
     shadow::shadows_gh(line, &commands) || bin_dirs::writes_before_gh(&commands, env)
 }
 

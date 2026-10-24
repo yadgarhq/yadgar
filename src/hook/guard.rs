@@ -223,8 +223,10 @@ fn bash(line: &str, depth: usize, policy: &Policy, config_dir: Option<&Path>) ->
     // denylist cannot safely let through a command that names the file:
     // every allowance (a `cp` from it, a read with `cat`) was a parsing
     // question the shell could answer differently. See `tamper.rs`.
-    if policy.hook_config_tamper && names_the_exceptions_file(line, &commands) {
-        return Decision::Deny(EXCEPTIONS.into());
+    if policy.hook_config_tamper {
+        if let Some(why) = names_the_exceptions_file(line, &commands) {
+            return Decision::Deny(format!("{EXCEPTIONS} {why}"));
+        }
     }
     if policy.hook_config_tamper && bash_touches_a_protected_path(line, &commands, config_dir) {
         return Decision::Deny(PROTECTED.into());

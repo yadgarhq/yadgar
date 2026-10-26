@@ -64,8 +64,8 @@ fn an_edit_of_a_settings_file_or_a_git_hook_is_refused() {
 
 #[test]
 fn the_claude_config_dir_settings_are_protected_by_its_full_path() {
-    let cfg = Some(Path::new("/home/x/.config/claude-work"));
-    let judge = |path: &str| pre_tool_guard(&edit("Write", path), &Policy::ALL_ON, cfg);
+    let cfg = GuardEnv::with_config_dir(Some(Path::new("/home/x/.config/claude-work")));
+    let judge = |path: &str| pre_tool_guard(&edit("Write", path), &Policy::ALL_ON, &cfg);
     for path in [
         "/home/x/.config/claude-work/settings.json",
         "/home/x/.config/claude-work/settings.local.json",
@@ -80,7 +80,7 @@ fn the_claude_config_dir_settings_are_protected_by_its_full_path() {
     ] {
         assert_eq!(judge(path), Decision::Allow, "{path}");
     }
-    let bash = |cmd: &str| pre_tool_guard(&bash_call(cmd), &Policy::ALL_ON, cfg);
+    let bash = |cmd: &str| pre_tool_guard(&bash_call(cmd), &Policy::ALL_ON, &cfg);
     assert_eq!(
         bash("cp /tmp/x /home/x/.config/claude-work/settings.json"),
         Decision::Deny(PROTECTED.into())
@@ -158,7 +158,7 @@ fn a_bash_write_onto_a_protected_path_is_refused() {
 }
 
 /// Reading a protected file, or writing a file that only shares its name.
-const BASH_READS: &[&str] = &[
+pub(super) const BASH_READS: &[&str] = &[
     "cat ~/.claude/settings.json",
     "jq .hooks ~/.claude/settings.json",
     "jq -r '.hooks.PreToolUse[0].matcher' .claude/settings.local.json",
@@ -236,11 +236,19 @@ fn hook_config_tamper_switched_off_allows_the_protected_paths() {
         ..Policy::ALL_ON
     };
     assert_eq!(
-        pre_tool_guard(&edit("Write", "/home/x/.claude/settings.json"), &off, None),
+        pre_tool_guard(
+            &edit("Write", "/home/x/.claude/settings.json"),
+            &off,
+            &GuardEnv::default()
+        ),
         Decision::Allow
     );
     assert_eq!(
-        pre_tool_guard(&bash_call("rm .git/hooks/pre-commit"), &off, None),
+        pre_tool_guard(
+            &bash_call("rm .git/hooks/pre-commit"),
+            &off,
+            &GuardEnv::default()
+        ),
         Decision::Allow
     );
 }

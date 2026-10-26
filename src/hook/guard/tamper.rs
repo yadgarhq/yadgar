@@ -50,12 +50,51 @@
 //! exact.
 
 use crate::hook::EXCEPTIONS_FILE;
-use crate::install::shellword::{shell_commands, SimpleCommand};
+use crate::install::shellword::{shell_commands, shell_commands_with_separators, SimpleCommand};
 
 mod allow;
+mod bin_dirs;
 mod gh_api;
 mod protected;
+mod redirects;
+mod shadow;
+pub(super) use bin_dirs::is_before_gh;
 pub(super) use protected::{bash_touches_a_protected_path, is_protected_path};
+pub(super) use shadow::names_a_gh_file;
+
+/// Whether a Bash *line* shadows gh or writes before it on PATH
+/// (ADR-1020): see `tamper/shadow.rs` and `tamper/bin_dirs.rs`. A data
+/// heredoc's body is not commands, as for every tamper check, and a `>|`,
+/// `>!` or `>&file` redirect reads as `>` (`tamper/redirects.rs`).
+pub(super) fn shadows_or_plants_gh(line: &str, env: &super::GuardEnv) -> bool {
+    use super::runs::split_at_braces_with_separators as split;
+    let base = allow::data_heredocs_removed(line);
+    let stripped = redirects::plain(base.as_deref().unwrap_or(line)).or(base);
+    let mut scanned = shell_commands_with_separators(stripped.as_deref().unwrap_or(line));
+    if stripped.is_none() {
+        scanned = split(scanned); // As the caller split the line (`guard.rs`).
+    }
+    // A compound command's opener is not its program: the scanner keeps
+    // `do`, `then`, `!` or an open brace as the first word, where `executed` would read
+    // it as the program and skip what follows.
+    let scanned = split(scanned.iter().map(without_openers).collect());
+    let (commands, runs): (Vec<_>, Vec<_>) = scanned.iter().map(without_openers).unzip();
+    let line = stripped.as_deref().unwrap_or(line);
+    shadow::shadows_gh(line, &commands) || bin_dirs::writes_before_gh(&commands, &runs, env)
+}
+
+/// *command* without the openers (`runs::OPENERS`) before its first word,
+/// with the separators before it.
+fn without_openers((command, run): &(SimpleCommand, Vec<String>)) -> (SimpleCommand, Vec<String>) {
+    let skip = command
+        .words
+        .iter()
+        .take_while(|w| super::runs::OPENERS.contains(&w.as_str()))
+        .count();
+    let words = command.words[skip..].to_vec();
+    let writes_to = command.writes_to.clone();
+    (SimpleCommand { words, writes_to }, run.clone())
+}
 
 /// Whether *line* names the exceptions file, or may expand into it.
 ///
@@ -188,7 +227,7 @@ const MAX_ALTERNATIVES: usize = 256; // ADR-0569-EXCEPTION(CB): bound on expandi
 
 /// *word* with every `{a,b}` list expanded, or `None` past
 /// [`MAX_ALTERNATIVES`].
-fn brace_expand(word: &str) -> Option<Vec<String>> {
+pub(super) fn brace_expand(word: &str) -> Option<Vec<String>> {
     let mut done = Vec::new();
     let mut pending = vec![word.to_string()];
     while let Some(w) = pending.pop() {
@@ -322,7 +361,7 @@ fn one_spaced_item(items: Vec<String>) -> Vec<String> {
 
 /// Whether glob *pattern* (`*`, `?`, `[…]`, `[!…]`) matches *name*, ignoring
 /// ASCII case.
-fn glob_matches(pattern: &str, name: &str) -> bool {
+pub(super) fn glob_matches(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
     let n: Vec<char> = name.to_ascii_lowercase().chars().collect();
     let (mut pi, mut ni) = (0, 0);

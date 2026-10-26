@@ -20,21 +20,28 @@
 //! (`'terra' + 'form'`, `-join`, `[char]` codes), exactly as Bash's
 //! `eval "$CMD"` is not seen.
 
-use std::path::Path;
-
-use super::reasons::{PS_UNJUDGEABLE, TERRAFORM};
-use super::{any_rule_on, bash, Decision, Policy, TERRAFORM_BINARIES};
+use super::reasons::{PS_UNJUDGEABLE, SHADOW, TERRAFORM};
+use super::{any_rule_on, bash, Decision, GuardEnv, Policy, TERRAFORM_BINARIES};
 
 /// Judge one PowerShell command.
-pub(super) fn judge(command: &str, policy: &Policy, config_dir: Option<&Path>) -> Decision {
+pub(super) fn judge(command: &str, policy: &Policy, env: &GuardEnv) -> Decision {
     if any_rule_on(policy) && hides_its_text(command) {
         return Decision::Deny(PS_UNJUDGEABLE.into());
+    }
+    // Protected mode (ADR-1028): refused outright. PowerShell's
+    // indirection (`&`, dot-sourcing, `iex`, concatenation) is more than
+    // the Bash reading can see, so fail closed.
+    if policy.hook_config_tamper && env.exceptions_protected {
+        return Decision::Deny(super::reasons::PS_PROTECTED.into());
+    }
+    if policy.hook_config_tamper && shadows_gh(command) {
+        return Decision::Deny(SHADOW.into());
     }
     let plain = as_bash_text(command);
     if policy.terraform_family && names_a_terraform_binary(&plain) {
         return Decision::Deny(TERRAFORM.into());
     }
-    bash(&plain, 0, policy, config_dir)
+    bash(&plain, 0, policy, env)
 }
 
 /// *command* as a line the Bash rules read: backticks dropped, backslashes
@@ -90,4 +97,43 @@ fn hides_its_text(command: &str) -> bool {
                             || matches!(f, "ec" | "ea"))
                 })
         })
+}
+
+/// The PowerShell spellings of shadowing gh (ADR-1020), which the Bash
+/// reading does not see: an alias cmdlet naming gh, an assignment to
+/// `$env:PATH`, and `SetEnvironmentVariable` on `Path`. A `function gh`
+/// reads as Bash and is caught there.
+fn shadows_gh(command: &str) -> bool {
+    let plain: String = command
+        .chars()
+        .filter(|c| !matches!(c, '`' | '\'' | '"'))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let tokens: Vec<&str> = plain
+        .split(|c: char| c.is_whitespace() || c == ';' || c == '|')
+        .filter(|t| !t.is_empty())
+        .collect();
+    let aliases = tokens.iter().enumerate().any(|(i, t)| {
+        matches!(*t, "set-alias" | "new-alias" | "sal" | "nal")
+            && tokens[i + 1..]
+                .iter()
+                .any(|a| matches!(*a, "gh" | "gh-personal"))
+    });
+    let assigns = plain.match_indices("$env:path").any(|(at, m)| {
+        let rest = &plain[at + m.len()..];
+        let op = rest.trim_start();
+        !rest.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_')
+            && (op.starts_with('=') || op.starts_with("+="))
+            && !op.starts_with("==")
+    });
+    let sets = plain
+        .match_indices("setenvironmentvariable")
+        .any(|(at, m)| {
+            let rest = plain[at + m.len()..].trim_start();
+            rest.strip_prefix('(').is_some_and(|r| {
+                let r = r.trim_start();
+                r.starts_with("path") && !r[4..].starts_with(|c: char| c.is_ascii_alphanumeric())
+            })
+        });
+    aliases || assigns || sets
 }

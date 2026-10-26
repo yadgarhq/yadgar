@@ -45,36 +45,48 @@
 //! a wrapper with an operand (`timeout 5`, `xargs -n1`) is read through to
 //! the program it runs, and nesting past [`MAX_NESTING`] refuses instead of
 //! being skipped. `command -v terraform` is refused with it, a known
-//! over-refusal: `command` is a wrapper.
+//! over-refusal: `command` is a wrapper. A compound command's opener
+//! (`do`, `then`, `if`, `!`, an open brace) is not its program: the
+//! command after it is judged.
 //!
 //! **PowerShell and MultiEdit** are judged too (#227): see
 //! `guard/powershell.rs`. **The guard's own registration** — Claude Code
 //! settings files and `.git/hooks` — is protected from agent edits and Bash
-//! writes (#240): see `guard/tamper/protected.rs`.
+//! writes (#240): see `guard/tamper/protected.rs`. So are plugin
+//! `hooks/hooks.json` files and submodule hooks under `.git/modules`, and a
+//! line that shadows gh — a gh function or alias, a PATH assignment, a file
+//! named gh, a write into a PATH directory before the real gh — refuses
+//! (ADR-1020): see `guard/tamper/shadow.rs` and `guard/tamper/bin_dirs.rs`.
 //!
 //! **The exceptions file is the exception** (#64): any Bash command that names
 //! it refuses, read or write, because every attempt to let a read through was
 //! bypassed. `Edit`, `Write` and `NotebookEdit` on that path are exact. What a
-//! text check cannot see is listed in `guard/tamper.rs`.
+//! text check cannot see is listed in `guard/tamper.rs`. In protected mode
+//! (ADR-1028, `hook/mode.rs`) that Bash text rule is replaced by a literal
+//! protected-path rule and a privilege-escalation rule (`guard/escalate.rs`).
 
 use serde_json::Value;
-
-use std::path::Path;
 
 use super::{Decision, Policy};
 use crate::install::shellword::{shell_commands, SimpleCommand};
 
+mod deferred;
+mod env;
+mod escalate;
+mod inline;
 mod powershell;
+pub use env::GuardEnv;
 mod reasons;
 mod runs;
 mod tamper;
 use reasons::*;
 use runs::{
-    executed, long_takes_a_value, shell_scripts, substitution_depth, substitutions, SHELLS,
+    executed, long_takes_a_value, shell_scripts, split_at_braces, substitution_depth,
+    substitutions, SHELLS,
 };
 use tamper::{
-    bash_touches_a_protected_path, is_protected_path, is_the_exceptions_file,
-    names_the_exceptions_file,
+    bash_touches_a_protected_path, is_before_gh, is_protected_path, is_the_exceptions_file,
+    names_a_gh_file, names_the_exceptions_file, shadows_or_plants_gh,
 };
 
 /// Refuse a tool call that the standing rules forbid.
@@ -84,10 +96,11 @@ use tamper::{
 /// allowlist, pushed to master, then reverted the file to conceal it — and a
 /// Bash-only matcher never even routed the call to the guard.
 ///
-/// *config_dir* is the `CLAUDE_CONFIG_DIR` the hook process received, whose
-/// settings files are protected like `~/.claude`'s. A PARAMETER, not read
-/// here, so every path is reachable from a test.
-pub fn pre_tool_guard(payload: &Value, policy: &Policy, config_dir: Option<&Path>) -> Decision {
+/// *env* is what the hook process knows about its machine (`guard/env.rs`):
+/// the `CLAUDE_CONFIG_DIR` whose settings files are protected like
+/// `~/.claude`'s, the home, and the `PATH` directories before the real `gh`.
+/// A PARAMETER, not read here, so every path is reachable from a test.
+pub fn pre_tool_guard(payload: &Value, policy: &Policy, env: &GuardEnv) -> Decision {
     // A PAYLOAD OF THE WRONG SHAPE REFUSES (ledger 1589). It used to read as
     // tool "" with command "", which allows: JSON that is not a tool call is a
     // call the guard cannot judge, exactly like JSON that does not parse.
@@ -111,8 +124,8 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy, config_dir: Option<&Path
         // TOO LONG TO CHECK QUICKLY refuses: a hook that times out is no
         // decision at all, so the call would run unchecked.
         _ if shell && field("command").len() > MAX_COMMAND_BYTES => Decision::Deny(TOO_LONG.into()),
-        "Bash" => bash(&field("command"), 0, policy, config_dir),
-        "PowerShell" => powershell::judge(&field("command"), policy, config_dir),
+        "Bash" => bash(&field("command"), 0, policy, env),
+        "PowerShell" => powershell::judge(&field("command"), policy, env),
 
         // ONLY THE PATH. An edit executes nothing, so its CONTENT is text a
         // person wrote and not a command anybody ran. Reading the content is
@@ -131,8 +144,14 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy, config_dir: Option<&Path
             if policy.hook_config_tamper && is_the_exceptions_file(&path) {
                 return Decision::Deny(EXCEPTIONS.into());
             }
-            if policy.hook_config_tamper && is_protected_path(&path, config_dir) {
+            if policy.hook_config_tamper && is_protected_path(&path, env.config_dir.as_deref()) {
                 return Decision::Deny(PROTECTED.into());
+            }
+            // A file named gh, or one in a PATH directory before gh (ADR-1020).
+            let plants_gh =
+                path.split('\n').any(|p| names_a_gh_file(p, true)) || is_before_gh(&path, env);
+            if policy.hook_config_tamper && plants_gh {
+                return Decision::Deny(SHADOW.into());
             }
             Decision::Allow
         }
@@ -194,44 +213,47 @@ fn any_rule_on(policy: &Policy) -> bool {
 
 /// The refusal for *script*, run one level below *depth*: its own verdict,
 /// or [`TOO_DEEP`] when that level is past [`MAX_NESTING`].
-fn nested(
-    script: &str,
-    depth: usize,
-    policy: &Policy,
-    config_dir: Option<&Path>,
-) -> Option<String> {
+fn nested(script: &str, depth: usize, policy: &Policy, env: &GuardEnv) -> Option<String> {
     if depth >= MAX_NESTING {
         let unread = !script.trim().is_empty() && any_rule_on(policy);
         return unread.then(|| TOO_DEEP.to_string());
     }
-    match bash(script, depth + 1, policy, config_dir) {
+    match bash(script, depth + 1, policy, env) {
         Decision::Deny(reason) => Some(reason),
         Decision::Allow => None,
     }
 }
 
-fn bash(line: &str, depth: usize, policy: &Policy, config_dir: Option<&Path>) -> Decision {
+fn bash(line: &str, depth: usize, policy: &Policy, env: &GuardEnv) -> Decision {
     // A BACKSLASH-NEWLINE IS A LINE CONTINUATION: the shell deletes the pair
     // before it reads words, so `exc\<newline>eptions` is one word. Removed
     // here, before any check reads the line.
-    let joined = line.replace("\\\n", "");
+    let (raw, joined) = (line, line.replace("\\\n", ""));
     let line = joined.as_str();
-    let commands = shell_commands(line);
+    let commands = split_at_braces(shell_commands(line));
     let inner = substitutions(line);
 
     // THE EXCEPTIONS FILE: ANY MENTION REFUSES, READ OR WRITE. A text
     // denylist cannot safely let through a command that names the file:
     // every allowance (a `cp` from it, a read with `cat`) was a parsing
     // question the shell could answer differently. See `tamper.rs`.
-    if policy.hook_config_tamper {
+    // REPLACED IN PROTECTED MODE (ADR-1028): the file in force is root-owned,
+    // so the kernel refuses a write as the user; what is left is a write as
+    // root, and a literal path (`guard/escalate.rs`).
+    if policy.hook_config_tamper && env.exceptions_protected {
+        if let Some(why) = escalate::refusal(raw, line, &commands) {
+            return Decision::Deny(why.into());
+        }
+    } else if policy.hook_config_tamper {
         if let Some(why) = names_the_exceptions_file(line, &commands) {
             return Decision::Deny(format!("{EXCEPTIONS} {why}"));
         }
     }
-    if policy.hook_config_tamper && bash_touches_a_protected_path(line, &commands, config_dir) {
+    if policy.hook_config_tamper
+        && bash_touches_a_protected_path(line, &commands, env.config_dir.as_deref())
+    {
         return Decision::Deny(PROTECTED.into());
     }
-
     // Asked over the WHOLE line, because this is the one rule where mentioning
     // is the act. It is still gated on something in the line doing the posting.
     // Each rule is skipped only when the exceptions file switched its id off;
@@ -250,7 +272,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, config_dir: Option<&Path>) ->
         return Decision::Deny(TOO_DEEP.into());
     }
     for inner in &inner {
-        if let Some(reason) = nested(inner, depth, policy, config_dir) {
+        if let Some(reason) = nested(inner, depth, policy, env) {
             return Decision::Deny(reason);
         }
     }
@@ -259,7 +281,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, config_dir: Option<&Path>) ->
         // BEFORE resolving the program: `env -S '<command>'` resolves to no
         // program at all, and used to be skipped as allowed.
         if let Some(split) = env_split_string(&command.words) {
-            if let Some(reason) = nested(split, depth, policy, config_dir) {
+            if let Some(reason) = nested(split, depth, policy, env) {
                 return Decision::Deny(reason);
             }
         }
@@ -275,7 +297,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, config_dir: Option<&Path>) ->
         // `eval` runs its arguments as a line, exactly as `sh -c` runs its
         // script.
         if program == "eval" {
-            if let Some(reason) = nested(&args.join(" "), depth, policy, config_dir) {
+            if let Some(reason) = nested(&args.join(" "), depth, policy, env) {
                 return Decision::Deny(reason);
             }
         }
@@ -283,11 +305,16 @@ fn bash(line: &str, depth: usize, policy: &Policy, config_dir: Option<&Path>) ->
         // what runs, and `sh -c 'terraform apply'` runs terraform.
         if SHELLS.contains(&program) {
             for script in shell_scripts(args) {
-                if let Some(reason) = nested(script, depth, policy, config_dir) {
+                if let Some(reason) = nested(script, depth, policy, env) {
                     return Decision::Deny(reason);
                 }
             }
         }
+    }
+    // LAST, so a line that also breaks a rule above is refused under that
+    // rule, whose remedy is the one that applies.
+    if policy.hook_config_tamper && shadows_or_plants_gh(line, env) {
+        return Decision::Deny(SHADOW.into());
     }
     Decision::Allow
 }

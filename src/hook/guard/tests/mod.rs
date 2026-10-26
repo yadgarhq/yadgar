@@ -10,6 +10,7 @@ mod exceptions_file;
 mod openers;
 mod powershell;
 mod protected;
+mod retired;
 mod shadow;
 mod substitution;
 mod widen;

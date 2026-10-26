@@ -227,7 +227,7 @@ const MAX_ALTERNATIVES: usize = 256; // ADR-0569-EXCEPTION(CB): bound on expandi
 
 /// *word* with every `{a,b}` list expanded, or `None` past
 /// [`MAX_ALTERNATIVES`].
-fn brace_expand(word: &str) -> Option<Vec<String>> {
+pub(super) fn brace_expand(word: &str) -> Option<Vec<String>> {
     let mut done = Vec::new();
     let mut pending = vec![word.to_string()];
     while let Some(w) = pending.pop() {
@@ -361,7 +361,7 @@ fn one_spaced_item(items: Vec<String>) -> Vec<String> {
 
 /// Whether glob *pattern* (`*`, `?`, `[…]`, `[!…]`) matches *name*, ignoring
 /// ASCII case.
-fn glob_matches(pattern: &str, name: &str) -> bool {
+pub(super) fn glob_matches(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.to_ascii_lowercase().chars().collect();
     let n: Vec<char> = name.to_ascii_lowercase().chars().collect();
     let (mut pi, mut ni) = (0, 0);

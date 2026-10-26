@@ -28,6 +28,12 @@ pub(super) fn judge(command: &str, policy: &Policy, env: &GuardEnv) -> Decision 
     if any_rule_on(policy) && hides_its_text(command) {
         return Decision::Deny(PS_UNJUDGEABLE.into());
     }
+    // Protected mode (ADR-1028): refused outright. PowerShell's
+    // indirection (`&`, dot-sourcing, `iex`, concatenation) is more than
+    // the Bash reading can see, so fail closed.
+    if policy.hook_config_tamper && env.exceptions_protected {
+        return Decision::Deny(super::reasons::PS_PROTECTED.into());
+    }
     if policy.hook_config_tamper && shadows_gh(command) {
         return Decision::Deny(SHADOW.into());
     }

@@ -49,9 +49,7 @@ fn the_mcp_entry_names_the_binary_and_carries_no_token() {
 #[test]
 fn uninstall_removes_ours_and_keeps_everything_else() {
     // The failure this prevents: the Python uninstall left hooks, settings
-    // entries and rules all firing against an install that was gone — and, the
-    // other way, an uninstall that takes the exceptions file with it throws away
-    // decisions a human made.
+    // entries and rules all firing against an install that was gone.
     let home = scratch("uninstall");
     let layout = Layout::new(&home);
     seed(&home, foreign_settings());
@@ -61,11 +59,6 @@ fn uninstall_removes_ours_and_keeps_everything_else() {
     // below — the two cases are opposite and a single fixture cannot show both.
     std::fs::write(layout.claude_md(), "# my own instructions\n").unwrap();
     install_with(&home, Path::new(BINARY)).unwrap();
-    std::fs::write(
-        layout.exceptions(),
-        "{\"push_default_allowlist\":[\"nix\"]}",
-    )
-    .unwrap();
     std::fs::write(layout.mcp_config(), {
         let mut c = read_json(&layout.mcp_config());
         c["mcpServers"]["browsermcp"] = json!({ "type": "stdio", "command": "npx" });
@@ -103,12 +96,6 @@ fn uninstall_removes_ours_and_keeps_everything_else() {
     );
     let claude_md = std::fs::read_to_string(layout.claude_md()).unwrap();
     assert!(!claude_md.contains("yadgar-rules.md"), "{claude_md:?}");
-
-    // Never removed: it holds decisions a human made.
-    assert!(
-        layout.exceptions().exists(),
-        "uninstall took the exceptions file"
-    );
 }
 
 #[test]

@@ -70,7 +70,8 @@ pub const TASK_UPDATE: &str = "task-update";
 pub const TASK_COMPLETED: &str = "task-completed";
 
 /// The handlers in this module. A panic in one of them passes the call
-/// through, where a panic in the guard refuses (`process::run`).
+/// through (`process::run`).
+#[cfg(test)]
 pub const NAMES: [&str; 2] = [TASK_UPDATE, TASK_COMPLETED];
 
 /// The text Claude Code reads, on `TaskCompleted`, as "the hook's file is

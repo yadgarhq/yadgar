@@ -57,8 +57,8 @@ pub struct HookSpec {
     pub fire_and_forget: bool,
 }
 
-/// FOUR registrations: the guard, the session-start task listing, and the two
-/// write-back handlers.
+/// THREE registrations: the session-start task listing and the two write-back
+/// handlers.
 ///
 /// `session-start` (ADR-0992) prints the project's open tasks into the session
 /// before its first prompt. Matcher `""` is every source — startup, resume,
@@ -82,19 +82,14 @@ pub struct HookSpec {
 /// ours out of every event ("ours" is the invocation shape, see [`is_managed`],
 /// not a handler name here) and puts fresh entries back only under events this
 /// list names. So an `install` over 0.1.4 removes all twelve and writes these.
+///
+/// Up to 0.1.31 the list also held `pre-tool-guard`, a `PreToolUse` agent
+/// guard. It was removed: it is harness control, not memory, so it is out of
+/// this client's scope. The same rule retires its entry. `PreToolUse` is still
+/// an event this list names, and [`place`] takes every hook of ours out of it
+/// before the fresh `task-update` entry goes back, so an `install` over 0.1.31
+/// leaves no `pre-tool-guard` entry behind.
 pub const MANAGED_HOOKS: &[HookSpec] = &[
-    HookSpec {
-        event: "PreToolUse",
-        // Edit/Write/NotebookEdit are in the matcher because of a real incident:
-        // an agent used Edit, not Bash, to add itself to the hook exceptions
-        // file, pushed to a protected branch, then reverted the file to conceal
-        // it. A Bash-only matcher never even routed that call to the guard.
-        // MultiEdit and PowerShell (ADR-1005, yaadgaar #227) are the same two
-        // routes by another tool name: an edit, and a shell.
-        name: "pre-tool-guard",
-        matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell",
-        fire_and_forget: false,
-    },
     HookSpec {
         event: "PreToolUse",
         name: crate::hook::write_back::TASK_UPDATE,

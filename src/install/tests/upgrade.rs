@@ -1,12 +1,15 @@
-//! Installing 0.1.5 over a 0.1.3/0.1.4-shaped home: twelve hooks of ours become
-//! the current two (the guard, and ADR-0992's session-start listing).
+//! Installing over an older home: the hooks of ours an older install wrote
+//! become the current three (ADR-0992's session-start listing and the
+//! ADR-1000 write-back pair).
 //!
 //! Up to 0.1.4, `install` registered twelve handlers and only `pre-tool-guard`
 //! did any work. The other eleven spawned this binary on every tool call, prompt
-//! and stop, beside the memory engine's own hooks, and did nothing. An upgrade
-//! must remove the eleven it wrote — identified by the invocation shape
-//! `yaadgaar hook <name>`, never by handler name — and leave every engine entry
-//! exactly as it was, including one that reuses a retired handler's name.
+//! and stop, beside the memory engine's own hooks, and did nothing. Up to 0.1.31
+//! `install` still registered `pre-tool-guard`, the agent guard this client no
+//! longer ships. An upgrade must remove every entry of ours it no longer
+//! registers — identified by the invocation shape `yaadgaar hook <name>`, never
+//! by handler name — and leave every engine entry exactly as it was, including
+//! one that reuses a retired handler's name.
 
 use std::path::Path;
 
@@ -139,14 +142,10 @@ fn our_commands(settings: &Value) -> Vec<(String, String)> {
     out
 }
 
-/// The four commands of ours a current install writes, as `(event, command)`,
+/// The three commands of ours a current install writes, as `(event, command)`,
 /// sorted.
 fn ours() -> Vec<(String, String)> {
     vec![
-        (
-            "PreToolUse".to_string(),
-            format!("{BINARY} hook pre-tool-guard"),
-        ),
         (
             "PreToolUse".to_string(),
             format!("{BINARY} hook task-update"),
@@ -169,19 +168,16 @@ fn sorted(mut commands: Vec<(String, String)>) -> Vec<(String, String)> {
 }
 
 #[test]
-fn install_registers_only_the_guard_session_start_and_the_write_back_pair() {
-    let home = scratch("guard-only");
+fn install_registers_only_session_start_and_the_write_back_pair() {
+    let home = scratch("current-only");
     install_with(&home, Path::new(BINARY)).unwrap();
     let settings = read_json(&Layout::new(&home).settings());
     assert_eq!(sorted(our_commands(&settings)), ours());
-    assert_eq!(
-        settings["hooks"]["PreToolUse"][0]["matcher"],
-        "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell"
-    );
+    assert_eq!(settings["hooks"]["PreToolUse"][0]["matcher"], "TaskUpdate");
 }
 
 #[test]
-fn install_over_a_twelve_hook_install_leaves_exactly_our_four() {
+fn install_over_a_twelve_hook_install_leaves_exactly_our_three() {
     let home = scratch("twelve-to-one");
     seed(&home, upgraded_home_settings());
     assert_eq!(
@@ -284,15 +280,68 @@ fn a_foreign_non_command_hook_sharing_an_entry_with_ours_survives() {
 }
 
 #[test]
-fn the_managed_list_is_the_guard_the_session_start_listing_and_the_write_back_pair() {
+fn the_managed_list_is_the_session_start_listing_and_the_write_back_pair() {
     let names: Vec<_> = MANAGED_HOOKS.iter().map(|h| (h.event, h.name)).collect();
     assert_eq!(
         names,
         vec![
-            ("PreToolUse", "pre-tool-guard"),
             ("PreToolUse", "task-update"),
             ("SessionStart", "session-start"),
             ("TaskCompleted", "task-completed")
         ]
+    );
+}
+
+#[test]
+fn install_over_a_guard_install_removes_the_guard_entry_and_no_foreign_hook() {
+    // Up to 0.1.31 `install` registered `yaadgaar hook pre-tool-guard` on
+    // `PreToolUse`. That handler is gone, so an entry left in place would fire
+    // on every tool call and run a subcommand that no longer exists. The
+    // upgrade strips it the way it strips the eleven 0.1.4 entries: by the
+    // invocation shape. Foreign `PreToolUse` hooks keep their place and order.
+    let home = scratch("guard-entry-removed");
+    let engine = format!("{ENGINE} pretooluse-router");
+    let other = "/usr/local/bin/other-tool check";
+    seed(
+        &home,
+        json!({ "hooks": { "PreToolUse": [
+            { "matcher": "Bash|Edit|Write|NotebookEdit", "hooks": [{ "type": "command", "command": engine }] },
+            { "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell", "hooks": [
+                { "type": "command", "command": format!("{OLD_BINARY} hook pre-tool-guard") }
+            ]},
+            { "matcher": "TaskUpdate", "hooks": [
+                { "type": "command", "command": format!("{OLD_BINARY} hook task-update") }
+            ]},
+            { "matcher": "Bash", "hooks": [{ "type": "command", "command": other }] }
+        ]}}),
+    );
+    // Before the reinstall, `verify` names the leftover entry.
+    assert!(
+        drift(&home).iter().any(|d| matches!(
+            d,
+            Drift::HookUnknown { name, .. } if name == "pre-tool-guard"
+        )),
+        "{:#?}",
+        drift(&home)
+    );
+
+    install_with(&home, Path::new(BINARY)).unwrap();
+
+    let settings = read_json(&Layout::new(&home).settings());
+    assert_eq!(
+        commands_for_event(&settings, "PreToolUse"),
+        vec![
+            engine.clone(),
+            format!("{BINARY} hook task-update"),
+            other.to_string()
+        ],
+        "{settings:#?}"
+    );
+    assert!(
+        drift(&home)
+            .iter()
+            .all(|d| !matches!(d, Drift::HookUnknown { .. } | Drift::HookDuplicated { .. })),
+        "{:#?}",
+        drift(&home)
     );
 }

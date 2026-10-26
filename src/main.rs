@@ -162,15 +162,8 @@ enum Command {
     /// could not serve the registrations at all.
     Hook {
         /// The handler name from `install::MANAGED_HOOKS`, e.g.
-        /// `pre-tool-guard`.
+        /// `session-start`.
         name: String,
-    },
-
-    /// The guard's protected mode (ADR-1028): `status` shows it, `lock`
-    /// (run with sudo, once) establishes it.
-    Guard {
-        #[command(subcommand)]
-        command: hook::lock::GuardCommand,
     },
 
     /// Print who your saved credential names: your user_id, your account
@@ -195,10 +188,10 @@ enum Command {
 
 /// NOT `#[tokio::main]`. That macro starts the runtime, and `Cli::parse()` and
 /// `init_tracing` then run, all BEFORE `hook::process::run` reaches its
-/// `catch_unwind`: a panic in any of them exited 101, which Claude Code reads as
-/// non-blocking, so the tool ran unchecked; and clap answered `--help` with
-/// exit 0. The hook needs no runtime, so it runs first, synchronously, with its
-/// setup inside the containment (ledger 1576 (d)).
+/// `catch_unwind`: a panic in any of them exited 101 outside the containment;
+/// and clap answered `--help` itself, ahead of the handler. The hook needs no
+/// runtime, so it runs first, synchronously, with its setup inside the
+/// containment (ledger 1576 (d)).
 fn main() -> anyhow::Result<()> {
     if let Some(name) = hook::process::hook_name(std::env::args_os()) {
         // NO COLOUR UNDER `hook`. Its stderr is not read by a person at a
@@ -312,7 +305,6 @@ async fn real_main() -> anyhow::Result<()> {
         // Unreachable in practice: `main` takes `hook <name>` before clap, and
         // a `hook` with no name is a clap usage error that exits 2.
         Command::Hook { name } => hook::process::run(&name, || ()),
-        Command::Guard { command } => hook::lock::run(command),
         Command::Admin { command } => Ok(admin::run(command).await?),
         Command::Whoami => Ok(whoami::run().await?),
         Command::Harness { command } => harness::run(command),

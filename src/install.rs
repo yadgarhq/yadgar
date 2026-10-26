@@ -91,14 +91,6 @@ impl Layout {
     pub fn claude_md(&self) -> PathBuf {
         self.claude_dir().join("CLAUDE.md")
     }
-
-    /// Never written and never removed: it holds decisions a human made.
-    ///
-    /// READ by the guard (`yaadgaar hook pre-tool-guard`) for `disabled_guards`,
-    /// and by nothing else. No install, uninstall or repair path touches it.
-    pub fn exceptions(&self) -> PathBuf {
-        self.claude_dir().join(crate::hook::EXCEPTIONS_FILE)
-    }
 }
 
 /// What an install or uninstall actually did, for the CLI to print.
@@ -202,8 +194,6 @@ pub fn install_with(home: &Path, binary: &Path) -> anyhow::Result<Summary> {
 /// environment — hooks, settings entries, rules — all still firing against an
 /// install that was gone. This removes the hook entries, the MCP entry, the
 /// rules file and the reference line, and touches nothing it did not write.
-/// `yadgar-hook-exceptions.json` in particular survives: it holds decisions a
-/// human made, and a reinstall must find them still there.
 pub fn uninstall(home: &Path) -> anyhow::Result<Summary> {
     let layout = Layout::new(home);
 

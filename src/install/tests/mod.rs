@@ -183,7 +183,7 @@ fn foreign_settings() -> Value {
                 { "matcher": "", "hooks": [{ "type": "command", "command": "/usr/local/bin/notify done" }] }
             ],
             "PreToolUse": [
-                { "matcher": "Bash", "hooks": [{ "type": "command", "command": "/usr/local/bin/guard check" }] }
+                { "matcher": "Bash", "hooks": [{ "type": "command", "command": "/usr/local/bin/policy-check run" }] }
             ],
             "PreCompact": [
                 { "matcher": "", "hooks": [{ "type": "command", "command": "/usr/local/bin/archive-transcript" }] }
@@ -297,7 +297,7 @@ fn entry_with_a_foreign_hook_before_ours() -> Value {
     json!({ "hooks": { "PreToolUse": [
         { "matcher": "Bash", "hooks": [
             { "type": "command", "command": "/usr/bin/other-tool run" },
-            { "type": "command", "command": "/old/path/yaadgaar hook pre-tool-guard" }
+            { "type": "command", "command": "/old/path/yaadgaar hook task-update" }
         ]}
     ]}})
 }

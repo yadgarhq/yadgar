@@ -50,7 +50,7 @@
 //! exact.
 
 use crate::hook::EXCEPTIONS_FILE;
-use crate::install::shellword::{shell_commands, SimpleCommand};
+use crate::install::shellword::{shell_commands, shell_commands_with_separators, SimpleCommand};
 
 mod allow;
 mod bin_dirs;
@@ -66,41 +66,34 @@ pub(super) use shadow::names_a_gh_file;
 /// (ADR-1020): see `tamper/shadow.rs` and `tamper/bin_dirs.rs`. A data
 /// heredoc's body is not commands, as for every tamper check, and a `>|`,
 /// `>!` or `>&file` redirect reads as `>` (`tamper/redirects.rs`).
-pub(super) fn shadows_or_plants_gh(
-    line: &str,
-    commands: &[SimpleCommand],
-    env: &super::GuardEnv,
-) -> bool {
+pub(super) fn shadows_or_plants_gh(line: &str, env: &super::GuardEnv) -> bool {
+    use super::runs::split_at_braces_with_separators as split;
     let base = allow::data_heredocs_removed(line);
     let stripped = redirects::plain(base.as_deref().unwrap_or(line)).or(base);
-    let scanned;
-    let (line, commands) = match &stripped {
-        Some(stripped) => {
-            scanned = shell_commands(stripped);
-            (stripped.as_str(), scanned.as_slice())
-        }
-        None => (line, commands),
-    };
+    let mut scanned = shell_commands_with_separators(stripped.as_deref().unwrap_or(line));
+    if stripped.is_none() {
+        scanned = split(scanned); // As the caller split the line (`guard.rs`).
+    }
     // A compound command's opener is not its program: the scanner keeps
     // `do`, `then`, `!` or an open brace as the first word, where `executed` would read
     // it as the program and skip what follows.
-    let commands: Vec<SimpleCommand> = commands.iter().map(without_openers).collect();
-    let commands = super::runs::split_at_braces(commands);
-    let commands: Vec<SimpleCommand> = commands.iter().map(without_openers).collect();
-    shadow::shadows_gh(line, &commands) || bin_dirs::writes_before_gh(&commands, env)
+    let scanned = split(scanned.iter().map(without_openers).collect());
+    let (commands, runs): (Vec<_>, Vec<_>) = scanned.iter().map(without_openers).unzip();
+    let line = stripped.as_deref().unwrap_or(line);
+    shadow::shadows_gh(line, &commands) || bin_dirs::writes_before_gh(&commands, &runs, env)
 }
 
-/// *command* without the openers (`runs::OPENERS`) before its first word.
-fn without_openers(command: &SimpleCommand) -> SimpleCommand {
+/// *command* without the openers (`runs::OPENERS`) before its first word,
+/// with the separators before it.
+fn without_openers((command, run): &(SimpleCommand, Vec<String>)) -> (SimpleCommand, Vec<String>) {
     let skip = command
         .words
         .iter()
         .take_while(|w| super::runs::OPENERS.contains(&w.as_str()))
         .count();
-    SimpleCommand {
-        words: command.words[skip..].to_vec(),
-        writes_to: command.writes_to.clone(),
-    }
+    let words = command.words[skip..].to_vec();
+    let writes_to = command.writes_to.clone();
+    (SimpleCommand { words, writes_to }, run.clone())
 }
 
 /// Whether *line* names the exceptions file, or may expand into it.

@@ -301,7 +301,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &GuardEnv) -> Decision {
     }
     // LAST, so a line that also breaks a rule above is refused under that
     // rule, whose remedy is the one that applies.
-    if policy.hook_config_tamper && shadows_or_plants_gh(line, &commands, env) {
+    if policy.hook_config_tamper && shadows_or_plants_gh(line, env) {
         return Decision::Deny(SHADOW.into());
     }
     Decision::Allow

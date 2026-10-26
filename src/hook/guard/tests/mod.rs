@@ -11,6 +11,7 @@ mod openers;
 mod powershell;
 mod protected;
 mod shadow;
+mod substitution;
 mod widen;
 
 /// The guard with every refusal on: what a machine with no exceptions file gets.

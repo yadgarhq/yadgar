@@ -41,20 +41,53 @@
 //! rules: this runs on the critical path of somebody's session, and a guard
 //! that refuses what it cannot understand is a guard that gets switched off.
 //!
+//! **What the guard reads, it reads to the end** (ADR-1005, yaadgaar #229):
+//! a wrapper with an operand (`timeout 5`, `xargs -n1`) is read through to
+//! the program it runs, and nesting past [`MAX_NESTING`] refuses instead of
+//! being skipped. `command -v terraform` is refused with it, a known
+//! over-refusal: `command` is a wrapper. A compound command's opener
+//! (`do`, `then`, `if`, `!`, an open brace) is not its program: the
+//! command after it is judged.
+//!
+//! **PowerShell and MultiEdit** are judged too (#227): see
+//! `guard/powershell.rs`. **The guard's own registration** — Claude Code
+//! settings files and `.git/hooks` — is protected from agent edits and Bash
+//! writes (#240): see `guard/tamper/protected.rs`. So are plugin
+//! `hooks/hooks.json` files and submodule hooks under `.git/modules`, and a
+//! line that shadows gh — a gh function or alias, a PATH assignment, a file
+//! named gh, a write into a PATH directory before the real gh — refuses
+//! (ADR-1020): see `guard/tamper/shadow.rs` and `guard/tamper/bin_dirs.rs`.
+//!
 //! **The exceptions file is the exception** (#64): any Bash command that names
 //! it refuses, read or write, because every attempt to let a read through was
 //! bypassed. `Edit`, `Write` and `NotebookEdit` on that path are exact. What a
-//! text check cannot see is listed in `guard/tamper.rs`.
+//! text check cannot see is listed in `guard/tamper.rs`. In protected mode
+//! (ADR-1028, `hook/mode.rs`) that Bash text rule is replaced by a literal
+//! protected-path rule and a privilege-escalation rule (`guard/escalate.rs`).
 
 use serde_json::Value;
 
 use super::{Decision, Policy};
 use crate::install::shellword::{shell_commands, SimpleCommand};
 
+mod deferred;
+mod env;
+mod escalate;
+mod inline;
+mod powershell;
+pub use env::GuardEnv;
+mod reasons;
 mod runs;
 mod tamper;
-use runs::{executed, substitutions, value_of, SHELLS};
-use tamper::{is_the_exceptions_file, names_the_exceptions_file};
+use reasons::*;
+use runs::{
+    executed, long_takes_a_value, shell_scripts, split_at_braces, substitution_depth,
+    substitutions, SHELLS,
+};
+use tamper::{
+    bash_touches_a_protected_path, is_before_gh, is_protected_path, is_the_exceptions_file,
+    names_a_gh_file, names_the_exceptions_file, shadows_or_plants_gh,
+};
 
 /// Refuse a tool call that the standing rules forbid.
 ///
@@ -62,7 +95,12 @@ use tamper::{is_the_exceptions_file, names_the_exceptions_file};
 /// an agent once used Edit rather than Bash to add itself to the push
 /// allowlist, pushed to master, then reverted the file to conceal it — and a
 /// Bash-only matcher never even routed the call to the guard.
-pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
+///
+/// *env* is what the hook process knows about its machine (`guard/env.rs`):
+/// the `CLAUDE_CONFIG_DIR` whose settings files are protected like
+/// `~/.claude`'s, the home, and the `PATH` directories before the real `gh`.
+/// A PARAMETER, not read here, so every path is reachable from a test.
+pub fn pre_tool_guard(payload: &Value, policy: &Policy, env: &GuardEnv) -> Decision {
     // A PAYLOAD OF THE WRONG SHAPE REFUSES (ledger 1589). It used to read as
     // tool "" with command "", which allows: JSON that is not a tool call is a
     // call the guard cannot judge, exactly like JSON that does not parse.
@@ -70,7 +108,8 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
         return Decision::Deny(UNREADABLE.into());
     };
     let input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
-    if tool == "Bash" && !input.get("command").is_some_and(Value::is_string) {
+    let shell = matches!(tool, "Bash" | "PowerShell");
+    if shell && !input.get("command").is_some_and(Value::is_string) {
         return Decision::Deny(UNREADABLE.into());
     }
     let field = |key: &str| {
@@ -84,14 +123,15 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
     match tool {
         // TOO LONG TO CHECK QUICKLY refuses: a hook that times out is no
         // decision at all, so the call would run unchecked.
-        "Bash" if field("command").len() > MAX_COMMAND_BYTES => Decision::Deny(TOO_LONG.into()),
-        "Bash" => bash(&field("command"), 0, policy),
+        _ if shell && field("command").len() > MAX_COMMAND_BYTES => Decision::Deny(TOO_LONG.into()),
+        "Bash" => bash(&field("command"), 0, policy, env),
+        "PowerShell" => powershell::judge(&field("command"), policy, env),
 
         // ONLY THE PATH. An edit executes nothing, so its CONTENT is text a
         // person wrote and not a command anybody ran. Reading the content is
         // what made the guard refuse writing a digger command into
         // MIGRATION_NOTES.md — the exact action the rule it enforces asks for.
-        "Edit" | "Write" | "NotebookEdit" => {
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => {
             // AN EDIT THE GUARD CANNOT PLACE REFUSES: no string `file_path` or
             // `notebook_path` used to read as "" and allow.
             let placed = ["file_path", "notebook_path"]
@@ -103,6 +143,15 @@ pub fn pre_tool_guard(payload: &Value, policy: &Policy) -> Decision {
             let path = [field("file_path"), field("notebook_path")].join("\n");
             if policy.hook_config_tamper && is_the_exceptions_file(&path) {
                 return Decision::Deny(EXCEPTIONS.into());
+            }
+            if policy.hook_config_tamper && is_protected_path(&path, env.config_dir.as_deref()) {
+                return Decision::Deny(PROTECTED.into());
+            }
+            // A file named gh, or one in a PATH directory before gh (ADR-1020).
+            let plants_gh =
+                path.split('\n').any(|p| names_a_gh_file(p, true)) || is_before_gh(&path, env);
+            if policy.hook_config_tamper && plants_gh {
+                return Decision::Deny(SHADOW.into());
             }
             Decision::Allow
         }
@@ -116,17 +165,32 @@ fn env_split_string(words: &[String]) -> Option<&str> {
     let at = words.iter().position(|w| w == "env")?;
     let mut rest = words[at + 1..].iter();
     while let Some(word) = rest.next() {
-        if word == "-S" || word == "--split-string" {
-            return rest.next().map(String::as_str);
+        // `getopt`-style, as `runs.rs` reads wrappers: `-iS 'x'` and
+        // `-vS'x'` close a cluster with `-S`, `-u NAME` and `-C DIR` take a
+        // value, and a long option may be any prefix of its name.
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, value) = long.split_once('=').unzip();
+            let name = name.unwrap_or(long);
+            if !name.is_empty() && "split-string".starts_with(name) {
+                return value.or_else(|| rest.next().map(String::as_str));
+            }
+            if long_takes_a_value(word, &["--unset", "--chdir"]) {
+                rest.next();
+            }
+            continue;
         }
-        if let Some(value) = word.strip_prefix("--split-string=") {
-            return Some(value);
-        }
-        if let Some(value) = word.strip_prefix("-S").filter(|v| !v.is_empty()) {
-            return Some(value);
-        }
-        if !word.starts_with('-') {
-            return None;
+        let flags = word.strip_prefix('-')?;
+        let Some((at, letter)) = flags.char_indices().find(|(_, l)| "SuC".contains(*l)) else {
+            continue;
+        };
+        let attached = &flags[at + letter.len_utf8()..];
+        let value = if attached.is_empty() {
+            rest.next().map(String::as_str)
+        } else {
+            Some(attached)
+        };
+        if letter == 'S' {
+            return value;
         }
     }
     None
@@ -136,28 +200,60 @@ fn env_split_string(words: &[String]) -> Option<&str> {
 ///
 /// Bounded rather than trusted: a payload can nest `sh -c` inside `sh -c` as
 /// deeply as it likes, and a guard that recurses on it hangs the session it
-/// exists to protect. Two is every real case seen; deeper fails open for the
-/// terraform and commit rules. The exceptions-file rule needs no recursion: it
-/// refuses on the whole line's text.
-const MAX_NESTING: usize = 2; // ADR-0569-EXCEPTION(CB): bound on recursive -c unwrapping, not a per-install knob.
+/// exists to protect. Past the bound the guard REFUSES (ADR-1005): it used to
+/// skip what it did not read, which let `sh -c` three deep run terraform.
+/// The exceptions-file rule needs no recursion: it refuses on the whole
+/// line's text.
+const MAX_NESTING: usize = 3; // ADR-0569-EXCEPTION(CB): bound on recursive -c unwrapping, not a per-install knob.
 
-fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
+/// Whether any refusal is switched on at all.
+fn any_rule_on(policy: &Policy) -> bool {
+    policy.terraform_family || policy.git_commit_flags || policy.hook_config_tamper
+}
+
+/// The refusal for *script*, run one level below *depth*: its own verdict,
+/// or [`TOO_DEEP`] when that level is past [`MAX_NESTING`].
+fn nested(script: &str, depth: usize, policy: &Policy, env: &GuardEnv) -> Option<String> {
+    if depth >= MAX_NESTING {
+        let unread = !script.trim().is_empty() && any_rule_on(policy);
+        return unread.then(|| TOO_DEEP.to_string());
+    }
+    match bash(script, depth + 1, policy, env) {
+        Decision::Deny(reason) => Some(reason),
+        Decision::Allow => None,
+    }
+}
+
+fn bash(line: &str, depth: usize, policy: &Policy, env: &GuardEnv) -> Decision {
     // A BACKSLASH-NEWLINE IS A LINE CONTINUATION: the shell deletes the pair
     // before it reads words, so `exc\<newline>eptions` is one word. Removed
     // here, before any check reads the line.
-    let joined = line.replace("\\\n", "");
+    let (raw, joined) = (line, line.replace("\\\n", ""));
     let line = joined.as_str();
-    let commands = shell_commands(line);
+    let commands = split_at_braces(shell_commands(line));
     let inner = substitutions(line);
 
     // THE EXCEPTIONS FILE: ANY MENTION REFUSES, READ OR WRITE. A text
     // denylist cannot safely let through a command that names the file:
     // every allowance (a `cp` from it, a read with `cat`) was a parsing
     // question the shell could answer differently. See `tamper.rs`.
-    if policy.hook_config_tamper && names_the_exceptions_file(line, &commands) {
-        return Decision::Deny(EXCEPTIONS.into());
+    // REPLACED IN PROTECTED MODE (ADR-1028): the file in force is root-owned,
+    // so the kernel refuses a write as the user; what is left is a write as
+    // root, and a literal path (`guard/escalate.rs`).
+    if policy.hook_config_tamper && env.exceptions_protected {
+        if let Some(why) = escalate::refusal(raw, line, &commands) {
+            return Decision::Deny(why.into());
+        }
+    } else if policy.hook_config_tamper {
+        if let Some(why) = names_the_exceptions_file(line, &commands) {
+            return Decision::Deny(format!("{EXCEPTIONS} {why}"));
+        }
     }
-
+    if policy.hook_config_tamper
+        && bash_touches_a_protected_path(line, &commands, env.config_dir.as_deref())
+    {
+        return Decision::Deny(PROTECTED.into());
+    }
     // Asked over the WHOLE line, because this is the one rule where mentioning
     // is the act. It is still gated on something in the line doing the posting.
     // Each rule is skipped only when the exceptions file switched its id off;
@@ -170,22 +266,23 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
     // `$(...)` as though typed in place, but not a quoted one or a backtick
     // pair, so each is judged here as its own line (security review of the
     // 1590 change): `echo "$(cp x ~/.claude/<file>)"` writes the file.
-    if depth < MAX_NESTING {
-        for inner in &inner {
-            if let Decision::Deny(reason) = bash(inner, depth + 1, policy) {
-                return Decision::Deny(reason);
-            }
+    // Substitutions nested past the bound refuse here, in one pass, rather
+    // than after every level above them has been scanned.
+    if any_rule_on(policy) && depth + substitution_depth(line) > MAX_NESTING {
+        return Decision::Deny(TOO_DEEP.into());
+    }
+    for inner in &inner {
+        if let Some(reason) = nested(inner, depth, policy, env) {
+            return Decision::Deny(reason);
         }
     }
 
     for command in &commands {
         // BEFORE resolving the program: `env -S '<command>'` resolves to no
         // program at all, and used to be skipped as allowed.
-        if depth < MAX_NESTING {
-            if let Some(split) = env_split_string(&command.words) {
-                if let Decision::Deny(reason) = bash(split, depth + 1, policy) {
-                    return Decision::Deny(reason);
-                }
+        if let Some(split) = env_split_string(&command.words) {
+            if let Some(reason) = nested(split, depth, policy, env) {
+                return Decision::Deny(reason);
             }
         }
         let Some((program, args)) = executed(command) else {
@@ -199,20 +296,25 @@ fn bash(line: &str, depth: usize, policy: &Policy) -> Decision {
         }
         // `eval` runs its arguments as a line, exactly as `sh -c` runs its
         // script.
-        if program == "eval" && depth < MAX_NESTING {
-            if let Decision::Deny(reason) = bash(&args.join(" "), depth + 1, policy) {
+        if program == "eval" {
+            if let Some(reason) = nested(&args.join(" "), depth, policy, env) {
                 return Decision::Deny(reason);
             }
         }
         // A `-c` script is part of the command, so it is read. The rule is about
         // what runs, and `sh -c 'terraform apply'` runs terraform.
-        if SHELLS.contains(&program) && depth < MAX_NESTING {
-            if let Some(script) = value_of(args, "-c") {
-                if let Decision::Deny(reason) = bash(script, depth + 1, policy) {
+        if SHELLS.contains(&program) {
+            for script in shell_scripts(args) {
+                if let Some(reason) = nested(script, depth, policy, env) {
                     return Decision::Deny(reason);
                 }
             }
         }
+    }
+    // LAST, so a line that also breaks a rule above is refused under that
+    // rule, whose remedy is the one that applies.
+    if policy.hook_config_tamper && shadows_or_plants_gh(line, env) {
+        return Decision::Deny(SHADOW.into());
     }
     Decision::Allow
 }
@@ -382,40 +484,6 @@ fn mentions_a_digger_command(text: &str) -> bool {
         .windows(2)
         .any(|pair| pair[0] == "digger" && DIGGER_VERBS.contains(&pair[1].as_str()))
 }
-
-// ── the reasons, which a person reads ────────────────────────────────────────
-
-/// The longest Bash command judged, in bytes. A BOUND, not a knob: a real
-/// command is a few hundred bytes, and one this long is refused rather than
-/// risk the hook timing out.
-const MAX_COMMAND_BYTES: usize = 64 * 1024; // ADR-0569-EXCEPTION(CB): bound on parsing untrusted input, not a per-install knob.
-
-const TOO_LONG: &str = "refused: this Bash command is too long for the guard to check \
-     in time, so it was not checked. Split it, or put it in a script file.";
-
-const UNREADABLE: &str = "refused: the hook payload is not a tool call this guard can read \
-     (no string `tool_name`, or a Bash call with no string `command`), so this \
-     tool call was not checked. Retry it; if this repeats, run `yaadgaar verify`.";
-
-const UNPLACED: &str = "refused: this edit carries no string `file_path` or `notebook_path`, \
-     so the guard cannot tell which file it changes, and it was not checked. \
-     Retry it; if this repeats, run `yaadgaar verify`.";
-
-const HOOK_BYPASS: &str = "A commit that skips hooks is a commit whose checks did not run. \
-     Hook failure is signal, not an obstacle — fix the cause and re-run.";
-
-const TERRAFORM: &str = "terraform, tofu and tfp must never execute here, by any mechanism — \
-     including a fresh container, a nix run, or a CI trigger. Write the \
-     command into MIGRATION_NOTES.md and hand it over instead.";
-
-const DIGGER: &str = "A digger comment runs terraform against remote state through the \
-     orchestrator. This is refused even when explicitly instructed: put the \
-     comment in MIGRATION_NOTES.md for a human to post.";
-
-const EXCEPTIONS: &str = "The hook exceptions file is a durable, human-only decision. An agent \
-     once edited it to allow its own push, then reverted the file to conceal \
-     that. So the guard refuses any Bash command naming the file, a read \
-     included, and any edit of it. To read it, use the Read tool.";
 
 #[cfg(test)]
 mod tests;

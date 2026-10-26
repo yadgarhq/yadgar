@@ -331,7 +331,7 @@ fn every_way_of_naming_the_exceptions_file_is_refused() {
     let allowed: Vec<&&str> = MUST_BE_DENIED
         .iter()
         .chain(BYPASSES)
-        .filter(|c| !matches!(guard(&bash_call(c)), Decision::Deny(r) if r == EXCEPTIONS))
+        .filter(|c| !matches!(guard(&bash_call(c)), Decision::Deny(r) if r.starts_with(EXCEPTIONS)))
         .collect();
     assert!(
         allowed.is_empty(),
@@ -362,6 +362,49 @@ const UNDECIDABLE: &[&str] = &[
 fn what_cannot_be_known_still_refuses() {
     let allowed: Vec<&&str> = UNDECIDABLE.iter().filter(|c| !denies(c)).collect();
     assert!(allowed.is_empty(), "allowed: {allowed:#?}");
+}
+
+/// Two real commands refused under this rule (yaadgaar #431), with their
+/// paths and names made neutral but every shape the guard reads kept, and
+/// the word each refusal names. A loop variable is not a proven literal, so
+/// `$S/$d` and `$S/after/$b` may expand into the file. They STAY REFUSED:
+/// relaxation pending Max ruling. The second also ran into the brace bug
+/// fixed alongside (`b=$(…); … { … }`); its refusal must come from this
+/// rule, and the gh-shadowing check must pass it.
+const REFUSED_431: &[(&str, &str)] = &[
+    (
+        r#"cd /home/x/work/repo-wt-1 && echo "diffstat:[$(git diff --stat origin/master -- clusters/)]"; S=/tmp/claude-1000/-home-x-work-repo/878decb7-de3f-49b7-8e50-c074e8b8fe30/scratchpad/base; rm -rf $S; mkdir -p $S; git archive origin/master clusters | tar -xf - -C $S; for d in clusters/*/*/apps/app-config; do a=$(kustomize build $S/$d | sha256sum); b=$(kustomize build $d | sha256sum); [ "$a" = "$b" ] && echo "same $d ${a:0:12}" || echo "DIFF $d"; done"#,
+        "`$S/$d`",
+    ),
+    (
+        concat!(
+            r#"cd /home/x/work/repo-wt-2 && S=/tmp/claude-1000/-home-x-work-repo/878decb7-de3f-49b7-8e50-c074e8b8fe30/scratchpad; for d in clusters/*/*/apps/app-config; do n=$(echo $d|cut -d/ -f2,3|tr / _); kustomize build $d > $S/after/$n.yaml 2>/dev/null || echo FAIL $d; done; for f in $S/before/*.yaml; do b=$(basename $f); cmp -s $f $S/after/$b && echo "identical $b" || { echo "DIFF $b"; diff $f $S/after/$b; }; done; git diff; cat clusters/region-a/dev/apps/app-config/secrets/sec_generated.yaml"#,
+            "\n",
+            r#"echo ---sops; grep -rl "provider: sops" clusters/region-a/dev/flux-system | head -3; git ls-files clusters/region-a/dev/apps/app-config | grep -v enc | grep -i secret; ls clusters/region-a/dev/apps/app-config/secrets; grep -rn "sec_in_cluster" clusters/region-a/preprod/apps/app-config/kustomization.yaml; grep -rn "sops" clusters/region-a/preprod/flux-system/kustomizations/app-config.yaml"#
+        ),
+        "`$S/after/$b`",
+    ),
+];
+
+#[test]
+fn the_431_commands_stay_refused_under_this_rule() {
+    let env = GuardEnv {
+        home: Some("/home/x".into()),
+        before_gh: vec!["/home/x/.local/bin".into()],
+        ..GuardEnv::default()
+    };
+    for (line, word) in REFUSED_431 {
+        for env in [&GuardEnv::default(), &env] {
+            match pre_tool_guard(&bash_call(line), &Policy::ALL_ON, env) {
+                Decision::Deny(r) => assert!(
+                    r.starts_with(EXCEPTIONS) && r.contains(word),
+                    "{word}: refused for another reason: {r}"
+                ),
+                Decision::Allow => panic!("allowed: {line}"),
+            }
+        }
+        assert!(!shadows_or_plants_gh(line, &env), "{word}: the brace bug");
+    }
 }
 
 /// Shapes that look like an allowlisted one but are not: each falls back to

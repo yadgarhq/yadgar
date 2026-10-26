@@ -169,6 +169,21 @@ fn require_https(gateway: &str, path: &Path) -> Result<(), ConfigError> {
     }
 }
 
+/// Mint this install's id, if there is a config to mint it into. Moved here
+/// from `main.rs`, which sits at its size ceiling.
+///
+/// BEST EFFORT, and deliberately silent. A person who runs `install` before
+/// `login` has no config yet, and failing the install over an id that `serve`
+/// will mint anyway would refuse the whole agent environment for a header. The
+/// id is minted exactly once whichever of the two gets there first.
+pub fn mint_instance() {
+    if let Ok(mut config) = Config::load() {
+        if let Err(e) = config.ensure_instance() {
+            tracing::warn!("could not record this install's id: {e}");
+        }
+    }
+}
+
 /// The variable that overrides [`base_dir`], so tests never touch a real one.
 pub const CONFIG_DIR_ENV: &str = "YAADGAAR_CONFIG_DIR";
 

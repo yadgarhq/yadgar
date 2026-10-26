@@ -3,12 +3,33 @@
 use super::*;
 use serde_json::json;
 
+mod allowlist;
+mod bypass;
 mod disabled;
 mod exceptions_file;
+mod openers;
+mod powershell;
+mod protected;
+mod retired;
+mod shadow;
+mod substitution;
+mod widen;
 
 /// The guard with every refusal on: what a machine with no exceptions file gets.
+/// Every refusal a rule gives, for the tests that check them as a set.
+const ALL_REASONS: [&str; 8] = [
+    HOOK_BYPASS,
+    TERRAFORM,
+    DIGGER,
+    EXCEPTIONS,
+    PROTECTED,
+    TOO_DEEP,
+    PS_UNJUDGEABLE,
+    SHADOW,
+];
+
 fn guard(call: &Value) -> Decision {
-    pre_tool_guard(call, &Policy::ALL_ON)
+    pre_tool_guard(call, &Policy::ALL_ON, &GuardEnv::default())
 }
 
 fn bash_call(command: &str) -> Value {
@@ -337,7 +358,7 @@ fn a_nested_script_is_followed_to_a_stated_bound() {
     // a protected one: raising the bound would then fail a test whose easiest
     // fix is to loosen it, and the message on that failure would describe the
     // opposite of what went wrong.
-    assert_eq!(MAX_NESTING, 2);
+    assert_eq!(MAX_NESTING, 3);
 }
 
 #[test]
@@ -379,7 +400,7 @@ fn a_wrapper_does_not_change_what_runs() {
 fn a_refusal_says_what_to_do_instead() {
     // A guard that only says no is a guard somebody switches off. Every
     // reason names either the remedy or the reason the rule exists.
-    for reason in [HOOK_BYPASS, TERRAFORM, DIGGER, EXCEPTIONS] {
+    for reason in ALL_REASONS {
         assert!(reason.len() > 60, "a one-line refusal explains nothing");
     }
 }
@@ -430,11 +451,17 @@ fn a_refusal_names_the_rule_the_call_actually_broke() {
     // come to share one of the substrings above, the loop stops discriminating
     // and goes green on a swap again — silently, which is the failure it exists
     // to catch.
-    for needle in ["tofu and tfp", "skips hooks", "orchestrator", "conceal"] {
-        let carriers = [HOOK_BYPASS, TERRAFORM, DIGGER, EXCEPTIONS]
-            .iter()
-            .filter(|r| r.contains(needle))
-            .count();
+    for needle in [
+        "tofu and tfp",
+        "skips hooks",
+        "orchestrator",
+        "conceal",
+        "register and run",
+        "levels deep",
+        "hides its text",
+        "real gh",
+    ] {
+        let carriers = ALL_REASONS.iter().filter(|r| r.contains(needle)).count();
         assert_eq!(carriers, 1, "{needle:?} no longer names one rule only");
     }
 }

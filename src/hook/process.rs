@@ -113,7 +113,10 @@ fn decide(name: &str, init: impl FnOnce()) -> Decision {
         // hook that merely failed — and lets the tool run. A home that cannot
         // be found is `None`, and `None` leaves every guard on.
         let exceptions = dirs::home_dir().map(|h| install::Layout::new(&h).exceptions());
-        dispatch(name, read_stdin(), exceptions.as_deref())
+        // Its settings files are protected like `~/.claude`'s (ADR-1005), and
+        // the PATH directories before `gh` are resolved now (ADR-1020).
+        let env = crate::hook::GuardEnv::from_process();
+        dispatch(name, read_stdin(), exceptions.as_deref(), &env)
     })
 }
 
@@ -122,7 +125,7 @@ fn decide_open(name: &str, init: impl FnOnce()) -> Decision {
     contain(
         || {
             init();
-            dispatch(name, read_stdin(), None)
+            dispatch(name, read_stdin(), None, &crate::hook::GuardEnv::default())
         },
         |_| Decision::Allow,
     )

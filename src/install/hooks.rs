@@ -78,10 +78,10 @@ pub struct HookSpec {
 /// event the day the binary path went stale. They come back one at a time, each
 /// with the gateway endpoint that gives it something to do.
 ///
-/// Nothing else is needed to retire the eleven: [`merge`] strips EVERY entry of
-/// ours before appending, and "ours" is the invocation shape (see
-/// [`is_managed`]), not a handler name in this list. So the next `install` over
-/// a 0.1.4 machine removes all twelve and writes back these.
+/// Nothing else is needed to retire the eleven: [`merge`] takes EVERY hook of
+/// ours out of every event ("ours" is the invocation shape, see [`is_managed`],
+/// not a handler name here) and puts fresh entries back only under events this
+/// list names. So an `install` over 0.1.4 removes all twelve and writes these.
 pub const MANAGED_HOOKS: &[HookSpec] = &[
     HookSpec {
         event: "PreToolUse",
@@ -89,8 +89,10 @@ pub const MANAGED_HOOKS: &[HookSpec] = &[
         // an agent used Edit, not Bash, to add itself to the hook exceptions
         // file, pushed to a protected branch, then reverted the file to conceal
         // it. A Bash-only matcher never even routed that call to the guard.
+        // MultiEdit and PowerShell (ADR-1005, yaadgaar #227) are the same two
+        // routes by another tool name: an edit, and a shell.
         name: "pre-tool-guard",
-        matcher: "Bash|Edit|Write|NotebookEdit",
+        matcher: "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell",
         fire_and_forget: false,
     },
     HookSpec {
@@ -195,8 +197,9 @@ pub fn entry_commands(entry: &Value) -> Vec<&str> {
 /// **Never `hooks[event] = [...]`.** That is how the Python version silently
 /// discarded other tools' entries under the same key — on this machine, nix
 /// writes a `SessionStart` entry and a caveman-mode `PostToolUse` one, and a
-/// hard assignment deletes both without a word. Strip only what yadgar owns,
-/// append fresh, leave the rest exactly where it was.
+/// hard assignment deletes both without a word. Take out only what yadgar
+/// owns, put the fresh entries where ours sat (see [`place`]), and leave the
+/// rest exactly where it was.
 ///
 /// Idempotent, and positionally stable: our entry is replaced AT THE INDEX it
 /// already holds, so a second install writes back the same bytes. Removing it

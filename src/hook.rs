@@ -57,6 +57,8 @@ use std::path::Path;
 use serde_json::Value;
 
 mod guard;
+pub mod lock;
+pub mod mode;
 mod policy;
 pub mod process;
 pub mod session_start;
@@ -66,7 +68,7 @@ pub mod write_back;
 #[path = "hook/tests/shape.rs"]
 mod shape;
 
-pub use guard::pre_tool_guard;
+pub use guard::{pre_tool_guard, GuardEnv};
 pub use policy::{Policy, EXCEPTIONS_FILE};
 
 /// The exit status a positively matched refusal leaves.
@@ -93,13 +95,19 @@ pub enum Decision {
 /// be exercised by spawning a process, which is why it never was. *exceptions*
 /// is the path of the exceptions file, for the same reason: `None` when the
 /// home directory could not be found, which leaves every guard on.
-pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>) -> Decision {
+///
+/// *env* is what the hook process knows about its machine: the
+/// `CLAUDE_CONFIG_DIR` whose settings files the guard protects (ADR-1005),
+/// the home, and the `PATH` directories before the real `gh` (ADR-1020).
+pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>, env: &GuardEnv) -> Decision {
     match name {
         // The one handler, and the one that can refuse. Purely local — it
         // inspects the command it was handed and needs nothing from the
         // gateway. The exceptions file is read here and nowhere else, so a
         // stale entry for any other name never opens it.
-        "pre-tool-guard" => pre_tool_guard(payload, &Policy::load(exceptions)),
+        // Protected mode (ADR-1028) decides WHICH file: the root-owned one,
+        // verified, or the user's copy when there is none.
+        "pre-tool-guard" => guard_in_mode(payload, exceptions, env),
 
         // Write-back (ADR-1000). Only a mirrored task can be refused; every
         // other call passes through without a config read or a gateway call.
@@ -113,13 +121,37 @@ pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>) -> Decision {
     }
 }
 
+/// The guard, under the mode `env.protected_file` gives (`hook/mode.rs`).
+///
+/// Protected: the protected file's policy, the user's copy never opened,
+/// and the text rule retired. Invalid: every guard on, and a refusal says
+/// why no exception applied. Default: exactly what `main` did.
+fn guard_in_mode(payload: &Value, user: Option<&Path>, env: &GuardEnv) -> Decision {
+    let loaded = mode::load(env.protected_file.as_ref(), user);
+    let env = GuardEnv {
+        exceptions_protected: loaded.mode == mode::Mode::Protected,
+        ..env.clone()
+    };
+    match (pre_tool_guard(payload, &loaded.policy, &env), &loaded.mode) {
+        (Decision::Deny(reason), mode::Mode::Invalid(why)) => {
+            Decision::Deny(format!("{reason} {}", mode::invalid_note(why)))
+        }
+        (decision, _) => decision,
+    }
+}
+
 /// [`run`], for a payload that may not have been readable.
 ///
 /// An unreadable payload REFUSES under the guard and allows under every other
 /// name; the module docs say why.
-pub fn dispatch(name: &str, payload: Result<Value, String>, exceptions: Option<&Path>) -> Decision {
+pub fn dispatch(
+    name: &str,
+    payload: Result<Value, String>,
+    exceptions: Option<&Path>,
+    env: &GuardEnv,
+) -> Decision {
     match payload {
-        Ok(payload) => run(name, &payload, exceptions),
+        Ok(payload) => run(name, &payload, exceptions, env),
         Err(e) if name == "pre-tool-guard" => Decision::Deny(format!(
             "refused: the hook payload could not be read ({e}), so this tool call \
              was not checked. Retry it; if this repeats, run `yaadgaar verify`."
@@ -155,7 +187,12 @@ mod tests {
         // `run` was never called by anything, so eight passing tests of
         // `pre_tool_guard` read as coverage of a deny path that could not
         // refuse. This is the end-to-end seam: name in, reason out.
-        let decision = run("pre-tool-guard", &bash("git commit --no-verify -m x"), None);
+        let decision = run(
+            "pre-tool-guard",
+            &bash("git commit --no-verify -m x"),
+            None,
+            &GuardEnv::default(),
+        );
         let Decision::Deny(reason) = decision else {
             panic!("the dispatcher allowed a command the guard refuses");
         };
@@ -186,7 +223,7 @@ mod tests {
         // nothing, even on a call the guard would refuse.
         for name in RETIRED {
             assert_eq!(
-                run(name, &bash("terraform apply"), None),
+                run(name, &bash("terraform apply"), None, &GuardEnv::default()),
                 Decision::Allow,
                 "{name}"
             );
@@ -202,26 +239,118 @@ mod tests {
         let path = dir.join(EXCEPTIONS_FILE);
         std::fs::write(&path, r#"{"disabled_guards":["git_commit_flags"]}"#).unwrap();
         let call = bash("git commit --no-verify -m x");
-        assert_eq!(run("pre-tool-guard", &call, Some(&path)), Decision::Allow);
+        assert_eq!(
+            run("pre-tool-guard", &call, Some(&path), &GuardEnv::default()),
+            Decision::Allow
+        );
         assert!(matches!(
-            run("pre-tool-guard", &bash("terraform apply"), Some(&path)),
+            run(
+                "pre-tool-guard",
+                &bash("terraform apply"),
+                Some(&path),
+                &GuardEnv::default()
+            ),
             Decision::Deny(_)
         ));
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Protected mode through the dispatcher (ADR-1028). The user's copy
+    /// switches every guard off, so any of it honoured shows.
+    #[cfg(unix)]
+    mod protected_mode {
+        use super::*;
+        use crate::hook::mode::fixture::{chmod, tree};
+
+        const ALL_OFF: &str =
+            r#"{"disabled_guards":["terraform_family","git_commit_flags","hook_config_tamper"]}"#;
+        const READ: &str = "cat ~/.claude/yadgar-hook-exceptions.json";
+
+        fn env_for(loc: &mode::Location) -> GuardEnv {
+            GuardEnv {
+                protected_file: Some(loc.clone()),
+                ..GuardEnv::default()
+            }
+        }
+
+        fn user_copy(loc: &mode::Location) -> std::path::PathBuf {
+            let path = loc.anchor.join("home-copy.json");
+            std::fs::write(&path, ALL_OFF).unwrap();
+            path
+        }
+
+        fn guard(cmd: &str, user: &Path, env: &GuardEnv) -> Decision {
+            run("pre-tool-guard", &bash(cmd), Some(user), env)
+        }
+
+        #[test]
+        fn a_valid_protected_file_is_used_and_retires_the_text_rule() {
+            let loc = tree("hook-valid", r#"{"disabled_guards":[]}"#);
+            let (user, env) = (user_copy(&loc), env_for(&loc));
+            assert_eq!(guard(READ, &user, &env), Decision::Allow);
+            assert!(matches!(
+                guard("git commit --no-verify -m x", &user, &env),
+                Decision::Deny(_)
+            ));
+            std::fs::remove_dir_all(&loc.anchor).ok();
+        }
+
+        #[test]
+        fn an_invalid_protected_file_honours_nothing_and_says_why() {
+            let loc = tree("hook-invalid", ALL_OFF);
+            chmod(&loc.path(), 0o666);
+            let (user, env) = (user_copy(&loc), env_for(&loc));
+            let Decision::Deny(reason) = guard("git commit --no-verify -m x", &user, &env) else {
+                panic!("an invalid protected file switched a guard off");
+            };
+            assert!(reason.contains("Protected mode is broken"), "{reason}");
+            assert!(reason.contains("writable"), "{reason}");
+            // The text rule stays on: invalid is not protected.
+            assert!(
+                matches!(guard(READ, &user, &env), Decision::Deny(r) if r.contains("exceptions-file"))
+            );
+            std::fs::remove_dir_all(&loc.anchor).ok();
+        }
+
+        #[test]
+        fn no_protected_directory_is_todays_behaviour() {
+            let loc = tree("hook-absent", ALL_OFF);
+            std::fs::remove_dir_all(loc.dir()).unwrap();
+            let (user, env) = (user_copy(&loc), env_for(&loc));
+            // The user's copy is honoured, as on main.
+            assert_eq!(
+                guard("git commit --no-verify -m x", &user, &env),
+                Decision::Allow
+            );
+            let strict = loc.anchor.join("strict.json");
+            std::fs::write(&strict, "{}").unwrap();
+            assert!(matches!(guard(READ, &strict, &env), Decision::Deny(_)));
+            std::fs::remove_dir_all(&loc.anchor).ok();
+        }
+    }
+
     #[test]
     fn an_unreadable_payload_refuses_under_the_guard_and_only_there() {
         let err = || Err("not JSON: eof".to_string());
-        let Decision::Deny(reason) = dispatch("pre-tool-guard", err(), None) else {
+        let Decision::Deny(reason) = dispatch("pre-tool-guard", err(), None, &GuardEnv::default())
+        else {
             panic!("the guard allowed a call it could not read");
         };
         assert!(reason.contains("not JSON: eof"), "{reason}");
         for name in RETIRED {
-            assert_eq!(dispatch(name, err(), None), Decision::Allow, "{name}");
+            assert_eq!(
+                dispatch(name, err(), None, &GuardEnv::default()),
+                Decision::Allow,
+                "{name}"
+            );
         }
         assert!(matches!(
-            dispatch("pre-tool-guard", Ok(bash("terraform apply")), None),
+            dispatch(
+                "pre-tool-guard",
+                Ok(bash("terraform apply")),
+                None,
+                &GuardEnv::default()
+            ),
             Decision::Deny(_)
         ));
     }
@@ -244,7 +373,12 @@ mod tests {
             let handled = match (spec.event, spec.name) {
                 ("PreToolUse", write_back::TASK_UPDATE) => spec.matcher == "TaskUpdate",
                 ("PreToolUse", _) => matches!(
-                    run(spec.name, &bash("terraform apply"), None),
+                    run(
+                        spec.name,
+                        &bash("terraform apply"),
+                        None,
+                        &GuardEnv::default()
+                    ),
                     Decision::Deny(_)
                 ),
                 ("TaskCompleted", name) => name == write_back::TASK_COMPLETED,
@@ -263,9 +397,12 @@ mod tests {
         // A Bash call is never a TaskUpdate, and a TaskCompleted with no task
         // id is no mirrored task: both allow before anything is read.
         for name in write_back::NAMES {
-            assert_eq!(run(name, &bash("terraform apply"), None), Decision::Allow);
             assert_eq!(
-                dispatch(name, Err("not JSON".into()), None),
+                run(name, &bash("terraform apply"), None, &GuardEnv::default()),
+                Decision::Allow
+            );
+            assert_eq!(
+                dispatch(name, Err("not JSON".into()), None, &GuardEnv::default()),
                 Decision::Allow,
                 "{name}"
             );

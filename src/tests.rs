@@ -187,6 +187,19 @@ fn a_notice_is_printed_and_replaces_the_nothing_to_do_line() {
 }
 
 #[test]
+fn guard_has_status_and_lock_and_nothing_else() {
+    // ADR-1028: two verbs, no flags. A path or a user given on the command
+    // line is one an agent could choose, so `lock` takes neither.
+    let parse = |args: &[&str]| Cli::try_parse_from(args).map(|_| ());
+    assert!(parse(&["yaadgaar", "guard", "status"]).is_ok());
+    assert!(parse(&["yaadgaar", "guard", "lock"]).is_ok());
+    assert!(parse(&["yaadgaar", "guard", "lock", "--yes"]).is_ok());
+    assert!(parse(&["yaadgaar", "guard"]).is_err());
+    assert!(parse(&["yaadgaar", "guard", "lock", "/tmp/x"]).is_err());
+    assert!(parse(&["yaadgaar", "guard", "lock", "--user", "x"]).is_err());
+}
+
+#[test]
 fn issue_enrolment_never_prints_the_token_unless_asked_where_to_put_it() {
     // Ledger 1552: the token is a single-use secret. With neither sink named
     // the command is a usage error, before anything is sent or minted.

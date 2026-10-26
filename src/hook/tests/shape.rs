@@ -5,10 +5,10 @@
 
 use serde_json::{json, Value};
 
-use super::{pre_tool_guard, Decision, Policy};
+use super::{pre_tool_guard, Decision, GuardEnv, Policy};
 
 fn judge(payload: &Value) -> Decision {
-    pre_tool_guard(payload, &Policy::load(None))
+    pre_tool_guard(payload, &Policy::load(None), &GuardEnv::default())
 }
 
 #[test]

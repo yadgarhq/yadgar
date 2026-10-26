@@ -166,6 +166,13 @@ enum Command {
         name: String,
     },
 
+    /// The guard's protected mode (ADR-1028): `status` shows it, `lock`
+    /// (run with sudo, once) establishes it.
+    Guard {
+        #[command(subcommand)]
+        command: hook::lock::GuardCommand,
+    },
+
     /// Print who your saved credential names: your user_id, your account
     /// segment, and your private project prefix `local/<account_segment>/`
     /// (ADR-0959, ADR-0954). Never prints the credential itself.
@@ -228,7 +235,7 @@ async fn real_main() -> anyhow::Result<()> {
             // than in anything the agent client reads — so it is minted beside
             // the install and not inside it, and a machine that has not logged
             // in yet simply has nothing to mint into.
-            mint_instance();
+            config::mint_instance();
             // BEFORE the install, and never instead of it: registering ahead
             // of Claude Code is a legitimate order, so this informs rather
             // than refuses.
@@ -305,6 +312,7 @@ async fn real_main() -> anyhow::Result<()> {
         // Unreachable in practice: `main` takes `hook <name>` before clap, and
         // a `hook` with no name is a clap usage error that exits 2.
         Command::Hook { name } => hook::process::run(&name, || ()),
+        Command::Guard { command } => hook::lock::run(command),
         Command::Admin { command } => Ok(admin::run(command).await?),
         Command::Whoami => Ok(whoami::run().await?),
         Command::Harness { command } => harness::run(command),
@@ -368,20 +376,6 @@ fn init_tracing(ansi: bool) {
         .with_writer(std::io::stderr)
         .with_ansi(ansi)
         .init();
-}
-
-/// Mint this install's id, if there is a config to mint it into.
-///
-/// BEST EFFORT, and deliberately silent. A person who runs `install` before
-/// `login` has no config yet, and failing the install over an id that `serve`
-/// will mint anyway would refuse the whole agent environment for a header. The
-/// id is minted exactly once whichever of the two gets there first.
-fn mint_instance() {
-    if let Ok(mut config) = config::Config::load() {
-        if let Err(e) = config.ensure_instance() {
-            tracing::warn!("could not record this install's id: {e}");
-        }
-    }
 }
 
 /// The hint to log in again, when only a 0.1.4-era config exists.

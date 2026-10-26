@@ -23,6 +23,13 @@ pub struct GuardEnv {
     /// so nothing says where a planted gh would be found: EVERY absolute
     /// directory is protected (fail closed).
     pub path_unknown: bool,
+    /// Where the protected exceptions file is (ADR-1028): `None` off unix
+    /// and in a test that names none. Read by the hook, not by the guard.
+    pub protected_file: Option<crate::hook::mode::Location>,
+    /// The exceptions file in force is the protected one, verified, so the
+    /// Bash text rule for it is retired (ADR-1028). Set by the hook from
+    /// what it loaded, never from the process environment.
+    pub exceptions_protected: bool,
 }
 
 impl GuardEnv {
@@ -40,7 +47,16 @@ impl GuardEnv {
     pub fn from_process() -> Self {
         let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
         let home = dirs::home_dir();
-        Self::resolve(config_dir, home, std::env::var_os("PATH").as_deref())
+        // ONLY WHEN SOMETHING IS AT THE PROTECTED DIRECTORY, not followed:
+        // absent (NotFound only), default mode costs one `lstat` and no uid
+        // lookup. A symlink or an unreadable path is present, and verified.
+        let protected = crate::hook::mode::present(Path::new(crate::hook::mode::PROTECTED_DIR));
+        Self {
+            protected_file: protected
+                .then(crate::hook::mode::Location::system)
+                .flatten(),
+            ..Self::resolve(config_dir, home, std::env::var_os("PATH").as_deref())
+        }
     }
 
     /// The environment for *config_dir*, *home* and the `PATH` value *path*,
@@ -74,6 +90,8 @@ impl GuardEnv {
             home,
             before_gh,
             path_unknown: !absolute,
+            protected_file: None,
+            exceptions_protected: false,
         }
     }
 }

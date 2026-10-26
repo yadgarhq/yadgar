@@ -14,6 +14,16 @@ use crate::install::shellword::SimpleCommand;
 /// ([`OPENERS`]): the scanner keeps `do` in `for …; do X; done` as the
 /// first word, and reading it as the program skipped X for every rule.
 pub(super) fn executed(command: &SimpleCommand) -> Option<(&str, &[String])> {
+    executed_through(command, &mut |_| {})
+}
+
+/// [`executed`], also handing *seen* the name of every wrapper on the way
+/// (`sudo`, `env`, …) and the program's raw word: protected mode refuses
+/// privilege escalation by any of them (`guard/escalate.rs`).
+pub(super) fn executed_through<'a>(
+    command: &'a SimpleCommand,
+    seen: &mut dyn FnMut(&str),
+) -> Option<(&'a str, &'a [String])> {
     let mut rest = command.words.as_slice();
     loop {
         while rest.first().is_some_and(|w| OPENERS.contains(&w.as_str())) {
@@ -32,6 +42,7 @@ pub(super) fn executed(command: &SimpleCommand) -> Option<(&str, &[String])> {
             .strip_prefix(OPEN_BRACE)
             .filter(|w| !w.is_empty())
             .unwrap_or(first);
+        seen(first);
         let wrapper = program_name(first);
         let Some(options) = wrapper_options(wrapper) else {
             return Some((wrapper, &rest[1..]));
@@ -223,7 +234,7 @@ pub(super) fn substitutions(line: &str) -> Vec<String> {
 ///
 /// BOTH SEPARATORS, because this client ships to Windows and
 /// `C:\tools\terraform.exe` spells its path the other way.
-fn program_name(word: &str) -> &str {
+pub(super) fn program_name(word: &str) -> &str {
     let base = word.rsplit(['/', '\\']).next().unwrap_or(word);
     base.strip_suffix(".exe").unwrap_or(base)
 }

@@ -61,14 +61,19 @@
 //! **The exceptions file is the exception** (#64): any Bash command that names
 //! it refuses, read or write, because every attempt to let a read through was
 //! bypassed. `Edit`, `Write` and `NotebookEdit` on that path are exact. What a
-//! text check cannot see is listed in `guard/tamper.rs`.
+//! text check cannot see is listed in `guard/tamper.rs`. In protected mode
+//! (ADR-1028, `hook/mode.rs`) that Bash text rule is replaced by a literal
+//! protected-path rule and a privilege-escalation rule (`guard/escalate.rs`).
 
 use serde_json::Value;
 
 use super::{Decision, Policy};
 use crate::install::shellword::{shell_commands, SimpleCommand};
 
+mod deferred;
 mod env;
+mod escalate;
+mod inline;
 mod powershell;
 pub use env::GuardEnv;
 mod reasons;
@@ -223,7 +228,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &GuardEnv) -> Decision {
     // A BACKSLASH-NEWLINE IS A LINE CONTINUATION: the shell deletes the pair
     // before it reads words, so `exc\<newline>eptions` is one word. Removed
     // here, before any check reads the line.
-    let joined = line.replace("\\\n", "");
+    let (raw, joined) = (line, line.replace("\\\n", ""));
     let line = joined.as_str();
     let commands = split_at_braces(shell_commands(line));
     let inner = substitutions(line);
@@ -232,7 +237,14 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &GuardEnv) -> Decision {
     // denylist cannot safely let through a command that names the file:
     // every allowance (a `cp` from it, a read with `cat`) was a parsing
     // question the shell could answer differently. See `tamper.rs`.
-    if policy.hook_config_tamper {
+    // REPLACED IN PROTECTED MODE (ADR-1028): the file in force is root-owned,
+    // so the kernel refuses a write as the user; what is left is a write as
+    // root, and a literal path (`guard/escalate.rs`).
+    if policy.hook_config_tamper && env.exceptions_protected {
+        if let Some(why) = escalate::refusal(raw, line, &commands) {
+            return Decision::Deny(why.into());
+        }
+    } else if policy.hook_config_tamper {
         if let Some(why) = names_the_exceptions_file(line, &commands) {
             return Decision::Deny(format!("{EXCEPTIONS} {why}"));
         }

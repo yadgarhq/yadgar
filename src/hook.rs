@@ -57,6 +57,8 @@ use std::path::Path;
 use serde_json::Value;
 
 mod guard;
+pub mod lock;
+pub mod mode;
 mod policy;
 pub mod process;
 pub mod session_start;
@@ -103,7 +105,9 @@ pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>, env: &GuardEn
         // inspects the command it was handed and needs nothing from the
         // gateway. The exceptions file is read here and nowhere else, so a
         // stale entry for any other name never opens it.
-        "pre-tool-guard" => pre_tool_guard(payload, &Policy::load(exceptions), env),
+        // Protected mode (ADR-1028) decides WHICH file: the root-owned one,
+        // verified, or the user's copy when there is none.
+        "pre-tool-guard" => guard_in_mode(payload, exceptions, env),
 
         // Write-back (ADR-1000). Only a mirrored task can be refused; every
         // other call passes through without a config read or a gateway call.
@@ -114,6 +118,25 @@ pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>, env: &GuardEn
         // keep firing until the next `yaadgaar install` strips them. Allow,
         // silently, and let `verify` be the thing that names them.
         _ => Decision::Allow,
+    }
+}
+
+/// The guard, under the mode `env.protected_file` gives (`hook/mode.rs`).
+///
+/// Protected: the protected file's policy, the user's copy never opened,
+/// and the text rule retired. Invalid: every guard on, and a refusal says
+/// why no exception applied. Default: exactly what `main` did.
+fn guard_in_mode(payload: &Value, user: Option<&Path>, env: &GuardEnv) -> Decision {
+    let loaded = mode::load(env.protected_file.as_ref(), user);
+    let env = GuardEnv {
+        exceptions_protected: loaded.mode == mode::Mode::Protected,
+        ..env.clone()
+    };
+    match (pre_tool_guard(payload, &loaded.policy, &env), &loaded.mode) {
+        (Decision::Deny(reason), mode::Mode::Invalid(why)) => {
+            Decision::Deny(format!("{reason} {}", mode::invalid_note(why)))
+        }
+        (decision, _) => decision,
     }
 }
 
@@ -230,6 +253,80 @@ mod tests {
             Decision::Deny(_)
         ));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Protected mode through the dispatcher (ADR-1028). The user's copy
+    /// switches every guard off, so any of it honoured shows.
+    #[cfg(unix)]
+    mod protected_mode {
+        use super::*;
+        use crate::hook::mode::fixture::{chmod, tree};
+
+        const ALL_OFF: &str =
+            r#"{"disabled_guards":["terraform_family","git_commit_flags","hook_config_tamper"]}"#;
+        const READ: &str = "cat ~/.claude/yadgar-hook-exceptions.json";
+
+        fn env_for(loc: &mode::Location) -> GuardEnv {
+            GuardEnv {
+                protected_file: Some(loc.clone()),
+                ..GuardEnv::default()
+            }
+        }
+
+        fn user_copy(loc: &mode::Location) -> std::path::PathBuf {
+            let path = loc.anchor.join("home-copy.json");
+            std::fs::write(&path, ALL_OFF).unwrap();
+            path
+        }
+
+        fn guard(cmd: &str, user: &Path, env: &GuardEnv) -> Decision {
+            run("pre-tool-guard", &bash(cmd), Some(user), env)
+        }
+
+        #[test]
+        fn a_valid_protected_file_is_used_and_retires_the_text_rule() {
+            let loc = tree("hook-valid", r#"{"disabled_guards":[]}"#);
+            let (user, env) = (user_copy(&loc), env_for(&loc));
+            assert_eq!(guard(READ, &user, &env), Decision::Allow);
+            assert!(matches!(
+                guard("git commit --no-verify -m x", &user, &env),
+                Decision::Deny(_)
+            ));
+            std::fs::remove_dir_all(&loc.anchor).ok();
+        }
+
+        #[test]
+        fn an_invalid_protected_file_honours_nothing_and_says_why() {
+            let loc = tree("hook-invalid", ALL_OFF);
+            chmod(&loc.path(), 0o666);
+            let (user, env) = (user_copy(&loc), env_for(&loc));
+            let Decision::Deny(reason) = guard("git commit --no-verify -m x", &user, &env) else {
+                panic!("an invalid protected file switched a guard off");
+            };
+            assert!(reason.contains("Protected mode is broken"), "{reason}");
+            assert!(reason.contains("writable"), "{reason}");
+            // The text rule stays on: invalid is not protected.
+            assert!(
+                matches!(guard(READ, &user, &env), Decision::Deny(r) if r.contains("exceptions-file"))
+            );
+            std::fs::remove_dir_all(&loc.anchor).ok();
+        }
+
+        #[test]
+        fn no_protected_directory_is_todays_behaviour() {
+            let loc = tree("hook-absent", ALL_OFF);
+            std::fs::remove_dir_all(loc.dir()).unwrap();
+            let (user, env) = (user_copy(&loc), env_for(&loc));
+            // The user's copy is honoured, as on main.
+            assert_eq!(
+                guard("git commit --no-verify -m x", &user, &env),
+                Decision::Allow
+            );
+            let strict = loc.anchor.join("strict.json");
+            std::fs::write(&strict, "{}").unwrap();
+            assert!(matches!(guard(READ, &strict, &env), Decision::Deny(_)));
+            std::fs::remove_dir_all(&loc.anchor).ok();
+        }
     }
 
     #[test]

@@ -66,3 +66,23 @@ pub(super) const SHADOW: &str = "Refused under the gh-shadowing rule (ADR-1020, 
      a PATH directory that comes before the real gh (such as ~/.local/bin, when it does). \
      Call gh as it is; an install into such a directory goes through its installer \
      (`pipx install`), or into MIGRATION_NOTES.md for a person.";
+
+pub(super) const ESCALATE: &str = "Refused under the protected-mode escalation rule \
+     (ADR-1028). The exceptions file is root-owned so that no agent can change it, so in \
+     protected mode the guard refuses any line that mentions sudo, doas, su, pkexec, run0, \
+     systemd-run, machinectl, busybox or toybox, a program whose name is an expansion or a \
+     glob, and a shell or interpreter whose script it cannot see (stdin, `-s`, a pipe, a \
+     redirect, or a `-c` script holding `$`, a backtick or a byte escape), and inline code \
+     for any program (`-c`, `-e`, `--eval`, awk's program, vi's `+cmd`). Put the script \
+     in a file and run it by name; a step that needs root goes into MIGRATION_NOTES.md for \
+     a person.";
+
+pub(super) const PS_PROTECTED: &str = "Refused under the protected-mode PowerShell rule \
+     (ADR-1028). PowerShell reaches a program through more routes than the guard can read \
+     (`&`, dot-sourcing, `iex`, string concatenation, `Start-Process`), so in protected mode \
+     the PowerShell tool is refused outright. Use the Bash tool.";
+
+pub(super) const PROTECTED_FILE: &str = "Refused under the protected-mode path rule \
+     (ADR-1028). The guard's exceptions file lives under /etc/yaadgaar, root-owned, and only \
+     a person changes it (on NixOS, through the nix configuration). To read it, use the \
+     Read tool.";

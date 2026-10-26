@@ -183,7 +183,13 @@ fn read_bounded(path: &Path) -> std::io::Result<String> {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
     }
-    let file = options.open(path)?;
+    read_open(options.open(path)?)
+}
+
+/// The text of the already open *file*, if it is a regular file of at most
+/// [`MAX_BYTES`]: judged by `fstat` on the handle that is then read. Shared
+/// with protected mode (`mode/verify.rs`), which opens the file itself.
+pub(super) fn read_open(file: std::fs::File) -> std::io::Result<String> {
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

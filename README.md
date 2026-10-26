@@ -342,6 +342,128 @@ when the hook runs (ADR-1020). It judges
 tool calls only: `yaadgaar install`, run by nix or a person, still writes
 `settings.json`.
 
+### Protected mode (ADR-1028)
+
+An agent runs as you, so nothing running as you can stop it writing a file in
+your home. In the default mode above, the guard protects the exceptions file
+by refusing any Bash command whose text names it, and `yaadgaar guard status`
+reports that protection as ADVISORY.
+
+Protected mode puts the exceptions file where only root can write it:
+`/etc/yaadgaar/yadgar-hook-exceptions.json` (`/private/etc/yaadgaar/…` on
+macOS). On every hook call the guard opens each directory from `/` down and
+then the file, without following a symlink, and checks each open handle: owned
+by root and not writable by its group or by others. The guard itself must not
+run as root.
+
+- **Valid:** the guard reads that file and ignores the copy in `~/.claude`.
+  The Bash text rule that guesses at variables is retired, so a command that
+  only might name the file (`cat $S/$d`) is no longer refused. Two rules
+  replace it. A Bash line that may name `/etc/yaadgaar` is refused (read
+  the file with the Read tool). The escalation rule fails closed: any line
+  that mentions `sudo`, `doas`, `pkexec`, `run0`, `systemd-run`,
+  `machinectl`, `busybox` or `toybox` anywhere, in any case, or `su` as a
+  word, is refused, a `grep sudo` included. So is a program word that may
+  expand into one (`$S`, a glob), and a shell or interpreter whose script the
+  guard cannot see: no script argument, `-s` or `-`, a `<` redirect or
+  heredoc, an inline `-c`/`-e` script holding `$`, a backtick or a byte
+  escape, or the target of a pipe (`curl … | sh`). Inline code is refused for
+  every program (`-c`, `-e`, `-E`, `-S`, `-ex`, `--eval`, `--command` and
+  their kin, awk's program text, vi's `+cmd`), except a short allowlist of
+  programs that execute nothing (`grep -e`, `wc -c`, `jq -c`); for a shell
+  or interpreter any short-flag cluster holding `c`, `e` or `E` (`-xc`,
+  `-le`) counts. Put the code in a file and run the file. Wherever the guard
+  cannot determine the program — a wrapper with none after it (`xargs`,
+  `env -i`), a placeholder (`xargs -I{} {}`, `find -exec {}`), an expansion,
+  a pipe into nothing — it refuses. So does an unquoted brace expansion
+  (`{a,b}`, `{1..3}`), code stored to run later (`trap`, `bind -x`,
+  `complete -C`, `PROMPT_COMMAND` / `BASH_ENV` / `ENV` / `PS0`–`PS4`, git
+  keys git runs such as `alias.*`, `core.pager`, `core.sshCommand`,
+  `credential.helper`, `*.cmd`), a backslash-newline continuation, `xargs`
+  with a replacement token (`-I`, `-i`, `-J`, `--replace`), `parallel`, and
+  a `cd`, `pushd` or `popd` into `/etc` or through a `yaadgaar` directory.
+  The PowerShell tool is refused outright in protected mode: its call
+  operator, dot-sourcing, `iex` and string concatenation reach a program in
+  more ways than the guard can read. These are accepted false positives: an agent
+  never needs to escalate. An `Edit` or `Write` of the file by path is still
+  refused, and every other rule is unchanged.
+- **Present but not valid** (a loose mode, a foreign owner, a symlink, a
+  missing or malformed file): the guard honours no exception at all, keeps the
+  text rule, and each refusal says why.
+- **Absent** (no `/etc/yaadgaar`): the default mode, unchanged.
+
+Two commands:
+
+```bash
+yaadgaar guard status        # the mode, and why; prints no exception
+sudo yaadgaar guard lock     # once, at a terminal: install your exceptions as root:root 0644
+```
+
+Until the lock, your copy is a file any agent running as you can write, so
+`guard lock` never installs it unseen. It prints the exact content, the
+change against the current protected file, and every guard that content
+switches off, then asks you to type `yes`. Without a terminal it refuses.
+`--yes` skips the question only when the content is what the protected file
+already holds or switches no guard off.
+
+`guard lock` needs root (it exits non-zero otherwise) and takes the user from
+`SUDO_USER` and `SUDO_UID`, checked against `/etc/passwd`; it refuses when they
+are missing or name root. It creates `/etc/yaadgaar` as root:root 0755 (or
+repairs it), copies your `~/.claude/yadgar-hook-exceptions.json` into it as
+root:root 0644 (a file that switches nothing off if you have none), and
+verifies the result with the guard's own check. It refuses a source that is a
+symlink, is not yours, or is not a usable decision. Your copy is left as it
+was. Run it again and it changes nothing. To change an exception later, edit
+the root-owned file as root.
+
+On NixOS, do not use `guard lock`: the nix configuration is the source of
+truth. A module installs the file through `environment.etc` with
+`mode = "0644"` (a copied file, since the guard refuses the default symlink),
+and an exception changes by editing nix.
+
+**The control is ownership plus sudo; the text rules are best-effort defence
+in depth.** The kernel stops any write made as you to the root-owned file, so
+the only agent write left is one made as root. That holds only while no agent
+can become root without you: set `Defaults timestamp_timeout=0` in sudoers, and
+keep NOPASSWD rules and doas `nopass` / `persist` off your account.
+`timestamp_type=tty` is NOT enough and is reported DEGRADED: an agent harness
+runs in the terminal that holds the ticket, and reuses it for the timeout.
+`guard status` reports `mode: protected` only when these hold; otherwise it
+reports `mode: PROTECTED (DEGRADED: sudo reusable)` and prints the exact fix.
+As a normal user it cannot read sudoers and reports `DEGRADED: sudo settings
+not verified`, so run `sudo yaadgaar guard status` to see the verdict.
+`guard lock` prints the same verdict. Run as root, both read `sudo -l -U`
+through a root-owned sudo at a fixed path (`/run/wrappers/bin/sudo`,
+`/usr/bin/sudo`, `/bin/sudo`), never through `PATH`; if none verifies, the
+verdict is UNKNOWN. A sticky root-owned directory above the guard binary
+(`/nix/store`, 1775 root:nixbld) is accepted for the binary line only, when the
+entry below it is root-owned and not group- or other-writable.
+
+The sudo check fails closed: it reports OK only when its parse of sudoers is
+complete and unambiguous. An include it did not read, a scoped `Defaults`
+(`Defaults:user`, `@host`, `>runas`, `!cmd`), or a timestamp option it does
+not model makes the verdict UNKNOWN, which reads as DEGRADED. A repeated
+option takes its last value, as sudo does. NOPASSWD and `!authenticate`
+anywhere are DEGRADED. Run as root, `guard status` and `guard lock` also read
+`sudo -l -U <user>`. Membership of a root-equivalent group (`docker`, `lxd`,
+`incus`, `libvirt`/`libvirtd`, `disk`) is DEGRADED too, and the line names
+the group and why: `qemu:///system` can attach host disks to a VM, for
+example.
+
+Accepted residuals, which no text check can see: a script file the agent
+wrote and runs by name, a payload downloaded to a file and run, a symlink made
+in one call and run in the next, an interpreter or inline-code option the
+lists above do not know, and a container runtime or VM manager the user can
+reach (docker, podman with a rootful socket, lxd, incus, libvirt). The guard
+does not refuse container commands by text; `guard status` names the groups
+instead.
+
+Protected mode is also only as strong as the binary and the registration that
+run the guard. `guard status` reports whether the running binary and every
+directory above it are root-owned. Protection is real only when the guard
+binary is root-owned and the hook is registered in the harness's system-wide
+configuration, which a user-level `pipx` install does not do.
+
 ## Packaging
 
 Rust, shipped to PyPI as wheels via maturin. The language follows the rest of the

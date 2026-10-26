@@ -295,6 +295,212 @@ mod sudo_check {
 }
 
 #[cfg(unix)]
+mod attestation_verdict {
+    use crate::hook::lock::sudo::verdict;
+    use crate::hook::lock::{attestation, attestation_line, Facts};
+    use std::path::Path;
+
+    fn ok() -> Vec<String> {
+        verdict(Some("Defaults timestamp_timeout=0"), None)
+    }
+
+    #[test]
+    fn the_attestation_is_safe_only_for_a_verdict_status_calls_safe() {
+        let none: &[&Path] = &[Path::new("/nonexistent-yaadgaar-input")];
+        let mut cases: Vec<Vec<String>> = [
+            None,
+            Some("Defaults timestamp_type=tty"),
+            Some("Defaults timestamp_timeout=0\nmax ALL=(ALL) NOPASSWD:ALL"),
+            Some("Defaults timestamp_timeout=0,!authenticate"),
+            Some("@include /x"),
+        ]
+        .iter()
+        .map(|s| verdict(*s, None))
+        .collect();
+        for doas in ["permit nopass max", "permit persist max"] {
+            cases.push(verdict(Some("Defaults timestamp_timeout=0"), Some(doas)));
+        }
+        for extra in [
+            "sudo -l: WARNING — sudo lists a NOPASSWD rule for this user",
+            "sudo -l: UNKNOWN — no root-owned sudo at a fixed path verifies (x)",
+            // A root-equivalent group keeps the strict rules too.
+            "groups: WARNING — member of `libvirtd`, which x: root by another name",
+        ] {
+            let mut lines = ok();
+            lines.push(extra.into());
+            cases.push(lines);
+        }
+        for lines in cases {
+            let text = attestation(&lines, &facts(), none);
+            assert!(text.contains("verdict: NOT SAFE"), "{lines:?}: {text}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_group_set_keeps_the_strict_rules() {
+        let none: &[&Path] = &[Path::new("/nonexistent-yaadgaar-input")];
+        let text = attestation(
+            &ok(),
+            &Facts {
+                gids: None,
+                ..facts()
+            },
+            none,
+        );
+        assert!(text.contains("verdict: NOT SAFE"), "{text}");
+        let text = attestation(&ok(), &facts(), none);
+        assert!(text.contains("user gids: 100 1000\n"), "{text}");
+    }
+
+    fn facts() -> Facts<'static> {
+        Facts {
+            nsswitch: Ok(None),
+            sudo_conf: Ok(None),
+            polkit_escalators: Vec::new(),
+            polkit_service: Vec::new(),
+            pam: Ok(()),
+            gids: Some(&[1000, 100]),
+        }
+    }
+
+    #[test]
+    fn polkit_reachable_over_d_bus_keeps_the_strict_rules() {
+        let none: &[&Path] = &[Path::new("/nonexistent-yaadgaar-input")];
+        for found in [
+            "/usr/share/dbus-1/system-services/org.freedesktop.PolicyKit1.service",
+            "a running polkitd",
+        ] {
+            let text = attestation(
+                &ok(),
+                &Facts {
+                    polkit_service: vec![found.into()],
+                    ..facts()
+                },
+                none,
+            );
+            assert!(
+                text.contains("verdict: NOT SAFE") && text.contains(found),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pam_stack_that_may_not_ask_a_password_keeps_the_strict_rules() {
+        let none: &[&Path] = &[Path::new("/nonexistent-yaadgaar-input")];
+        let text = attestation(
+            &ok(),
+            &Facts {
+                pam: Err("PAM module pam_permit may authenticate without a password".into()),
+                ..facts()
+            },
+            none,
+        );
+        assert!(
+            text.contains("verdict: NOT SAFE") && text.contains("pam_permit"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn status_says_whether_the_relaxed_rules_are_on() {
+        use crate::hook::lock::relaxed_line;
+        assert!(relaxed_line(true).starts_with("relaxed rules: ON"));
+        assert!(relaxed_line(false).starts_with("relaxed rules: OFF"));
+    }
+
+    #[test]
+    fn lock_attests_safe_only_for_a_safe_verdict_read_from_files() {
+        let none: &[&Path] = &[Path::new("/nonexistent-yaadgaar-input")];
+        let safe_one = attestation(&ok(), &facts(), none);
+        assert!(safe_one.contains("verdict: SAFE"), "{safe_one}");
+        assert!(attestation_line(&safe_one, true).contains("SAFE —"));
+        assert!(attestation_line(&safe_one, false).contains("strict rules"));
+        let unsafe_for = |lines: Vec<String>, f: Facts| {
+            let text = attestation(&lines, &f, none);
+            assert!(text.contains("verdict: NOT SAFE"), "{text}");
+            assert!(attestation_line(&text, true).contains("strict rules"));
+        };
+        unsafe_for(verdict(None, None), facts());
+        unsafe_for(
+            ok(),
+            Facts {
+                nsswitch: Ok(Some("sudoers: files sss\n")),
+                ..facts()
+            },
+        );
+        unsafe_for(
+            ok(),
+            Facts {
+                nsswitch: Err("denied".into()),
+                ..facts()
+            },
+        );
+    }
+
+    #[test]
+    fn a_polkit_escalator_on_the_system_keeps_the_strict_rules() {
+        // polkit may keep an authorisation (`auth_admin_keep`), and its JS
+        // rules cannot be modelled: any of its escalators present is NOT SAFE.
+        let none: &[&Path] = &[Path::new("/nonexistent-yaadgaar-input")];
+        let text = attestation(
+            &ok(),
+            &Facts {
+                polkit_escalators: vec!["/usr/bin/run0".into()],
+                ..facts()
+            },
+            none,
+        );
+        assert!(text.contains("verdict: NOT SAFE"), "{text}");
+        assert!(text.contains("/usr/bin/run0"), "{text}");
+    }
+
+    #[test]
+    fn a_sudo_conf_policy_directive_the_verdict_does_not_model_is_not_safe() {
+        let none: &[&Path] = &[Path::new("/nonexistent-yaadgaar-input")];
+        for conf in [
+            "Plugin sudoers_policy sudoers.so sudoers_file=/opt/x\n",
+            "Plugin my_policy my.so\n",
+            "Path askpass /opt/x\n",
+        ] {
+            let text = attestation(
+                &ok(),
+                &Facts {
+                    sudo_conf: Ok(Some(conf)),
+                    ..facts()
+                },
+                none,
+            );
+            assert!(text.contains("verdict: NOT SAFE"), "{conf}: {text}");
+        }
+        for conf in [
+            "# Plugin x\n",
+            "Set disable_coredump false\n",
+            "Debug sudo /var/log/x all\n",
+        ] {
+            let text = attestation(
+                &ok(),
+                &Facts {
+                    sudo_conf: Ok(Some(conf)),
+                    ..facts()
+                },
+                none,
+            );
+            assert!(text.contains("verdict: SAFE"), "{conf}: {text}");
+        }
+        let text = attestation(
+            &ok(),
+            &Facts {
+                sudo_conf: Err("denied".into()),
+                ..facts()
+            },
+            none,
+        );
+        assert!(text.contains("verdict: NOT SAFE"), "{text}");
+    }
+}
+
+#[cfg(unix)]
 mod review {
     use super::*;
     use crate::hook::lock::install::Plan;
@@ -429,6 +635,25 @@ mod tree {
         assert_eq!(mode_of(&loc.path()), 0o644);
         // The user's copy is copied, never moved or changed.
         assert_eq!(std::fs::read_to_string(&source).unwrap(), SOURCE);
+        std::fs::remove_dir_all(&loc.anchor).ok();
+    }
+
+    #[test]
+    fn the_attestation_is_written_root_owned_beside_the_file_and_verifies() {
+        use crate::hook::mode::attest::{holds, safe_text, unsafe_text, ATTESTATION_FILE};
+        let (loc, source, owner) = fresh("lock-attest");
+        lock_into(&loc, &source, owner.uid, owner).unwrap();
+        let input = loc.anchor.join("sudoers");
+        std::fs::write(&input, "x").unwrap();
+        let inputs = [input.as_path()];
+        install::write_attestation(&loc, &safe_text(&inputs, &[]).unwrap(), owner).unwrap();
+        assert_eq!(mode_of(&loc.dir().join(ATTESTATION_FILE)), 0o644);
+        assert!(holds(&loc, &inputs, &[]));
+        // A later lock replaces it, a NOT SAFE one included.
+        install::write_attestation(&loc, &unsafe_text("sudo reusable"), owner).unwrap();
+        assert!(!holds(&loc, &inputs, &[]));
+        // The exceptions file is untouched by either.
+        assert_eq!(verified(&loc), Ok(SOURCE.to_string()));
         std::fs::remove_dir_all(&loc.anchor).ok();
     }
 

@@ -76,19 +76,37 @@ const INTERPRETERS: &[&str] = &[
 /// The protected-mode refusal for a Bash line, if any: *raw* as the
 /// agent sent it, *line* with its continuations joined, scanned as
 /// *commands*.
-pub(super) fn refusal(raw: &str, line: &str, commands: &[SimpleCommand]) -> Option<&'static str> {
+///
+/// *sudo_safe* (ruling B on ADR-1028): a root-written attestation says no
+/// escalator can be used without a person (`hook/mode/attest.rs`). Then
+/// only a line that names an escalator, or the protected path, refuses: a
+/// hidden escalation would still stop at a password prompt. Otherwise every
+/// rule below applies (fail closed).
+pub(super) fn refusal(
+    raw: &str,
+    line: &str,
+    commands: &[SimpleCommand],
+    sudo_safe: bool,
+) -> Option<&'static str> {
     let toward = commands.iter().any(super::deferred::changes_toward_it);
     if names_the_protected_dir(line) || toward {
         return Some(super::reasons::PROTECTED_FILE);
     }
-    // A backslash-newline joins words the agent split (`s\<newline>udo`):
-    // refused outright rather than modelled.
-    let escalation = raw.contains("\\\n") || escalates(line, commands);
+    let escalation = if sudo_safe {
+        names_one(line, commands)
+    } else {
+        // A backslash-newline joins words the agent split (`s\<newline>udo`):
+        // refused outright rather than modelled.
+        raw.contains("\\\n") || escalates(line, commands)
+    };
     escalation.then_some(super::reasons::ESCALATE)
 }
 
-/// Whether *line* (scanned as *commands*) escalates privilege, or may.
-fn escalates(line: &str, commands: &[SimpleCommand]) -> bool {
+/// Whether *line* (scanned as *commands*) names an escalator: in its text,
+/// or as a program word that is, or may expand to, one. A brace list on a
+/// program word is expanded and each alternative judged; one too large to
+/// expand refuses.
+fn names_one(line: &str, commands: &[SimpleCommand]) -> bool {
     let plain = plain(line);
     if NAMES.iter().any(|n| plain.contains(n)) {
         return true;
@@ -97,14 +115,23 @@ fn escalates(line: &str, commands: &[SimpleCommand]) -> bool {
     if words.into_iter().any(|w| w == SU) {
         return true;
     }
-    let program_may = |c: &SimpleCommand| {
-        let mut hit = false;
-        executed_through(c, &mut |w| hit |= may_expand_to_one(w) || is_named(w));
-        hit
-    };
+    let one = |w: &str| may_expand_to_one(w) || is_named(w);
     commands.iter().any(|c| {
-        program_may(c)
-            || undetermined(c)
+        let mut hit = false;
+        executed_through(c, &mut |w| {
+            hit |= brace_expand(w).is_none_or(|alts| alts.iter().any(|a| one(a)));
+        });
+        hit
+    })
+}
+
+/// Whether *line* (scanned as *commands*) escalates privilege, or may.
+fn escalates(line: &str, commands: &[SimpleCommand]) -> bool {
+    if names_one(line, commands) {
+        return true;
+    }
+    commands.iter().any(|c| {
+        undetermined(c)
             || hides_its_script(c)
             || super::inline::runs_inline_code(c)
             || super::deferred::defers_code(c)

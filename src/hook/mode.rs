@@ -55,6 +55,8 @@ use super::policy::Policy;
 use super::policy::EXCEPTIONS_FILE;
 
 #[cfg(unix)]
+pub mod attest;
+#[cfg(unix)]
 pub(crate) mod verify;
 #[cfg(unix)]
 pub use verify::{effective_uid, verify};
@@ -119,6 +121,32 @@ impl Location {
     /// The file's full path.
     pub fn path(&self) -> PathBuf {
         self.dir().join(&self.file)
+    }
+}
+
+/// Whether a verified SAFE sudo attestation sits beside *location*'s
+/// exceptions file and matches *inputs* (`None`: the production
+/// `attest::inputs`) and the group set *gids* (`None`: this process's):
+/// what relaxes protected mode (ADR-1028, ruling B). Always `false` off
+/// unix.
+pub fn sudo_attested(
+    location: &Location,
+    inputs: Option<&[PathBuf]>,
+    gids: Option<&[u32]>,
+) -> bool {
+    #[cfg(unix)]
+    {
+        let all = inputs.map_or_else(attest::inputs, <[PathBuf]>::to_vec);
+        let refs: Vec<&Path> = all.iter().map(PathBuf::as_path).collect();
+        let Some(gids) = gids.map(<[u32]>::to_vec).or_else(attest::current_gids) else {
+            return false;
+        };
+        attest::holds(location, &refs, &gids)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (location, inputs, gids);
+        false
     }
 }
 

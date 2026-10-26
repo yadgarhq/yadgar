@@ -64,6 +64,8 @@
 //! text check cannot see is listed in `guard/tamper.rs`. In protected mode
 //! (ADR-1028, `hook/mode.rs`) that Bash text rule is replaced by a literal
 //! protected-path rule and a privilege-escalation rule (`guard/escalate.rs`).
+//! Under a verified SAFE sudo attestation (`hook/mode/attest.rs`, ruling B)
+//! the escalation rule refuses only escalator names.
 
 use serde_json::Value;
 
@@ -241,7 +243,7 @@ fn bash(line: &str, depth: usize, policy: &Policy, env: &GuardEnv) -> Decision {
     // so the kernel refuses a write as the user; what is left is a write as
     // root, and a literal path (`guard/escalate.rs`).
     if policy.hook_config_tamper && env.exceptions_protected {
-        if let Some(why) = escalate::refusal(raw, line, &commands) {
+        if let Some(why) = escalate::refusal(raw, line, &commands, env.sudo_safe) {
             return Decision::Deny(why.into());
         }
     } else if policy.hook_config_tamper {

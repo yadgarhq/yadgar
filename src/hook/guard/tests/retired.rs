@@ -23,7 +23,7 @@ fn decide_ps(command: &str, env: &GuardEnv) -> Decision {
 }
 
 /// PowerShell's own ways to run what the guard cannot read (sixth review).
-const PS_FAIL_CLOSED: &[&str] = &[
+pub(super) const PS_FAIL_CLOSED: &[&str] = &[
     "& $x",
     "& notepad.exe",
     "& ('i'+'d')",
@@ -88,7 +88,7 @@ const TEXT_RULE_ONLY: &[&str] = &[
 
 /// The protected file by its literal path: refused in protected mode (a
 /// literal match, no variable guessing), read or write. The Read tool reads it.
-const PROTECTED_LITERAL: &[&str] = &[
+pub(super) const PROTECTED_LITERAL: &[&str] = &[
     "cat /etc/yaadgaar/yadgar-hook-exceptions.json",
     "jq . '/etc/yaadgaar/yadgar-hook-exceptions.json'",
     "ls /ETC/YAADGAAR",
@@ -112,7 +112,7 @@ const PROTECTED_LITERAL: &[&str] = &[
 
 /// Privilege escalation, refused outright in protected mode: an agent with
 /// a cached sudo timestamp could otherwise rewrite the root-owned file.
-const ESCALATION: &[&str] = &[
+pub(super) const ESCALATION: &[&str] = &[
     "sudo tee /etc/yaadgaar/yadgar-hook-exceptions.json",
     "sudo -n cp x /etc/yaadgaar/yadgar-hook-exceptions.json",
     "S=/etc/yaadgaar; sudo cp x $S/f",
@@ -203,7 +203,7 @@ fn escalation_is_not_refused_in_default_mode() {
 /// shape by shape. Any mention of an escalator refuses, whatever the case,
 /// a multi-call binary refuses, and a shell or interpreter that reads a
 /// script the guard cannot see refuses.
-const FAIL_CLOSED: &[&str] = &[
+pub(super) const FAIL_CLOSED: &[&str] = &[
     // Case: the name is matched ignoring case.
     "SUDO -n true",
     "Sudo x",
@@ -305,7 +305,7 @@ fn protected_mode_still_allows_ordinary_work() {
 /// INLINE CODE, refused for every program but the allowlist (fourth
 /// security review): the guard stops modelling what each interpreter's
 /// inline script can do. Put the code in a file and run it by name.
-const INLINE_CODE: &[&str] = &[
+pub(super) const INLINE_CODE: &[&str] = &[
     "python3 -c 'print(1)'",
     "sh -c 'ls | wc -l'",
     "bash -c ls",

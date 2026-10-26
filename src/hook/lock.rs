@@ -73,12 +73,32 @@ fn status() -> Vec<String> {
     }
     let user = dirs::home_dir().map(|h| crate::install::Layout::new(&h).exceptions());
     let loaded = super::mode::load(location.as_ref(), user.as_deref());
-    status_lines(
+    let mut lines = status_lines(
         &loaded,
         location.as_ref(),
         binary_line(),
         sudo::this_machine(location.as_ref().and_then(|l| l.current_uid)),
-    )
+    );
+    if loaded.mode == super::mode::Mode::Protected {
+        // Judged for THIS process's groups: run as the user, not with sudo.
+        let held = location
+            .as_ref()
+            .is_some_and(|l| super::mode::sudo_attested(l, None, None));
+        lines.push(relaxed_line(held));
+    }
+    lines
+}
+
+/// What `guard status` says about the relaxed rules, given whether a SAFE
+/// attestation holds. PURE.
+pub fn relaxed_line(held: bool) -> String {
+    if held {
+        "relaxed rules: ON — the sudo attestation verifies and matches today's settings".into()
+    } else {
+        "relaxed rules: OFF — no verified SAFE sudo attestation matches today's settings and \
+         your groups (run `sudo yaadgaar guard lock` to refresh it)"
+            .into()
+    }
 }
 
 /// What `guard status` prints, given what it found. PURE.
@@ -205,9 +225,10 @@ fn lock_system(yes: bool) -> anyhow::Result<Vec<String>> {
     // NOTHING IS INSTALLED UNSEEN (`lock/review.rs`): the source is a file an
     // agent could have written.
     let target = location.path().display().to_string();
+    let verdict = sudo::this_machine(Some(uid));
     for line in review::review_lines(&plan, &target)
         .into_iter()
-        .chain(sudo::this_machine(Some(uid)))
+        .chain(verdict.iter().cloned())
     {
         println!("{line}");
     }
@@ -227,6 +248,23 @@ fn lock_system(yes: bool) -> anyhow::Result<Vec<String>> {
         }
     }
     let mut lines = install::apply(&location, &plan, owner).map_err(anyhow::Error::msg)?;
+    let all = super::mode::attest::inputs();
+    let inputs: Vec<&std::path::Path> = all.iter().map(PathBuf::as_path).collect();
+    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    let gids = super::mode::attest::gids_of(&passwd, &group, uid);
+    let text = attesting::for_this_machine(&verdict, &inputs, gids.as_deref());
+    install::write_attestation(&location, &text, owner).map_err(anyhow::Error::msg)?;
+    // JUDGED AS THE HOOK WILL JUDGE IT, for the user and not for root: what
+    // was written may still not hold (an input changed meanwhile, or the
+    // file is past the read cap).
+    let as_hook = Location {
+        current_uid: Some(uid),
+        ..location.clone()
+    };
+    let holds = gids
+        .as_deref()
+        .is_some_and(|g| super::mode::sudo_attested(&as_hook, None, Some(g)));
+    lines.push(attestation_line(&text, holds));
     lines.push(format!(
         "{} is left as it was. Protected mode also needs a root-owned guard binary and a \
          system-wide hook registration (ADR-1028): see `yaadgaar guard status`. On NixOS the \
@@ -242,7 +280,15 @@ fn lock_system(_yes: bool) -> anyhow::Result<Vec<String>> {
 }
 
 #[cfg(unix)]
+mod attesting;
+#[cfg(unix)]
+pub use attesting::attestation_line;
+#[cfg(all(unix, test))]
+pub use attesting::{attestation, Facts};
+#[cfg(unix)]
 mod install;
+#[cfg(unix)]
+mod pam;
 #[cfg(all(unix, test))]
 pub use install::lock_into;
 #[cfg(unix)]

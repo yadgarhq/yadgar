@@ -13,6 +13,7 @@ mod protected;
 mod retired;
 mod shadow;
 mod substitution;
+mod sudo_safe;
 mod widen;
 
 /// The guard with every refusal on: what a machine with no exceptions file gets.

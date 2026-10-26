@@ -30,6 +30,17 @@ pub struct GuardEnv {
     /// Bash text rule for it is retired (ADR-1028). Set by the hook from
     /// what it loaded, never from the process environment.
     pub exceptions_protected: bool,
+    /// A root-written attestation says sudo cannot be reused without a
+    /// person (ADR-1028, ruling B; `hook/mode/attest.rs`), so protected mode
+    /// refuses only escalator names and the protected path. Set by the hook,
+    /// in protected mode only, never from the process environment.
+    pub sudo_safe: bool,
+    /// The inputs the attestation is checked against: `None` is the
+    /// production list (`attest::inputs`). A test names scratch files.
+    pub sudo_inputs: Option<Vec<PathBuf>>,
+    /// The group set the attestation must match: `None` is this process's
+    /// own (`getgroups` and the effective gid). A test names its own.
+    pub sudo_gids: Option<Vec<u32>>,
 }
 
 impl GuardEnv {
@@ -92,6 +103,9 @@ impl GuardEnv {
             path_unknown: !absolute,
             protected_file: None,
             exceptions_protected: false,
+            sudo_safe: false,
+            sudo_inputs: None,
+            sudo_gids: None,
         }
     }
 }

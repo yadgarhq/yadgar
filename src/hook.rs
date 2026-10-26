@@ -124,12 +124,21 @@ pub fn run(name: &str, payload: &Value, exceptions: Option<&Path>, env: &GuardEn
 /// The guard, under the mode `env.protected_file` gives (`hook/mode.rs`).
 ///
 /// Protected: the protected file's policy, the user's copy never opened,
-/// and the text rule retired. Invalid: every guard on, and a refusal says
+/// and the text rule retired; under a verified SAFE sudo attestation, only
+/// escalator names and the protected path refuse (ADR-1028, ruling B). Invalid: every guard on, and a refusal says
 /// why no exception applied. Default: exactly what `main` did.
 fn guard_in_mode(payload: &Value, user: Option<&Path>, env: &GuardEnv) -> Decision {
     let loaded = mode::load(env.protected_file.as_ref(), user);
+    let protected = loaded.mode == mode::Mode::Protected;
+    // ONLY IN PROTECTED MODE, and only from the root-owned attestation:
+    // default and invalid mode never pay for it, and never relax.
+    let sudo_safe = protected
+        && env.protected_file.as_ref().is_some_and(|l| {
+            mode::sudo_attested(l, env.sudo_inputs.as_deref(), env.sudo_gids.as_deref())
+        });
     let env = GuardEnv {
-        exceptions_protected: loaded.mode == mode::Mode::Protected,
+        exceptions_protected: protected,
+        sudo_safe,
         ..env.clone()
     };
     match (pre_tool_guard(payload, &loaded.policy, &env), &loaded.mode) {
@@ -291,6 +300,84 @@ mod tests {
             assert!(matches!(
                 guard("git commit --no-verify -m x", &user, &env),
                 Decision::Deny(_)
+            ));
+            std::fs::remove_dir_all(&loc.anchor).ok();
+        }
+
+        /// The environment for *loc* with a scratch sudoers as the one
+        /// attestation input, so no test depends on the host's `/etc`.
+        fn attested_env(loc: &mode::Location) -> (GuardEnv, std::path::PathBuf) {
+            let input = loc.anchor.join("sudoers");
+            std::fs::write(&input, "Defaults timestamp_timeout=0\n").unwrap();
+            let env = GuardEnv {
+                sudo_inputs: Some(vec![input.clone()]),
+                sudo_gids: Some(vec![100]),
+                ..env_for(loc)
+            };
+            (env, input)
+        }
+
+        fn attest(loc: &mode::Location, text: &str) {
+            let path = loc.dir().join(mode::attest::ATTESTATION_FILE);
+            std::fs::write(&path, text).unwrap();
+            chmod(&path, 0o644);
+        }
+
+        #[test]
+        fn only_a_verified_safe_attestation_relaxes_protected_mode() {
+            use crate::hook::mode::attest::{safe_text, unsafe_text, ATTESTATION_FILE};
+            const INLINE: &str = "python3 -c 'print(1)'";
+            let loc = tree("hook-attest", r#"{"disabled_guards":[]}"#);
+            let user = user_copy(&loc);
+            let (env, input) = attested_env(&loc);
+            let path = loc.dir().join(ATTESTATION_FILE);
+            // No attestation: strict.
+            assert!(matches!(guard(INLINE, &user, &env), Decision::Deny(_)));
+            // A NOT SAFE one: strict.
+            attest(&loc, &unsafe_text("sudo reusable"));
+            assert!(matches!(guard(INLINE, &user, &env), Decision::Deny(_)));
+            // SAFE for today's inputs: relaxed, names still refused.
+            attest(&loc, &safe_text(&[input.as_path()], &[100]).unwrap());
+            assert_eq!(guard(INLINE, &user, &env), Decision::Allow);
+            assert!(matches!(
+                guard("sudo -n true", &user, &env),
+                Decision::Deny(_)
+            ));
+            // An input changed after lock: stale, strict.
+            std::fs::write(&input, "max ALL=(ALL) NOPASSWD:ALL\n").unwrap();
+            assert!(matches!(guard(INLINE, &user, &env), Decision::Deny(_)));
+            attest(&loc, &safe_text(&[input.as_path()], &[100]).unwrap());
+            assert_eq!(guard(INLINE, &user, &env), Decision::Allow);
+            // The hook's groups differ from the attested set: strict.
+            let joined = GuardEnv {
+                sudo_gids: Some(vec![100, 998]),
+                ..env.clone()
+            };
+            assert!(matches!(guard(INLINE, &user, &joined), Decision::Deny(_)));
+            // Writable by others: not verified, strict.
+            chmod(&path, 0o666);
+            assert!(matches!(guard(INLINE, &user, &env), Decision::Deny(_)));
+            std::fs::remove_dir_all(&loc.anchor).ok();
+        }
+
+        #[test]
+        fn an_attestation_never_relaxes_default_or_invalid_mode() {
+            use crate::hook::mode::attest::safe_text;
+            let loc = tree("hook-attest-invalid", r#"{"disabled_guards":[]}"#);
+            let (env, input) = attested_env(&loc);
+            attest(&loc, &safe_text(&[input.as_path()], &[100]).unwrap());
+            chmod(&loc.path(), 0o666);
+            let user = user_copy(&loc);
+            // Invalid: every guard on, the attestation ignored, the text
+            // rule on, and inline code (allowed in default mode) allowed.
+            assert!(matches!(
+                guard("git commit --no-verify -m x", &user, &env),
+                Decision::Deny(_)
+            ));
+            assert!(matches!(guard(READ, &user, &env), Decision::Deny(_)));
+            assert!(matches!(
+                guard("sudo -n true", &user, &env),
+                Decision::Allow
             ));
             std::fs::remove_dir_all(&loc.anchor).ok();
         }

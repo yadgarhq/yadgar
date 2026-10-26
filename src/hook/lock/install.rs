@@ -106,6 +106,17 @@ pub fn apply(location: &Location, plan: &Plan, owner: Owner) -> Result<Vec<Strin
     }
 }
 
+/// Write *text* as the sudo attestation beside *location*'s exceptions
+/// file, owned by *owner* (`mode/attest.rs`). Run after [`apply`], which
+/// made the protected directory; refreshed on every lock, a lock that
+/// changes nothing else included, so a stale one is replaced.
+pub fn write_attestation(location: &Location, text: &str, owner: Owner) -> Result<(), String> {
+    let path = system_dirs(location)?;
+    check_dir(&path, owner.uid)?;
+    let target = path.join(crate::hook::mode::attest::ATTESTATION_FILE);
+    write_file(&path, &target, text, owner)
+}
+
 /// The source's text: a regular file *uid* owns, not a symlink, holding a
 /// usable decision. No file at all is a decision that switches nothing off.
 fn read_source(source: &Path, uid: u32) -> Result<String, String> {
@@ -202,9 +213,10 @@ fn set_owner_and_mode(file: &File, owner: Owner, mode: u32, shown: &Path) -> Res
 /// Write *content* beside *target*, then rename it into place: a reader
 /// sees the old file or the new one, never half of one.
 fn write_file(dir: &Path, target: &Path, content: &str, owner: Owner) -> Result<(), String> {
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned());
     let temp = dir.join(format!(
         ".{}.lock-{}",
-        crate::hook::EXCEPTIONS_FILE,
+        name.as_deref().unwrap_or(crate::hook::EXCEPTIONS_FILE),
         std::process::id()
     ));
     if std::fs::symlink_metadata(&temp).is_ok() {

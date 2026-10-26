@@ -21,6 +21,11 @@
 //!   A home spelled another way (`${HOME%/}`, `${HOME:-…}`, `~user`) or a
 //!   leading `$(…)` or backtick span may be ANY prefix: the rest of the word
 //!   is matched against the end of each protected directory.
+//!   An unquoted `$(…)` is followed past the scanner's split (see
+//!   [`Substitutions`]): what comes right after its `)` belongs to the
+//!   command it is an argument of. A substitution whose output a writing
+//!   command gets, holding a word that may be a protected directory,
+//!   refuses: `cp a $(echo ~/.local/bin)/tool`.
 //! * A hook PATH that is unset, empty or holds no absolute directory FAILS
 //!   CLOSED: every absolute path is protected.
 //!
@@ -33,9 +38,11 @@
 
 use super::protected::{normalized, reader_arguments};
 use super::{as_glob, brace_expand, closing, glob_matches, CLOSE_BRACE, OPEN_BRACE};
-use crate::hook::guard::runs::executed;
+use crate::hook::guard::runs::{executed, SPLIT_OFF};
 use crate::hook::guard::GuardEnv;
-use crate::install::shellword::SimpleCommand;
+use crate::install::shellword::{shell_split, SimpleCommand};
+
+mod shipped;
 
 /// The protected directories, as normalized components.
 fn protected(env: &GuardEnv) -> Vec<Vec<String>> {
@@ -68,9 +75,19 @@ fn absolute(path: &str) -> bool {
     path.starts_with(['/', '\\']) || path.get(1..3).is_some_and(|d| d == ":\\" || d == ":/")
 }
 
-/// Whether a Bash *line*, scanned as *commands*, writes into a protected
-/// directory.
-pub(in crate::hook::guard) fn writes_before_gh(commands: &[SimpleCommand], env: &GuardEnv) -> bool {
+/// Whether a Bash *line*, scanned as *commands* each with the separators
+/// before it (*runs*), writes into a protected directory.
+///
+/// TWO READINGS, and either refuses. [`Substitutions`] follows each
+/// unquoted `$(…)` to its closing paren. The reading shipped on main stays
+/// as a floor (`bin_dirs/shipped.rs`), so a paren the count reads wrong (a
+/// `case` arm, a `#` comment) can only cost a refusal it adds, never one
+/// main made (ADR-0645).
+pub(in crate::hook::guard) fn writes_before_gh(
+    commands: &[SimpleCommand],
+    runs: &[Vec<String>],
+    env: &GuardEnv,
+) -> bool {
     let dirs = protected(env);
     if dirs.is_empty() && !env.path_unknown {
         return false;
@@ -80,42 +97,197 @@ pub(in crate::hook::guard) fn writes_before_gh(commands: &[SimpleCommand], env: 
         dirs,
         any: env.path_unknown,
     };
-    // An unquoted `$(…)` ends the command at `$`; the next one's first word
-    // is the rest of the same argument, starting with the substitution's
-    // output, and belongs to the same program. As in `tamper.rs`, this
-    // holds for every later command's first word: the substitution's own
-    // commands come between.
-    let mut continues: Option<bool> = None;
-    commands.iter().any(|c| {
-        let program = executed(c).map(|(_, args)| c.words.len() - args.len() - 1);
-        let reader = reader_arguments(c);
-        let carried = continues;
-        let hit = c
-            .words
-            .iter()
-            .chain(&c.writes_to)
-            .enumerate()
-            .any(|(n, word)| {
-                let is_word = n < c.words.len();
-                if n == 0 && is_word {
-                    if let Some(read) = carried {
-                        return !read && to.may_hold(&format!("$(){word}"));
-                    }
-                }
-                if is_word && (program == Some(n) || reader.is_some_and(|start| n >= start)) {
-                    return false;
-                }
-                let value = word.split_once('=').map(|(_, v)| v);
-                std::iter::once(word.as_str())
-                    .chain(value)
-                    .any(|w| to.may_hold(w))
-            });
-        if c.words.last().is_some_and(|w| w.ends_with('$')) {
-            continues = Some(carried.unwrap_or(false) || reader.is_some());
-            // Sticky from here on.
-        }
+    let balanced = parens_balance(runs);
+    let mut open = Substitutions::default();
+    let mut floor = shipped::Shipped::default();
+    commands.iter().zip(runs).any(|(c, run)| {
+        let carried = open.enter(run);
+        let read = carried.as_ref().map(|s| s.reads_with(&c.words));
+        // The ONE answer the floor gives up: a lone `}`, on a line whose
+        // parens all balance. One that continues a substitution, as in
+        // `cp a $(x)}`, is still refused by `judged`.
+        let hit = judged(c, read, open.in_a_write(), &to) | floor.judged(c, &to, balanced);
+        open.leave(c, carried);
         hit
     })
+}
+
+/// Whether every `)` in *runs* closes a `(` before it, and none is left
+/// open.
+fn parens_balance(runs: &[Vec<String>]) -> bool {
+    let mut depth = 0usize;
+    for c in runs
+        .iter()
+        .filter(|r| !(r.len() == 1 && r[0] == SPLIT_OFF))
+        .flatten()
+        .flat_map(|op| op.chars())
+    {
+        match c {
+            '(' => depth += 1,
+            ')' if depth == 0 => return false,
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// The command a substitution's output is an argument of.
+#[derive(Clone)]
+struct Opened {
+    /// Its words up to the one that ends at `$`.
+    argv: Vec<String>,
+    /// The substitution is a redirect target.
+    write: bool,
+}
+
+impl Opened {
+    /// Whether the words after the substitution, *words*, are read rather
+    /// than written. Decided on the WHOLE argument list, *words*
+    /// included: `git log $(x)--output=f` writes `f`.
+    fn reads_with(&self, words: &[String]) -> bool {
+        !self.write && reads(&self.argv) && reads(&merged(&self.argv, words))
+    }
+}
+
+/// Whether a command of *words* is a reading command.
+fn reads(words: &[String]) -> bool {
+    let words = words.to_vec();
+    reader_arguments(&SimpleCommand {
+        words,
+        writes_to: Vec::new(),
+    })
+    .is_some()
+}
+
+/// *argv*, whose last word ends at `$`, followed by *words*: the first one
+/// both glued to that word and on its own, since the scanner cannot tell.
+fn merged(argv: &[String], words: &[String]) -> Vec<String> {
+    let mut out = argv.to_vec();
+    if let (Some(last), Some(first)) = (out.last_mut(), words.first()) {
+        last.push_str("()");
+        last.push_str(first);
+    }
+    out.extend(words.iter().cloned());
+    out
+}
+
+/// The unquoted `$(…)` substitutions open at each command.
+///
+/// The scanner ends a command at the `$` of `$(`, scans the substitution's
+/// commands, and starts another after the `)`. That one's first word is the
+/// rest of the argument the substitution's output starts, and belongs to
+/// the command that ended at `$`, ONLY when the separators before it are
+/// the `)` that closes the substitution: `$(x)/b` or `$(x) b`, never
+/// `$(x); b`. The parens are counted one by one, because the scanner reads
+/// `))` as one separator.
+#[derive(Default)]
+struct Substitutions {
+    /// One entry per open paren: `Some` when it opened a substitution.
+    open: Vec<Option<Opened>>,
+    /// The last command ended at `$`: what a `(` right after it opens.
+    opener: Option<Opened>,
+    /// What the last command continued, for one split off after it.
+    last: Option<Opened>,
+}
+
+impl Substitutions {
+    /// Read *run*, the separators before a command: `Some` when the
+    /// command continues the argument a substitution's output starts.
+    fn enter(&mut self, run: &[String]) -> Option<Opened> {
+        if run.len() == 1 && run[0] == SPLIT_OFF {
+            return self.last.clone(); // Split off at a brace: it runs on as before.
+        }
+        let mut opener = self.opener.take();
+        let mut carried = None;
+        for (n, c) in run.iter().flat_map(|op| op.chars()).enumerate() {
+            carried = match c {
+                '(' => {
+                    let opened = if n == 0 { opener.take() } else { None };
+                    self.open.push(opened);
+                    None
+                }
+                ')' => self.open.pop().flatten(),
+                _ => None,
+            };
+        }
+        carried
+    }
+
+    /// Whether a command runs inside a substitution whose output a command
+    /// that is not a reader gets.
+    fn in_a_write(&self) -> bool {
+        self.open
+            .iter()
+            .flatten()
+            .any(|o| o.write || !reads(&o.argv))
+    }
+
+    /// Note whether *c*, which continued *carried*, ended at `$`: in a
+    /// redirect target that is a write; in a word, an argument of the
+    /// command it is part of.
+    fn leave(&mut self, c: &SimpleCommand, carried: Option<Opened>) {
+        let into = c.writes_to.last().is_some_and(|w| w.ends_with('$'));
+        let argument = c.words.last().is_some_and(|w| w.ends_with('$'));
+        self.opener = if into {
+            Some(Opened {
+                argv: Vec::new(),
+                write: true,
+            })
+        } else if argument {
+            Some(match &carried {
+                Some(o) => Opened {
+                    argv: merged(&o.argv, &c.words),
+                    write: o.write,
+                },
+                None => Opened {
+                    argv: c.words.clone(),
+                    write: false,
+                },
+            })
+        } else {
+            None
+        };
+        self.last = carried;
+    }
+}
+
+/// Whether command *c* writes into a protected directory.
+///
+/// *carried*: it continues the argument a substitution's output starts, so
+/// none of its words is a program, and `Some(true)` when the command it
+/// belongs to reads them; its first word may be glued to the output or
+/// spaced from it, and the scanner cannot tell, so both readings are
+/// checked. *in_a_write*: what it prints may be a write's target, so no
+/// argument of it is a reader's.
+fn judged(c: &SimpleCommand, carried: Option<bool>, in_a_write: bool, to: &Target) -> bool {
+    let checked = |word: &str| {
+        let value = word.split_once('=').map(|(_, v)| v);
+        std::iter::once(word).chain(value).any(|w| to.may_hold(w))
+    };
+    if c.writes_to.iter().any(|w| checked(w)) {
+        return true;
+    }
+    let glued = match carried {
+        Some(true) if !in_a_write => return false,
+        Some(_) => c
+            .words
+            .first()
+            .is_some_and(|w| to.may_hold(&format!("$(){w}"))),
+        None => false,
+    };
+    let program = match carried {
+        Some(_) => None,
+        None => executed(c).map(|(_, args)| c.words.len() - args.len() - 1),
+    };
+    let reader = match carried.is_some() || in_a_write {
+        true => None,
+        false => reader_arguments(c),
+    };
+    glued
+        || c.words.iter().enumerate().any(|(n, w)| {
+            program != Some(n) && !reader.is_some_and(|start| n >= start) && checked(w)
+        })
 }
 
 /// What a word is checked against.
@@ -133,9 +305,24 @@ impl Target {
             return true;
         }
         if any_prefix(&alt) {
-            return self.suffix_may_hold(&alt);
+            return self.suffix_may_hold(&alt) || self.output_may_hold(&alt);
         }
         may_be_in_a_dir(&alt, &self.dirs)
+    }
+
+    /// Whether *word*'s leading `$(…)` or backtick span holds an argument
+    /// that may be a protected directory, so that its output may be one:
+    /// `"$(echo /run/wrappers/bin)"/tool`.
+    fn output_may_hold(&self, word: &str) -> bool {
+        let end = prefix_end(word).saturating_sub(1);
+        let inner = if word.starts_with("$(") {
+            word.get(2..end)
+        } else if word.starts_with('`') {
+            word.get(1..end)
+        } else {
+            None
+        };
+        inner.is_some_and(|i| shell_split(i).iter().skip(1).any(|w| self.may_hold(w)))
     }
 
     /// *word*'s first component may be any absolute prefix: a home spelled

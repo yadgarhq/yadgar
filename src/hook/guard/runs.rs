@@ -270,16 +270,30 @@ const CLOSE_WORD: &str = "\u{7d}";
 /// `if cond` / `while cond` keep the words before it. Splitting can only
 /// add commands to judge.
 pub(super) fn split_at_braces(commands: Vec<SimpleCommand>) -> Vec<SimpleCommand> {
+    let paired = commands.into_iter().map(|c| (c, Vec::new())).collect();
+    split_at_braces_with_separators(paired)
+        .into_iter()
+        .map(|(c, _)| c)
+        .collect()
+}
+
+/// [`split_at_braces`] for commands paired with the separators before
+/// them. A command split off after the brace gets [`SPLIT_OFF`] as its
+/// only separator: it runs on from the command before it.
+pub(super) fn split_at_braces_with_separators(
+    commands: Vec<(SimpleCommand, Vec<String>)>,
+) -> Vec<(SimpleCommand, Vec<String>)> {
     let mut out = Vec::with_capacity(commands.len());
-    for command in commands {
+    for (command, mut run) in commands {
         let mut writes_to = command.writes_to;
         let mut words: Vec<String> = Vec::new();
         for (n, word) in command.words.into_iter().enumerate() {
             if n > 0 && word == OPEN_WORD {
-                out.push(SimpleCommand {
+                let before = SimpleCommand {
                     words: std::mem::take(&mut words),
                     writes_to: std::mem::take(&mut writes_to),
-                });
+                };
+                out.push((before, std::mem::replace(&mut run, vec![SPLIT_OFF.into()])));
                 continue;
             }
             words.push(word);
@@ -287,10 +301,14 @@ pub(super) fn split_at_braces(commands: Vec<SimpleCommand>) -> Vec<SimpleCommand
         while words.len() > 1 && words.last().is_some_and(|w| w == CLOSE_WORD) {
             words.pop();
         }
-        out.push(SimpleCommand { words, writes_to });
+        out.push((SimpleCommand { words, writes_to }, run));
     }
     out
 }
+
+/// The separator a command split off at a brace gets. The scanner never
+/// gives a command this one, so it cannot be mistaken for a real separator.
+pub(super) const SPLIT_OFF: &str = OPEN_WORD;
 
 /// Reserved words that open a compound command before its first simple
 /// command. `time` is a wrapper, read with its options above.

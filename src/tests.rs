@@ -187,16 +187,11 @@ fn a_notice_is_printed_and_replaces_the_nothing_to_do_line() {
 }
 
 #[test]
-fn guard_has_status_and_lock_and_nothing_else() {
-    // ADR-1028: two verbs, no flags. A path or a user given on the command
-    // line is one an agent could choose, so `lock` takes neither.
+fn the_removed_guard_subcommand_is_a_usage_error() {
+    // The agent guard is harness control, not memory, and left this client.
     let parse = |args: &[&str]| Cli::try_parse_from(args).map(|_| ());
-    assert!(parse(&["yaadgaar", "guard", "status"]).is_ok());
-    assert!(parse(&["yaadgaar", "guard", "lock"]).is_ok());
-    assert!(parse(&["yaadgaar", "guard", "lock", "--yes"]).is_ok());
-    assert!(parse(&["yaadgaar", "guard"]).is_err());
-    assert!(parse(&["yaadgaar", "guard", "lock", "/tmp/x"]).is_err());
-    assert!(parse(&["yaadgaar", "guard", "lock", "--user", "x"]).is_err());
+    assert!(parse(&["yaadgaar", "guard", "status"]).is_err());
+    assert!(parse(&["yaadgaar", "guard", "lock"]).is_err());
 }
 
 #[test]

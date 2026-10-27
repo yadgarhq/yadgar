@@ -161,10 +161,9 @@ unicase = "2"
 # history — the two ways a credential leaks from an interactive CLI.
 rpassword = "7"
 
-# `O_NONBLOCK`, and nothing else: the guard opens the hook exceptions file with
-# it, so a FIFO planted at that path cannot hang the guard until Claude Code
-# times it out — a timed-out hook is not a deny, so every guarded call would
-# then run unguarded. A constant, so `unsafe_code = "forbid"` still holds.
+# `O_NOFOLLOW`, and nothing else: the credential and token files are opened
+# with it, so a symlink planted at either path is refused rather than
+# followed. A constant, so `unsafe_code = "forbid"` still holds.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

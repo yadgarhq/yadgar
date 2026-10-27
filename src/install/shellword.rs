@@ -65,84 +65,11 @@ pub fn shell_split(cmd: &str) -> Vec<String> {
         .collect()
 }
 
-/// One simple command a shell would run: its argv, and what it writes into.
-#[derive(Debug, PartialEq, Eq)]
-pub struct SimpleCommand {
-    /// argv, with quotes removed and redirections taken out.
-    pub words: Vec<String>,
-    /// Files this command redirects its output INTO.
-    ///
-    /// Kept apart from `words` because reading a file and writing to it are
-    /// different acts, and a guard that cannot tell them apart refuses `cat` on
-    /// the very file it is only meant to protect from writes.
-    pub writes_to: Vec<String>,
-}
-
-/// Split a command LINE into the separate commands a shell would run from it.
-///
-/// `cd infra && terraform apply` is TWO commands, and `terraform` is the command
-/// word of the second one. A matcher that looked at the line as one string saw
-/// `terraform` in the middle of it and had no way to say whether that was a
-/// command being run or a word being mentioned — so it answered both questions
-/// the same way and got both wrong.
-pub fn shell_commands(line: &str) -> Vec<SimpleCommand> {
-    shell_commands_with_separators(line)
-        .into_iter()
-        .map(|(command, _)| command)
-        .collect()
-}
-
-/// [`shell_commands`], each with the operators the scanner passed since the
-/// command before it, in order: `;` `&` `&&` `||` `|` `(` `)` or a newline.
-/// Empty for the first command of a line that opens with no operator.
-///
-/// For a caller that must know whether a command runs unconditionally in the
-/// current shell: after `&&` it may not run at all, and inside `( … )` or
-/// before `|` it runs in a subshell, whose assignments never reach the line.
-pub fn shell_commands_with_separators(line: &str) -> Vec<(SimpleCommand, Vec<String>)> {
-    let mut out = Vec::new();
-    let mut seen: Vec<String> = Vec::new();
-    let mut current = SimpleCommand {
-        words: Vec::new(),
-        writes_to: Vec::new(),
-    };
-    let mut pending: Option<Token> = None;
-
-    for token in scan(line) {
-        match token {
-            Token::Word(w) => match pending.take() {
-                Some(Token::Into) => current.writes_to.push(w),
-                // A file read FROM is an argument like any other.
-                _ => current.words.push(w),
-            },
-            Token::Separator(op) => {
-                pending = None;
-                if !current.words.is_empty() || !current.writes_to.is_empty() {
-                    let command = std::mem::replace(
-                        &mut current,
-                        SimpleCommand {
-                            words: Vec::new(),
-                            writes_to: Vec::new(),
-                        },
-                    );
-                    out.push((command, std::mem::take(&mut seen)));
-                }
-                seen.push(op);
-            }
-            redirect => pending = Some(redirect),
-        }
-    }
-    if !current.words.is_empty() || !current.writes_to.is_empty() {
-        out.push((current, seen));
-    }
-    out
-}
-
 /// What the scanner found. The one place the shell's grammar is decided.
 enum Token {
     Word(String),
     /// `;` `&` `&&` `||` `|` `(` `)` or a newline: one command ends here.
-    Separator(String),
+    Separator,
     /// `>` or `>>`: the next word is a file the command writes into.
     Into,
     /// `<`: the next word is a file the command reads from.
@@ -209,12 +136,10 @@ fn scan(cmd: &str) -> Vec<Token> {
             (None, c) if matches!(c, ';' | '|' | '&' | '(' | ')' | '\n') => {
                 flush!();
                 // `&&` and `||` separate exactly as their single forms do here.
-                let mut op = c.to_string();
                 if chars.peek() == Some(&c) {
                     chars.next();
-                    op.push(c);
                 }
-                out.push(Token::Separator(op));
+                out.push(Token::Separator);
             }
             (None, c) if c.is_whitespace() => flush!(),
             (None, c) => {
@@ -254,88 +179,5 @@ mod tests {
             let written = format!("{} hook prompt-recall", shell_quote(path));
             assert_eq!(shell_split(&written), [path, "hook", "prompt-recall"]);
         }
-    }
-
-    #[test]
-    fn a_line_of_several_commands_is_several_commands() {
-        // The failure this exists for: `terraform` is the command word of the
-        // SECOND command here, and a matcher looking at the whole line as one
-        // string cannot say that.
-        let commands = shell_commands("cd infra && terraform apply");
-        assert_eq!(commands.len(), 2);
-        assert_eq!(commands[0].words, ["cd", "infra"]);
-        assert_eq!(commands[1].words, ["terraform", "apply"]);
-    }
-
-    #[test]
-    fn every_separator_a_shell_honours_separates() {
-        for line in [
-            "cd infra; terraform",
-            "cd infra && terraform",
-            "cd infra || terraform",
-            "cat plan | terraform",
-            "cd infra\nterraform",
-        ] {
-            let commands = shell_commands(line);
-            assert_eq!(
-                commands.last().map(|c| c.words.first().map(String::as_str)),
-                Some(Some("terraform")),
-                "{line} did not end in a terraform command"
-            );
-        }
-    }
-
-    #[test]
-    fn a_quoted_separator_separates_nothing() {
-        // `gh pr comment --body "a; b"` is one command, and treating the `;`
-        // inside a quoted argument as a separator would invent a command called
-        // `b` that nobody ran.
-        let commands = shell_commands(r#"gh pr comment --body "a; b""#);
-        assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].words.last().unwrap(), "a; b");
-    }
-
-    #[test]
-    fn each_command_carries_the_operators_before_it() {
-        let commands = shell_commands_with_separators("a; (b && c) | d\ne");
-        let seps: Vec<Vec<&str>> = commands
-            .iter()
-            .map(|(_, s)| s.iter().map(String::as_str).collect())
-            .collect();
-        let want: Vec<Vec<&str>> = vec![
-            vec![],
-            vec![";", "("],
-            vec!["&&"],
-            vec![")", "|"],
-            vec!["\n"],
-        ];
-        assert_eq!(seps, want);
-    }
-
-    #[test]
-    fn a_file_written_into_is_not_an_argument() {
-        let commands = shell_commands("echo x > notes.md");
-        assert_eq!(commands[0].words, ["echo", "x"]);
-        assert_eq!(commands[0].writes_to, ["notes.md"]);
-    }
-
-    #[test]
-    fn a_file_read_from_is_an_argument_and_not_a_write() {
-        let commands = shell_commands("grep -q x < notes.md");
-        assert_eq!(commands[0].writes_to, Vec::<String>::new());
-        assert!(commands[0].words.contains(&"notes.md".to_string()));
-    }
-
-    #[test]
-    fn an_appending_redirect_is_still_a_write() {
-        let commands = shell_commands("echo x >> notes.md");
-        assert_eq!(commands[0].writes_to, ["notes.md"]);
-    }
-
-    #[test]
-    fn a_command_at_the_end_of_a_line_is_still_a_command() {
-        // No trailing space, no trailing separator. The substring matcher this
-        // replaces looked for "terraform " and this line has no space after it.
-        assert_eq!(shell_commands("terraform")[0].words, ["terraform"]);
     }
 }

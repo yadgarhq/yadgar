@@ -37,16 +37,16 @@ fn settings_text(pre_tool_use: Value) -> String {
     text
 }
 
+/// A STALE entry of ours: `task-update` under a matcher it no longer has.
 fn own_entry(matcher: &str) -> Value {
     serde_json::json!({ "matcher": matcher, "hooks": [{ "type": "command",
-        "command": format!("{BINARY} hook pre-tool-guard") }] })
+        "command": format!("{BINARY} hook task-update") }] })
 }
 
-/// Our second `PreToolUse` entry. `merge` places both of ours where the first
-/// one of ours sat, the guard first.
+/// Our one `PreToolUse` entry, as a current install writes it. `merge` places
+/// it where the first one of ours sat.
 fn task_update_entry() -> Value {
-    serde_json::json!({ "matcher": "TaskUpdate", "hooks": [{ "type": "command",
-        "command": format!("{BINARY} hook task-update") }] })
+    own_entry("TaskUpdate")
 }
 
 fn foreign_entry() -> Value {
@@ -66,15 +66,9 @@ fn install_over(name: &str, seeded: &str) -> (String, bool) {
     )
 }
 
-const GUARD_MATCHER: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell";
-
 #[test]
 fn a_reinstall_leaves_our_hook_where_it_was_ahead_of_a_foreign_one() {
-    let seeded = settings_text(serde_json::json!([
-        own_entry(GUARD_MATCHER),
-        task_update_entry(),
-        foreign_entry()
-    ]));
+    let seeded = settings_text(serde_json::json!([task_update_entry(), foreign_entry()]));
     let (after, changed) = install_over("idem-own-first", &seeded);
     assert_eq!(after, seeded);
     assert!(!changed);
@@ -82,11 +76,7 @@ fn a_reinstall_leaves_our_hook_where_it_was_ahead_of_a_foreign_one() {
 
 #[test]
 fn a_reinstall_leaves_our_hook_where_it_was_behind_a_foreign_one() {
-    let seeded = settings_text(serde_json::json!([
-        foreign_entry(),
-        own_entry(GUARD_MATCHER),
-        task_update_entry()
-    ]));
+    let seeded = settings_text(serde_json::json!([foreign_entry(), task_update_entry()]));
     let (after, changed) = install_over("idem-own-last", &seeded);
     assert_eq!(after, seeded);
     assert!(!changed);
@@ -103,10 +93,7 @@ fn a_reinstall_with_our_event_not_last_keeps_the_event_order() {
     assert!(changed);
     assert_eq!(
         after,
-        settings_text(serde_json::json!([
-            own_entry(GUARD_MATCHER),
-            task_update_entry()
-        ]))
+        settings_text(serde_json::json!([task_update_entry()]))
     );
 }
 
@@ -123,7 +110,6 @@ fn a_changed_entry_of_ours_is_replaced_at_its_index_and_foreign_ones_stay() {
         after,
         settings_text(serde_json::json!([
             foreign_entry(),
-            own_entry(GUARD_MATCHER),
             task_update_entry(),
             foreign_entry()
         ]))
@@ -137,11 +123,7 @@ fn a_first_install_appends_after_the_foreign_entries() {
     assert!(changed);
     assert_eq!(
         after,
-        settings_text(serde_json::json!([
-            foreign_entry(),
-            own_entry(GUARD_MATCHER),
-            task_update_entry()
-        ]))
+        settings_text(serde_json::json!([foreign_entry(), task_update_entry()]))
     );
 }
 
@@ -155,11 +137,7 @@ fn duplicate_entries_of_ours_collapse_into_the_first_one_position() {
     let (after, _) = install_over("idem-dupes", &seeded);
     assert_eq!(
         after,
-        settings_text(serde_json::json!([
-            own_entry(GUARD_MATCHER),
-            task_update_entry(),
-            foreign_entry()
-        ]))
+        settings_text(serde_json::json!([task_update_entry(), foreign_entry()]))
     );
 }
 
@@ -172,7 +150,7 @@ fn a_mixed_entry_keeps_its_foreign_hook_and_our_fresh_entries_go_after_it() {
         "command": "/home/u/.claude/hooks/yadgar-pretooluse-router.py" });
     let mixed = serde_json::json!({ "matcher": "Bash", "hooks": [
         foreign_hook,
-        { "type": "command", "command": format!("{BINARY} hook pre-tool-guard") },
+        { "type": "command", "command": format!("{BINARY} hook task-update") },
     ] });
     let seeded = settings_text(serde_json::json!([mixed]));
     let (after, changed) = install_over("idem-mixed", &seeded);
@@ -181,7 +159,6 @@ fn a_mixed_entry_keeps_its_foreign_hook_and_our_fresh_entries_go_after_it() {
         after,
         settings_text(serde_json::json!([
             { "matcher": "Bash", "hooks": [foreign_hook] },
-            own_entry(GUARD_MATCHER),
             task_update_entry()
         ]))
     );

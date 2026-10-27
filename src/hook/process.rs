@@ -3,20 +3,22 @@
 //!
 //! Out of `main.rs` because this is the one place the binary's exit status IS
 //! its answer, and every path through it has to end in either silence or a
-//! blocking refusal — a panic included (ledger 1570).
+//! deliberate refusal — a panic included (ledger 1570).
 
 use std::io::Write as _;
 use std::panic::AssertUnwindSafe;
 use std::sync::Mutex;
 
-use super::{dispatch, read_stdin, session_start, write_back, Decision, REFUSED_EXIT_CODE};
-use crate::install;
+use super::{dispatch, read_stdin, session_start, Decision, REFUSED_EXIT_CODE};
 
 // A pin by `cfg`, not by searching `Cargo.toml` for a string. The string search
 // missed `panic="abort"`, a profile in `.cargo/config.toml` and
 // `RUSTFLAGS=-C panic=abort` (ledger 1576 (b)); the compiler sees all three.
 #[cfg(panic = "abort")]
-compile_error!("the pre-tool guard needs panic=unwind: catch_unwind catches nothing under abort");
+compile_error!(
+    "the hook handlers need panic=unwind: catch_unwind catches nothing under abort, \
+     and a panic in session-start or write-back must not stop the session"
+);
 
 /// The panic hook is process-global. One lock keeps two contained panics (only
 /// ever concurrent in tests) from restoring each other's hook.
@@ -37,9 +39,9 @@ pub fn hook_name(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<S
 }
 
 /// A DEBUG-BUILD FAULT for `tests/hook_exit.rs`: a panic in the hook's setup,
-/// before dispatch, must still exit 2 (ledger 1576 (d)). Called from
-/// `init_tracing`, the setup step. `debug_assertions` is off in every release
-/// build, so no shipped binary reads the variable.
+/// before dispatch, must be contained like any other (ledger 1576 (d)). Called
+/// from `init_tracing`, the setup step. `debug_assertions` is off in every
+/// release build, so no shipped binary reads the variable.
 pub fn planted_setup_fault() {
     #[cfg(debug_assertions)]
     if std::env::var_os("YAADGAAR_TEST_PANIC_IN_SETUP").is_some() {
@@ -55,21 +57,16 @@ pub fn routes(name: &str) -> bool {
 /// Run one hook handler and answer the agent client in the format it honours.
 ///
 /// EXITS rather than returns on a refusal, and the asymmetry is the point: a
-/// handler that fails open leaves no trace, and a handler that refuses is the
-/// only thing in this binary that ever exits non-zero.
+/// handler that allows leaves no trace, and a write-back refusal is the only
+/// thing in this binary that ever exits non-zero from a hook.
 ///
 /// *init* is the caller's setup (tracing), run INSIDE the containment so a panic
-/// there refuses too (ledger 1576 (d)).
+/// there is contained too (ledger 1576 (d)).
 pub fn run(name: &str, init: impl FnOnce()) -> anyhow::Result<()> {
     if routes(name) {
         return answer(&session_start_output(init));
     }
-    let decision = if write_back::NAMES.contains(&name) {
-        decide_open(name, init)
-    } else {
-        decide(name, init)
-    };
-    match decision {
+    match decide(name, init) {
         // Silence. An allow that printed would add a line to the transcript on
         // every single tool call.
         Decision::Allow => Ok(()),
@@ -106,56 +103,31 @@ fn answer(output: &Option<String>) -> anyhow::Result<()> {
 }
 
 /// [`run`] without the exit, so a test can read the decision.
+///
+/// A panic ALLOWS (see `hook.rs`): the write-back handlers fail open, and a
+/// retired handler judges nothing.
 fn decide(name: &str, init: impl FnOnce()) -> Decision {
-    contain_panic(|| {
-        init();
-        // NOT `home()?`. An error here exits 1, which Claude Code reads as a
-        // hook that merely failed — and lets the tool run. A home that cannot
-        // be found is `None`, and `None` leaves every guard on.
-        let exceptions = dirs::home_dir().map(|h| install::Layout::new(&h).exceptions());
-        // Its settings files are protected like `~/.claude`'s (ADR-1005), and
-        // the PATH directories before `gh` are resolved now (ADR-1020).
-        let env = crate::hook::GuardEnv::from_process();
-        dispatch(name, read_stdin(), exceptions.as_deref(), &env)
-    })
-}
-
-/// [`decide`] for a write-back handler: a panic ALLOWS (see `hook.rs`).
-fn decide_open(name: &str, init: impl FnOnce()) -> Decision {
     contain(
         || {
             init();
-            dispatch(name, read_stdin(), None, &crate::hook::GuardEnv::default())
+            dispatch(name, read_stdin())
         },
         |_| Decision::Allow,
     )
 }
 
-/// Run *decide*, and turn a panic inside it into a refusal.
-///
-/// A panic left status 101 — a non-blocking error to Claude Code, so the tool
-/// RAN unchecked (ledger 1570). Reading stdin and the exceptions file happens
-/// inside *decide*, so a panic there refuses too. `catch_unwind` needs the
-/// default `panic = "unwind"`; under `abort` it would catch nothing, and the
-/// `compile_error!` above refuses to build that.
-///
-/// SILENT: the default hook has already written `thread 'main' panicked at` to
-/// stderr by the time the unwind is caught, and on exit 2 Claude Code hands
-/// stderr to the model, so the noise would surround the reason. The reason
-/// below carries the message (ledger 1576 (c)). The previous hook is restored.
-pub fn contain_panic(decide: impl FnOnce() -> Decision) -> Decision {
-    contain(decide, |what| {
-        Decision::Deny(format!(
-            "refused: the hook panicked ({what}), so this tool call was not checked"
-        ))
-    })
-}
-
 /// Run *work*, and turn a panic inside it into `on_panic(message)`.
 ///
-/// The containment [`contain_panic`] is built on, for a handler whose answer
-/// to a panic is not a refusal: `session-start` answers with its fail-safe
-/// notice and exit 0, because a panic there must not stop the session.
+/// A panic left status 101, which Claude Code reads as a non-blocking error
+/// (ledger 1570); the handlers here answer a panic on purpose instead.
+/// `session-start` answers with its fail-safe notice and exit 0, because a
+/// panic there must not stop the session. `catch_unwind` needs the default
+/// `panic = "unwind"`; under `abort` it would catch nothing, and the
+/// `compile_error!` above refuses to build that.
+///
+/// SILENT: the default hook would write `thread 'main' panicked at` to stderr
+/// before the unwind is caught, and Claude Code shows hook stderr to the agent.
+/// The previous hook is restored.
 pub fn contain<T>(work: impl FnOnce() -> T, on_panic: impl FnOnce(String) -> T) -> T {
     let _held = HOOK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     contain_locked(work, on_panic)
@@ -198,20 +170,22 @@ fn refuse(name: &str, reason: &str) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hook::write_back;
 
     #[test]
-    fn a_panic_while_deciding_is_a_refusal_that_names_it() {
-        let Decision::Deny(reason) = contain_panic(|| panic!("a planted panic")) else {
-            panic!("a panic was let through as an allow");
-        };
-        assert!(reason.contains("a planted panic"), "{reason}");
-        let owned = contain_panic(|| panic!("{}", String::from("formatted")));
-        assert!(matches!(owned, Decision::Deny(r) if r.contains("formatted")));
+    fn a_panic_is_answered_with_its_message() {
+        let what = contain(|| panic!("a planted panic"), |what| what);
+        assert!(what.contains("a planted panic"), "{what}");
+        let owned = contain(|| panic!("{}", String::from("formatted")), |what| what);
+        assert!(owned.contains("formatted"), "{owned}");
     }
 
     #[test]
-    fn a_decision_that_does_not_panic_passes_through_unchanged() {
-        assert_eq!(contain_panic(|| Decision::Allow), Decision::Allow);
+    fn work_that_does_not_panic_passes_through_unchanged() {
+        assert_eq!(
+            contain(|| Decision::Allow, |_| Decision::Deny(String::new())),
+            Decision::Allow
+        );
     }
 
     /// Set in the child process only: it makes the test below plant the panic.
@@ -220,16 +194,13 @@ mod tests {
     #[test]
     fn a_panic_does_not_reach_stderr_through_the_default_hook() {
         // Ledger 1576 (c): the default hook wrote `thread 'main' panicked at`
-        // to stderr before the unwind was caught, and on exit 2 that line
-        // reaches the model around the refusal reason.
+        // to stderr before the unwind was caught, and Claude Code shows hook
+        // stderr to the agent.
         //
         // A CHILD PROCESS, because only a real stderr shows what the default
         // hook prints: the test harness captures a panic message in-process.
         if std::env::var_os(CHILD).is_some() {
-            assert!(matches!(
-                contain_panic(|| panic!("x")),
-                Decision::Deny(r) if r.contains("(x)")
-            ));
+            assert_eq!(contain(|| panic!("x"), |what| what), "x");
             return;
         }
         let out = std::process::Command::new(std::env::current_exe().unwrap())
@@ -257,36 +228,23 @@ mod tests {
             SEEN.fetch_add(1, Ordering::SeqCst);
         }));
         contain_locked(|| panic!("planted"), |_| ());
-        let _ = std::panic::catch_unwind(|| panic!("outside the guard"));
+        let _ = std::panic::catch_unwind(|| panic!("outside the containment"));
         std::panic::set_hook(outer);
         assert_eq!(SEEN.load(Ordering::SeqCst), 1, "hook not restored");
     }
 
     #[test]
-    fn a_panic_in_the_setup_before_dispatch_is_a_refusal_too() {
-        // Ledger 1576 (d): tracing init sat outside the containment.
-        let Decision::Deny(reason) = decide("pre-tool-guard", || panic!("init broke")) else {
-            panic!("a panic in setup was let through as an allow");
-        };
-        assert!(reason.contains("init broke"), "{reason}");
-    }
-
-    #[test]
-    fn a_panic_in_a_write_back_handler_allows() {
+    fn a_panic_in_a_handler_or_its_setup_allows() {
         // The deliberate fail-open (plan, handler `task-update`): TaskCompleted
-        // has no matcher, so a deny-on-panic would block every completion.
-        for name in write_back::NAMES {
+        // has no matcher, so a deny-on-panic would block every completion. A
+        // retired handler judges nothing, so it allows on a panic too.
+        for name in write_back::NAMES.iter().chain(&["pre-tool-guard"]) {
             assert_eq!(
-                decide_open(name, || panic!("planted")),
+                decide(name, || panic!("planted")),
                 Decision::Allow,
                 "{name}"
             );
         }
-        // And the guard still refuses on the same panic.
-        assert!(matches!(
-            decide("pre-tool-guard", || panic!("planted")),
-            Decision::Deny(_)
-        ));
     }
 
     #[test]
@@ -294,13 +252,13 @@ mod tests {
         let args = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
         let name = |v: &[&str]| hook_name(args(v).into_iter());
         assert_eq!(
-            name(&["yaadgaar", "hook", "pre-tool-guard"]).as_deref(),
-            Some("pre-tool-guard")
+            name(&["yaadgaar", "hook", "task-update"]).as_deref(),
+            Some("task-update")
         );
         // A trailing flag is not clap's to judge any more.
         assert_eq!(
-            name(&["yaadgaar", "hook", "pre-tool-guard", "--help"]).as_deref(),
-            Some("pre-tool-guard")
+            name(&["yaadgaar", "hook", "task-update", "--help"]).as_deref(),
+            Some("task-update")
         );
         assert_eq!(name(&["yaadgaar", "hook"]), None);
         assert_eq!(name(&["yaadgaar", "serve"]), None);

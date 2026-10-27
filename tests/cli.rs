@@ -211,24 +211,6 @@ fn an_uninstall_leaves_the_configs_of_a_machine_it_was_installed_on() {
 }
 
 #[test]
-fn guard_status_names_the_mode_and_the_binary() {
-    // THE WIRING of `yaadgaar guard status` (ADR-1028). Which mode it reports
-    // depends on whether this machine has the protected directory, so only
-    // the shape is asserted; `hook::mode` tests every mode.
-    let home = scratch("guard-status");
-    let output = Command::new(env!("CARGO_BIN_EXE_yaadgaar"))
-        .args(["guard", "status"])
-        .env("HOME", &home)
-        .output()
-        .expect("the binary under test did not run");
-    let said = stdout_of(&output);
-    assert!(output.status.success(), "{output:?}");
-    assert!(said.starts_with("mode: "), "{said}");
-    assert!(said.contains("guard binary: "), "{said}");
-    assert!(!said.contains("disabled_guards"), "{said}");
-}
-
-#[test]
 fn enrol_is_a_command_the_binary_actually_has() {
     // THE WIRING, and nothing about the decoding. `login::enrol` and every rule
     // it enforces are covered as units; what no unit can see is a `Command`

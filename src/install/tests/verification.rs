@@ -129,7 +129,7 @@ fn an_install_removed_by_hand_is_never_reported_clean() {
 fn verify_catches_one_hook_deleted_by_hand() {
     // The realistic shape: somebody edits settings.json and takes the entry
     // out. Every other hook on the machine still fires, so nothing else
-    // notices that the guard no longer does.
+    // notices that the task write-back no longer does.
     let home = scratch("verify-hook-gone");
     let layout = Layout::new(&home);
     install_with(&home, Path::new(BINARY)).unwrap();
@@ -145,7 +145,7 @@ fn verify_catches_one_hook_deleted_by_hand() {
     assert!(
         found.iter().any(|d| matches!(
             d,
-            Drift::HookMissing { name, .. } if name == "pre-tool-guard"
+            Drift::HookMissing { name, .. } if name == "task-update"
         )),
         "{found:#?}"
     );

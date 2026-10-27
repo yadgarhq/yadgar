@@ -1,8 +1,8 @@
 //! The exit status of `yaadgaar hook`, read off the built binary (ledger 1576).
 //!
 //! Exit 2 blocks the tool call. Exit 101 (a panic) and exit 0 are both read by
-//! Claude Code as "let it run", so each path that could end in either is pinned
-//! here against the real process.
+//! Claude Code as "let it run", so the status of each path is pinned here
+//! against the real process.
 
 #![cfg(unix)]
 
@@ -39,18 +39,16 @@ fn a_hook_invocation_with_bad_arguments_exits_2_not_101() {
 /// it does not (ledger 837).
 #[cfg(debug_assertions)]
 #[test]
-fn a_panic_before_dispatch_exits_2() {
+fn a_panic_before_dispatch_of_a_retired_handler_exits_0_and_silently() {
+    // A retired entry an older install left (here the removed agent guard)
+    // judges nothing, so a panic in its setup is contained and allows, and
+    // neither stream carries the panic.
     let out = hook(
         &["pre-tool-guard"],
         &[("YAADGAAR_TEST_PANIC_IN_SETUP", "1")],
     );
-    assert_eq!(out.status.code(), Some(2), "{out:?}");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("planted panic in the hook's setup"),
-        "{stderr}"
-    );
-    assert!(!stderr.contains("panicked at"), "{stderr}");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
     assert!(out.stdout.is_empty(), "{out:?}");
 }
 

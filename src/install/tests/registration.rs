@@ -46,18 +46,11 @@ fn foreign_hook_entries_survive_an_install() {
 /// assertion this replaces compared the installed entry against the same
 /// `HookSpec` the installer had just used to write it, so both sides of the
 /// `assert_eq!` moved together and the test could only ever pass. Two measured
-/// consequences: changing `pre-tool-guard`'s matcher to `"Bash"` was MISSED,
-/// which silently un-routes the incident the matcher exists for — an agent used
-/// Edit, not Bash, to add itself to a push allowlist — and flipping
+/// consequences: narrowing a registration's matcher was MISSED, which silently
+/// un-routes the calls the matcher exists for, and flipping
 /// `pre-compact-drain` to synchronous was MISSED, after which every compaction
 /// blocks on the drain.
 const EXPECTED_REGISTRATIONS: &[(&str, &str, &str, bool)] = &[
-    (
-        "PreToolUse",
-        "pre-tool-guard",
-        "Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell",
-        false,
-    ),
     // EVERY source — startup, resume, clear and compact — and SYNCHRONOUS:
     // the listing is context the session must hold before its first prompt,
     // and an async hook's output arrives after it (ADR-0992).
@@ -139,7 +132,7 @@ fn one_written_entry_is_pinned_as_literal_bytes() {
 
     assert_eq!(
         settings["hooks"]["PreToolUse"].to_string(),
-        r#"[{"matcher":"Bash|Edit|Write|MultiEdit|NotebookEdit|PowerShell","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook pre-tool-guard"}]},{"matcher":"TaskUpdate","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook task-update"}]}]"#
+        r#"[{"matcher":"TaskUpdate","hooks":[{"type":"command","command":"/usr/local/bin/yaadgaar hook task-update"}]}]"#
     );
     assert_eq!(
         settings["hooks"]["TaskCompleted"].to_string(),
@@ -256,14 +249,14 @@ fn a_stale_registration_is_replaced_rather_than_duplicated() {
     seed(
         &home,
         json!({ "hooks": { "PreToolUse": [
-            { "matcher": "Bash|Edit|Write|NotebookEdit", "hooks": [{ "type": "command", "command": "/old/path/yaadgaar hook pre-tool-guard" }] }
+            { "matcher": "Bash", "hooks": [{ "type": "command", "command": "/old/path/yaadgaar hook task-update" }] }
         ]}}),
     );
     install_with(&home, Path::new(BINARY)).unwrap();
     let settings = read_json(&Layout::new(&home).settings());
     let entries = settings["hooks"]["PreToolUse"].as_array().unwrap();
-    // The guard and task-update, once each: the stale guard did not survive.
-    assert_eq!(entries.len(), 2, "{entries:#?}");
+    // task-update, once: the stale registration did not survive.
+    assert_eq!(entries.len(), 1, "{entries:#?}");
     for entry in entries {
         assert!(hooks::entry_commands(entry)[0].starts_with(BINARY));
     }
@@ -289,10 +282,10 @@ fn a_stale_hook_behind_a_foreign_one_in_the_same_entry_is_replaced_not_doubled()
     assert_eq!(
         commands
             .iter()
-            .filter(|c| c.ends_with("hook pre-tool-guard"))
+            .filter(|c| c.ends_with("hook task-update"))
             .count(),
         1,
-        "pre-tool-guard fires more than once: {commands:#?}"
+        "task-update fires more than once: {commands:#?}"
     );
     assert!(
         !commands.iter().any(|c| c.starts_with("/old/path/")),
@@ -318,7 +311,7 @@ fn an_uninstall_empties_a_shared_entry_of_ours_and_leaves_the_foreign_hook() {
         "uninstall ate the foreign hook: {commands:#?}"
     );
     assert!(
-        !commands.iter().any(|c| c.contains("hook pre-tool-guard")),
+        !commands.iter().any(|c| c.contains("hook task-update")),
         "a live yadgar hook was left behind: {commands:#?}"
     );
 }
@@ -336,7 +329,7 @@ fn verify_sees_a_duplicate_hidden_behind_a_foreign_hook_in_the_same_entry() {
         .unwrap()
         .push(json!({ "matcher": "Bash", "hooks": [
             { "type": "command", "command": "/usr/bin/other-tool run" },
-            { "type": "command", "command": "/somewhere/else/yaadgaar hook pre-tool-guard" }
+            { "type": "command", "command": "/somewhere/else/yaadgaar hook task-update" }
         ]}));
     std::fs::write(layout.settings(), settings.to_string()).unwrap();
 
@@ -344,7 +337,7 @@ fn verify_sees_a_duplicate_hidden_behind_a_foreign_hook_in_the_same_entry() {
     assert!(
         found.iter().any(|d| matches!(
             d,
-            Drift::HookDuplicated { name, .. } if name == "pre-tool-guard"
+            Drift::HookDuplicated { name, .. } if name == "task-update"
         )),
         "{found:#?}"
     );

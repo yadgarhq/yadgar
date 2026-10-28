@@ -18,6 +18,11 @@
 //! scope is ADOPTED. Every other record of it is deleted, and
 //! `.highwatermark` is raised over them even when a later action fails. A file owned by nothing is never
 //! written from: adoption only writes it from yaadgaar.
+//!
+//! A FORK ALSO COPIES RECORDS OF CLOSED TASKS (#460). A record no state owns,
+//! of a task out of scope, is deleted only after yaadgaar lists that task as
+//! done or dropped, read once per pass and only when such a record exists
+//! (`sync/stale.rs`). A failed read keeps every such record.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -25,15 +30,17 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::plan::{plan, Action};
+use super::plan::plan;
 use super::record::{self, Desired};
 use super::scope::Scope;
 use super::shape::Listing;
 use super::state::{self, State};
 use super::Env;
 
+mod apply;
 mod files;
-use files::{adopt_copy, drop_copy, temp_with};
+mod stale;
+use apply::apply;
 pub(crate) use files::{read_json, remove, rewrite, stamp_highwatermark};
 
 /// One yaadgaar task from the listing. `urn` and `version` are optional
@@ -57,7 +64,15 @@ pub struct Input<'a> {
     pub scope: Scope,
     /// The freshness bound on a completion marker; staler ones are pruned.
     pub completion_ttl: std::time::Duration,
+    /// Reads the project's done and dropped tasks from yaadgaar (#460).
+    /// Called at most once, and only when the list holds a record this
+    /// client wrote of a task out of scope that the state does not own.
+    /// `None`: no such record is ever deleted.
+    pub closed: Option<&'a dyn Fn() -> Result<Closed, String>>,
 }
+
+/// The project's done and dropped tasks: URN to task number.
+pub type Closed = BTreeMap<String, i64>;
 
 /// What a pass did, for the banner.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -72,6 +87,10 @@ pub struct Outcome {
     pub diverged: usize,
     /// Extra copies of a mirrored task deleted (a fork's copied list, #458).
     pub duplicates: usize,
+    /// Records of done or dropped tasks the state did not own, deleted (#460).
+    pub stale: usize,
+    /// Such records kept because yaadgaar could not be read (#460).
+    pub stale_kept: usize,
     /// In-scope rows with no usable URN or version.
     pub skipped: usize,
     /// The lowest owned task id and its state's harness status; set when the pass wrote.
@@ -86,9 +105,6 @@ pub const PANIC_PROJECT: &str = "test/panic-in-the-sync";
 
 /// How long a pass waits for another pass on the same list.
 const LOCK_WAIT: Duration = Duration::from_secs(2); // ADR-0569-EXCEPTION(CC): bounds the session-start wait for a concurrent pass; far below the hook's own DEADLINE.
-
-/// How many ids past the first free one a create tries before giving up.
-const CREATE_ATTEMPTS: u64 = 64; // ADR-0569-EXCEPTION(CB): bound on a retry loop against ids Claude Code takes concurrently, not a per-install knob.
 
 /// Run one pass into *dir*, the list the probe found ready with *listing*.
 pub fn run(
@@ -148,11 +164,19 @@ pub fn run(
         );
     }
     let (desired, skipped) = desired(input);
-    let actions = plan(&desired, &st, &files, input.complete);
+    let mut actions = plan(&desired, &st, &files, input.complete);
     let mut out = Outcome {
         skipped,
         ..Outcome::default()
     };
+    // Only with the whole listing: then a task missing from it is truly out
+    // of scope, and the banner's "nothing was removed" stays true otherwise.
+    if let (true, Some(lookup)) = (input.complete, input.closed) {
+        match stale::actions(&desired, &st, &files, lookup) {
+            Ok(more) => actions.extend(more),
+            Err(kept) => out.stale_kept = kept,
+        }
+    }
     let save = |st: &State| state::save(&spath, st);
     let applied = apply(
         dir, listing, &files, &desired, &actions, &mut st, &mut out, &save,
@@ -279,129 +303,6 @@ fn desired(input: &Input) -> (Vec<Desired>, usize) {
     (out, skipped)
 }
 
-/// Apply *actions* in order, recording each in *st* as it lands. *save*
-/// persists *st*; a create calls it before each link (the intent record).
-#[allow(clippy::too_many_arguments)]
-fn apply(
-    dir: &Path,
-    listing: &Listing,
-    files: &BTreeMap<u64, Value>,
-    desired: &[Desired],
-    actions: &[Action],
-    st: &mut State,
-    out: &mut Outcome,
-    save: &dyn Fn(&State) -> Result<(), String>,
-) -> Result<(), String> {
-    let find = |urn: &str| desired.iter().find(|d| d.urn == urn);
-    let mut next = files
-        .keys()
-        .copied()
-        .chain(listing.highwatermark)
-        .chain(st.entries.values().map(|e| e.harness_id))
-        .max()
-        .unwrap_or(0)
-        + 1;
-    // The intent record for EVERY create of this pass, saved ONCE before the
-    // first link: one state write, not one per create. A create whose planned
-    // id is taken re-plans from `next` and saves again (rare: only a file
-    // that appeared after the scan).
-    for action in actions {
-        if let Action::Create { urn, .. } = action {
-            let d = find(urn).ok_or("a create for a task not in scope")?;
-            st.creating.insert(urn.clone(), entry(next, d));
-            next += 1;
-        }
-    }
-    if !st.creating.is_empty() {
-        save(st)?;
-    }
-    // The highest id deleted so far. Stamped into `.highwatermark` even when
-    // a later action fails: a deleted id must never be handed out again.
-    let mut deleted_max = None;
-    let applied = (|| {
-        for action in actions {
-            match action {
-                Action::Create { urn, recreated } => {
-                    let d = find(urn).ok_or("a create for a task not in scope")?;
-                    let id = create(dir, &mut next, d, st, save)?;
-                    st.entries.insert(urn.clone(), entry(id, d));
-                    if *recreated {
-                        out.recreated += 1;
-                    } else {
-                        out.created += 1;
-                    }
-                }
-                Action::Update {
-                    urn,
-                    harness_id,
-                    refreshed,
-                } => {
-                    let d = find(urn).ok_or("an update for a task not in scope")?;
-                    if rewrite(dir, *harness_id, d)? {
-                        st.entries.insert(urn.clone(), entry(*harness_id, d));
-                        if *refreshed {
-                            out.refreshed += 1;
-                        } else {
-                            out.updated += 1;
-                        }
-                    } else {
-                        st.entries.remove(urn);
-                    }
-                }
-                Action::Keep { urn } => {
-                    if let (Some(d), Some(e)) = (find(urn), st.entries.get_mut(urn)) {
-                        (e.version, e.status, e.title) =
-                            (d.version, d.status.clone(), d.title.clone());
-                    }
-                }
-                Action::Diverged { .. } => out.diverged += 1,
-                Action::Delete { urn, harness_id } => {
-                    if remove(dir, *harness_id, urn)? {
-                        out.deleted += 1;
-                        deleted_max = deleted_max.max(Some(*harness_id));
-                    }
-                    st.entries.remove(urn);
-                }
-                Action::Forget { urn } => {
-                    st.entries.remove(urn);
-                }
-                Action::Adopt { urn, harness_id } => {
-                    let d = find(urn).ok_or("an adopt for a task not in scope")?;
-                    match adopt_copy(dir, *harness_id, d)? {
-                        Some(wrote) => {
-                            st.entries.insert(urn.clone(), entry(*harness_id, d));
-                            out.updated += usize::from(wrote);
-                        }
-                        // Changed hands since the scan: the next pass settles it.
-                        None => {
-                            st.entries.remove(urn);
-                        }
-                    }
-                }
-                Action::Drop { urn, harness_id } => {
-                    let d = find(urn).ok_or("a drop for a task not in scope")?;
-                    // Only while a kept record of the task is owned: a failed
-                    // adopt must never leave the task with no file at all.
-                    let kept = st
-                        .entries
-                        .get(urn)
-                        .is_some_and(|e| e.harness_id != *harness_id);
-                    if kept && drop_copy(dir, *harness_id, d)? {
-                        out.duplicates += 1;
-                        deleted_max = deleted_max.max(Some(*harness_id));
-                    }
-                }
-            }
-        }
-        Ok::<(), String>(())
-    })();
-    let stamped = match deleted_max {
-        Some(id) => stamp_highwatermark(dir, listing.highwatermark.unwrap_or(0).max(id)),
-        None => Ok(()),
-    };
-    applied.and(stamped)
-}
-
 pub(crate) fn entry(id: u64, d: &Desired) -> state::Entry {
     state::Entry {
         harness_id: id,
@@ -411,56 +312,6 @@ pub(crate) fn entry(id: u64, d: &Desired) -> state::Entry {
         title: d.title.clone(),
         written: record::record(id, d),
     }
-}
-
-/// Create the record under the first free id from *next*, NEVER replacing a
-/// file: `hard_link` fails on an existing name, which is a file that appeared
-/// after the scan (Claude Code's own create), so the next id is tried.
-///
-/// CRASH-SAFE: the id it links is the one its intent ([`State::creating`])
-/// already names on disk. A crash after the link and before the next save
-/// leaves a file the next pass adopts by that intent, never a duplicate. A
-/// taken id is replaced by a fresh one from *next*, saved before its link.
-fn create(
-    dir: &Path,
-    next: &mut u64,
-    d: &Desired,
-    st: &mut State,
-    save: &dyn Fn(&State) -> Result<(), String>,
-) -> Result<u64, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let result = (|| {
-        for attempt in 0..CREATE_ATTEMPTS {
-            let id = match st.creating.get(&d.urn) {
-                Some(intent) if attempt == 0 => intent.harness_id,
-                _ => {
-                    let id = *next;
-                    *next += 1;
-                    st.creating.insert(d.urn.clone(), entry(id, d));
-                    save(st)?;
-                    id
-                }
-            };
-            let body = record::record(id, d).to_string();
-            let tmp = temp_with(dir, body.as_bytes())?;
-            let target = dir.join(format!("{id}.json"));
-            let linked = std::fs::hard_link(&tmp, &target);
-            let _ = std::fs::remove_file(&tmp);
-            match linked {
-                Ok(()) => {
-                    #[cfg(test)]
-                    tests::crash_point();
-                    return Ok(id);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(format!("{}: {e}", target.display())),
-            }
-        }
-        Err(format!("no free task id after {CREATE_ATTEMPTS} tries"))
-    })();
-    // Settled either way: linked (the caller records the entry), or not.
-    st.creating.remove(&d.urn);
-    result
 }
 
 #[cfg(test)]

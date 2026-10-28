@@ -50,6 +50,7 @@ fn report_for<'a>(scope: Option<&str>, project: &'a str, tasks: &'a [Task]) -> R
         tasks,
         complete: true,
         completion_ttl: crate::harness::scope::COMPLETION_TTL,
+        closed: None,
     }
 }
 
@@ -417,5 +418,70 @@ fn the_task_update_request_names_the_status_to_send() {
             l.contains(&format!("taskId \"1\" with status \"{harness}\"")),
             "{yaadgaar}: {l}"
         );
+    }
+}
+
+#[test]
+fn a_delete_only_pass_reads_no_closed_tasks_and_leaves_unowned_copies() {
+    // yaadgaar #460's stale pass is for a running sync. With the sync off,
+    // only what the state owns is removed: an unowned copy of a task is kept,
+    // and yaadgaar is not read for it.
+    let home = home("adapter-off-no-stale");
+    let env = env(&home);
+    line(&home, None, &env).expect("a first, real pass");
+    let copy = list(&home).join("7.json");
+    let mut body: Value =
+        serde_json::from_str(&std::fs::read_to_string(list(&home).join("1.json")).unwrap())
+            .unwrap();
+    body["id"] = json!("7");
+    std::fs::write(&copy, body.to_string()).unwrap();
+    let calls = std::cell::Cell::new(0);
+    let closed = || {
+        calls.set(calls.get() + 1);
+        Ok(tasks()
+            .into_iter()
+            .map(|t| (t.urn.unwrap(), t.number))
+            .collect())
+    };
+    let tasks = tasks();
+    let report = Report {
+        closed: Some(&closed),
+        ..report_for(Some("none"), "yadgarhq/docs", &tasks)
+    };
+    let off = session_line(Some(&payload(&home)), &report, &env).expect("a line");
+    assert!(off.contains("4 mirrored tasks removed"), "{off}");
+    assert_eq!(calls.get(), 0);
+    assert!(copy.exists());
+}
+
+#[test]
+fn one_copy_is_counted_in_the_singular_and_more_in_the_plural() {
+    let one = Outcome {
+        duplicates: 1,
+        stale: 1,
+        stale_kept: 1,
+        ..Outcome::default()
+    };
+    let line = synced(&one, true);
+    for part in [
+        "1 duplicate copy removed",
+        "1 copy of done or dropped tasks removed",
+        "1 copy of tasks out of scope kept",
+    ] {
+        assert!(line.contains(part), "{line}");
+    }
+    let two = Outcome {
+        duplicates: 2,
+        stale: 2,
+        stale_kept: 2,
+        ..Outcome::default()
+    };
+    let line = synced(&two, true);
+    for part in [
+        "2 duplicate copies removed",
+        "2 copies of done or dropped tasks removed",
+        "2 copies of tasks out of scope kept",
+    ] {
+        assert!(line.contains(part), "{line}");
     }
 }

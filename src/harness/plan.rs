@@ -5,11 +5,12 @@
 //! returns the actions. Every rule of the three-way table in
 //! `plans/harness-task-sync.md` is here, so every rule is a unit test.
 //!
-//! A file that S does not list is never in an action, with one exception: a
-//! record of a task in D (its ownership line names the task's URN, or it is a
-//! legacy seed of it) is adopted or dropped, so each task has ONE file (#458).
-//! Model-written tasks, engine-written tasks and other tools' tasks are left
-//! exactly as they are.
+//! A file that S does not list is never in an action this planner returns,
+//! with one exception: a record of a task in D (its ownership line names the
+//! task's URN, or it is a legacy seed of it) is adopted or dropped, so each
+//! task has ONE file (#458). The sync adds a second exception after it reads
+//! yaadgaar: [`Action::Stale`] (#460). Model-written tasks, engine-written
+//! tasks and other tools' tasks are left exactly as they are.
 
 use std::collections::BTreeMap;
 
@@ -47,6 +48,14 @@ pub enum Action {
     Adopt { urn: String, harness_id: u64 },
     /// Delete another record of the same task: one file per URN.
     Drop { urn: String, harness_id: u64 },
+    /// Delete a record S does not own of a task yaadgaar lists as done or
+    /// dropped (#460). Never planned here: [`plan`] does not know a task's
+    /// status out of scope. The sync adds it after a lookup.
+    Stale {
+        urn: String,
+        number: i64,
+        harness_id: u64,
+    },
 }
 
 /// Plan one pass. *complete* is false when the listing stopped early: then

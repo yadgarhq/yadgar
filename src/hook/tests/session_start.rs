@@ -380,7 +380,7 @@ fn each_gateway_failure_becomes_a_reason_and_never_a_listing() {
     ];
     for (outcome, said) in cases {
         let label = format!("{outcome:?}");
-        let Err(failure) = page(outcome) else {
+        let Err(failure) = page::<Row>(outcome) else {
             panic!("{label} was read as a task list");
         };
         assert!(!matches!(failure, Failure::Unregistered), "{label}");
@@ -399,14 +399,14 @@ fn only_an_unregistered_project_refusal_is_out_of_scope() {
     ] {
         let outcome = Outcome::Rejected(reqwest::StatusCode::BAD_REQUEST, None, Some(token.into()));
         assert!(
-            matches!(page(outcome), Err(Failure::Unregistered)),
+            matches!(page::<Row>(outcome), Err(Failure::Unregistered)),
             "{token}"
         );
     }
     for token in ["PROJECT_INVALID", "PROJECT_ARCHIVED", "SOMETHING_ELSE"] {
         let outcome = Outcome::Rejected(reqwest::StatusCode::BAD_REQUEST, None, Some(token.into()));
         assert!(
-            !matches!(page(outcome), Err(Failure::Unregistered)),
+            !matches!(page::<Row>(outcome), Err(Failure::Unregistered)),
             "{token}"
         );
     }

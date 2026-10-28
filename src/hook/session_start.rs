@@ -167,18 +167,24 @@ pub fn notice(failure: &Failure) -> String {
 
 /// Every open task for the caller's project, within *deadline*.
 pub async fn list(caller: &ToolCaller, deadline: Duration) -> Result<Listing, Failure> {
-    tokio::time::timeout(deadline, pages(caller))
+    let open = pages(caller, &["in_progress", "open", "blocked"]);
+    tokio::time::timeout(deadline, open)
         .await
         .unwrap_or(Err(Failure::TimedOut(deadline.as_secs())))
+        .map(|(rows, complete)| Listing { rows, complete })
 }
 
 /// Follow `next_page_token` until it runs out or [`MAX_PAGES`] is reached.
-async fn pages(caller: &ToolCaller) -> Result<Listing, Failure> {
+/// The rows, and `false` when [`MAX_PAGES`] stopped the paging.
+async fn pages<R: serde::de::DeserializeOwned>(
+    caller: &ToolCaller,
+    statuses: &[&str],
+) -> Result<(Vec<R>, bool), Failure> {
     let mut rows = Vec::new();
     let mut token: Option<String> = None;
     for _ in 0..MAX_PAGES {
         let mut arguments = json!({
-            "statuses": ["in_progress", "open", "blocked"],
+            "statuses": statuses,
             "fields": "summary",
             "page_size": PAGE_SIZE,
         });
@@ -189,22 +195,16 @@ async fn pages(caller: &ToolCaller) -> Result<Listing, Failure> {
         rows.append(&mut page);
         match next {
             Some(next) => token = Some(next),
-            None => {
-                return Ok(Listing {
-                    rows,
-                    complete: true,
-                })
-            }
+            None => return Ok((rows, true)),
         }
     }
-    Ok(Listing {
-        rows,
-        complete: false,
-    })
+    Ok((rows, false))
 }
 
 /// One `find_tasks` answer: its rows, and the token for the next page if any.
-fn page(outcome: Outcome) -> Result<(Vec<Row>, Option<String>), Failure> {
+fn page<R: serde::de::DeserializeOwned>(
+    outcome: Outcome,
+) -> Result<(Vec<R>, Option<String>), Failure> {
     let body = match outcome {
         Outcome::Answered(body) => body,
         // reqwest's text names the full gateway URL and nothing more useful, so
@@ -250,7 +250,7 @@ fn page(outcome: Outcome) -> Result<(Vec<Row>, Option<String>), Failure> {
         )));
     }
     let content = result.get("structuredContent").ok_or_else(malformed)?;
-    let rows: Vec<Row> = serde_json::from_value(content.get("tasks").cloned().unwrap_or_default())
+    let rows: Vec<R> = serde_json::from_value(content.get("tasks").cloned().unwrap_or_default())
         .map_err(|_| malformed())?;
     let next = content
         .get("next_page_token")
@@ -324,8 +324,17 @@ pub fn context_text_in(
         Ok(s) => (Ok(s.scope), s.completion_ttl),
         Err(e) => (Err(e), crate::harness::scope::COMPLETION_TTL),
     };
+    let closed_config = config.clone();
     let caller = ToolCaller::new(client, config, &cwd);
     let project = caller.project()?.to_string();
+    let lookup = || {
+        closed(
+            &closed_config,
+            &cwd,
+            &project,
+            deadline.min(CLOSED_DEADLINE),
+        )
+    };
     let listed = block_on_bounded(list(&caller, deadline));
     // The registry record (yaadgaar #403), BEFORE the out-of-scope return so
     // an explicit "no such project" lands too. A fault is not an answer, and
@@ -346,6 +355,7 @@ pub fn context_text_in(
                 tasks: &tasks,
                 complete: listing.complete,
                 completion_ttl,
+                closed: Some(&lookup),
             };
             let line = crate::harness::adapter::session_report(payload.as_ref(), &report, env);
             let mirrored = line.as_ref().map_or(0, |l| l.mirrored);
@@ -359,6 +369,56 @@ pub fn context_text_in(
         Err(Failure::Unregistered) => None,
         Err(failure) => Some(notice(&failure)),
     }
+}
+
+/// How long the read of the done and dropped tasks may take (#460).
+///
+/// SHORT, because the sync holds its list lock while it waits, and a
+/// write-back hook waits at most two seconds for that lock. The listing
+/// before it has already warmed the gateway's cold path. A timeout keeps
+/// every file, as any failed read does.
+const CLOSED_DEADLINE: Duration = Duration::from_secs(4); // ADR-0569-EXCEPTION(CC): bounds a read made while the sync holds its list lock; coupled to the warm gateway path, stated above.
+
+/// One row of the done and dropped listing: what the sync needs to delete a
+/// stale record, and the status the row really carries.
+#[derive(Deserialize)]
+struct ClosedRow {
+    number: i64,
+    #[serde(default)]
+    id: Option<Value>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// The done and dropped tasks a listing for *project* holds, for the harness
+/// sync (#460).
+///
+/// ITS OWN CLIENT AND RUNTIME: the listing's runtime is gone by now, and a
+/// connection pooled on it would be dead. Keyed by URN alone: a task id is
+/// unique across every project, so a URN in this set names exactly one task
+/// that is done or dropped, wherever it lives. Only a row whose own status is
+/// done or dropped counts, whatever `statuses` the gateway honoured. A listing
+/// that stopped early is still a true answer for every row it holds.
+fn closed(
+    config: &Config,
+    cwd: &Path,
+    project: &str,
+    deadline: Duration,
+) -> Result<crate::harness::sync::Closed, String> {
+    let client = crate::trust::client(config.ca_pem(), Some(deadline * 2))
+        .map_err(|e| printable(&e.to_string()))?;
+    let caller = ToolCaller::for_project(client, config.clone(), cwd, project);
+    let read = async {
+        tokio::time::timeout(deadline, pages::<ClosedRow>(&caller, &["done", "dropped"]))
+            .await
+            .unwrap_or(Err(Failure::TimedOut(deadline.as_secs())))
+    };
+    let (rows, _) = block_on_bounded(read).map_err(|f| f.to_string())?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| matches!(r.status.as_deref(), Some("done" | "dropped")))
+        .filter_map(|r| Some((r.id?.as_str()?.to_string(), r.number)))
+        .collect())
 }
 
 /// Run *work* on a runtime of its own, and leave without waiting for it.

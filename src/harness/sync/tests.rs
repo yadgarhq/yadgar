@@ -1,4 +1,5 @@
 use super::*;
+use crate::harness::plan::Action;
 
 use std::path::PathBuf;
 
@@ -80,6 +81,7 @@ fn pass_with(f: &Fixture, tasks: &[Task], complete: bool, scope: Scope) -> Resul
         complete,
         scope,
         completion_ttl: crate::harness::scope::COMPLETION_TTL,
+        closed: None,
     };
     run(&f.dir, "s-1", &listing(&f.dir), &f.env, &input)
 }
@@ -212,6 +214,7 @@ fn a_file_that_appeared_after_the_scan_is_not_overwritten() {
         complete: true,
         scope: Scope::AllOpen,
         completion_ttl: crate::harness::scope::COMPLETION_TTL,
+        closed: None,
     };
     run(&f.dir, "s-1", &scanned, &f.env, &input).unwrap();
     assert_eq!(
@@ -329,6 +332,7 @@ fn a_shared_list_that_mirrors_another_project_is_refused() {
         complete: true,
         scope: Scope::AllOpen,
         completion_ttl: crate::harness::scope::COMPLETION_TTL,
+        closed: None,
     };
     let err = run(&f.dir, "s-1", &listing(&f.dir), &f.env, &input).unwrap_err();
     assert!(err.contains(PROJECT), "{err}");
@@ -383,6 +387,7 @@ fn no_state_home_and_no_home_is_refused() {
         complete: true,
         scope: Scope::AllOpen,
         completion_ttl: crate::harness::scope::COMPLETION_TTL,
+        closed: None,
     };
     assert!(run(&f.dir, "s-1", &Listing::default(), &env, &input).is_err());
     assert!(!f.dir.exists());
@@ -534,6 +539,7 @@ fn a_delete_never_lowers_a_high_water_mark_raised_after_the_scan() {
         complete: true,
         scope: Scope::AllOpen,
         completion_ttl: crate::harness::scope::COMPLETION_TTL,
+        closed: None,
     };
     let out = run(&f.dir, "s-1", &scanned, &f.env, &input).unwrap();
     assert_eq!(out.deleted, 1);
@@ -572,6 +578,7 @@ fn two_config_dirs_sharing_one_list_id_do_not_share_a_state() {
         complete: true,
         scope: Scope::AllOpen,
         completion_ttl: crate::harness::scope::COMPLETION_TTL,
+        closed: None,
     };
     let err = run(&other, "s-1", &Listing::default(), &f.env, &input).unwrap_err();
     assert!(err.contains("other-claude"), "{err}");
@@ -686,6 +693,7 @@ fn pass_on(f: &Fixture, id: &str, tasks: &[Task]) -> Result<Outcome, String> {
         complete: true,
         scope: Scope::AllOpen,
         completion_ttl: crate::harness::scope::COMPLETION_TTL,
+        closed: None,
     };
     run(&dir, id, &listing(&dir), &f.env, &input)
 }
@@ -975,3 +983,6 @@ fn a_pass_that_fails_midway_still_stamps_the_ids_it_already_deleted() {
     assert_eq!(files(&f.dir).keys().copied().collect::<Vec<_>>(), [1]);
     assert!(hwm(&f.dir) >= 9, "hwm {} after a failed pass", hwm(&f.dir));
 }
+
+#[path = "tests/stale.rs"]
+mod stale_records;

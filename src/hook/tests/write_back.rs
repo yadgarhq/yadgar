@@ -751,6 +751,7 @@ fn a_failed_refresh_after_a_partial_write_leaves_the_version_stale_so_the_next_s
         complete: true,
         scope: crate::harness::scope::Scope::AllOpen,
         completion_ttl: crate::harness::scope::COMPLETION_TTL,
+        closed: None,
     };
     let listing =
         crate::harness::shape::check_dir(&home.list(), &crate::harness::shape::recorded().unwrap())

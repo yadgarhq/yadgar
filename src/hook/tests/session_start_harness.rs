@@ -254,3 +254,118 @@ fn a_banner_keeps_its_titles_when_the_mirror_is_off() {
     assert!(text.contains("- #3 [open] Write the runbook"), "{text}");
     assert!(!text.contains("mirrored into the task list"), "{text}");
 }
+
+/// A legacy seed record of task *number* at *urn*, as `seed_tasks.py` wrote it.
+fn legacy_seed(list: &Path, id: u64, number: i64, urn: &str) {
+    let body = json!({
+        "id": id.to_string(),
+        "subject": format!("#{number} closed"),
+        "description": format!("yaadgaar #{number} · {urn} · done"),
+        "status": "completed",
+        "blocks": [],
+        "blockedBy": []
+    });
+    std::fs::write(list.join(format!("{id}.json")), body.to_string()).unwrap();
+}
+
+#[test]
+fn a_copied_record_of_a_done_task_is_deleted_after_one_read_of_the_closed_tasks() {
+    // yaadgaar #460, end to end: the second request reads the done and
+    // dropped tasks, on a client of its own. Only a listed URN whose row is
+    // really done or dropped counts.
+    let dir = workspace("ssh-cc-stale");
+    let home = home("ssh-cc-stale-home");
+    let list = home.join(".claude/tasks/s-1");
+    std::fs::create_dir_all(&list).unwrap();
+    legacy_seed(&list, 1, 12, "yadgar:task:z");
+    legacy_seed(&list, 2, 13, "yadgar:task:y");
+    legacy_seed(&list, 3, 14, "yadgar:task:x");
+    let closed = page(
+        json!([
+            {"id":"yadgar:task:z","number":12,"title":"closed","status":"done","version":2},
+            {"id":"yadgar:task:y","number":13,"title":"open again","status":"in_progress","version":3}
+        ]),
+        "",
+    );
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let answers = vec![("200 OK", page(tasks(), "")), ("200 OK", closed)];
+    let (addr, served) = rt.block_on(crate::testserver::answer_each(answers));
+    let config = Config::new(&dir, format!("http://{addr}/"), "tok".into());
+    let text = context_text_in(
+        Ok(claude_payload(&dir, &home)),
+        Ok(config),
+        None,
+        DEADLINE,
+        &env(&home),
+    )
+    .expect("a banner");
+    let requests = rt.block_on(served).unwrap();
+    assert!(
+        text.contains("1 copy of done or dropped tasks removed"),
+        "{text}"
+    );
+    assert!(!list.join("1.json").exists(), "a done task's copy");
+    assert!(
+        list.join("2.json").exists(),
+        "a row that is not done or dropped deletes nothing"
+    );
+    assert!(list.join("3.json").exists(), "an unlisted task is kept");
+    assert!(
+        requests[1].contains(r#""statuses":["done","dropped"]"#),
+        "{}",
+        requests[1]
+    );
+}
+
+/// The closed read runs while the sync holds its list lock (#460), so a
+/// failed read must keep the record, say so, and cost no more than
+/// [`CLOSED_DEADLINE`].
+fn a_failed_closed_read(label: &str, addr: std::net::SocketAddr) {
+    let dir = workspace(label);
+    let home = home(&format!("{label}-home"));
+    let list = home.join(".claude/tasks/s-1");
+    std::fs::create_dir_all(&list).unwrap();
+    legacy_seed(&list, 1, 12, "yadgar:task:z");
+    let config = Config::new(&dir, format!("http://{addr}/"), "tok".into());
+    let started = std::time::Instant::now();
+    let text = context_text_in(
+        Ok(claude_payload(&dir, &home)),
+        Ok(config),
+        None,
+        DEADLINE,
+        &env(&home),
+    )
+    .expect("a banner");
+    let took = started.elapsed();
+    assert!(
+        text.contains("1 copy of tasks out of scope kept, their status could not be read"),
+        "{text}"
+    );
+    assert!(
+        list.join("1.json").exists(),
+        "a failed read keeps the record"
+    );
+    assert!(
+        took < CLOSED_DEADLINE + std::time::Duration::from_secs(2),
+        "the hook took {took:?}"
+    );
+}
+
+#[test]
+fn a_closed_read_that_stalls_keeps_the_record_within_its_own_deadline() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let answers = vec![("200 OK", page(tasks(), ""))];
+    let addr = rt.block_on(crate::testserver::answer_each_then_hold(answers));
+    a_failed_closed_read("ssh-cc-stale-stall", addr);
+}
+
+#[test]
+fn a_closed_read_that_fails_keeps_the_record() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let answers = vec![
+        ("200 OK", page(tasks(), "")),
+        ("500 Internal Server Error", "{}"),
+    ];
+    let (addr, _served) = rt.block_on(crate::testserver::answer_each(answers));
+    a_failed_closed_read("ssh-cc-stale-5xx", addr);
+}

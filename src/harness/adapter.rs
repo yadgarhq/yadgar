@@ -34,6 +34,8 @@ pub struct Report<'a> {
     pub complete: bool,
     /// `completion_ttl_secs` as read (the default when it could not be).
     pub completion_ttl: std::time::Duration,
+    /// Reads the project's done and dropped tasks ([`Input::closed`]).
+    pub closed: Option<&'a dyn Fn() -> Result<sync::Closed, String>>,
 }
 
 /// The line a harness adds to the banner.
@@ -89,6 +91,7 @@ impl Harness for ClaudeCode {
                     complete: report.complete,
                     scope,
                     completion_ttl: report.completion_ttl,
+                    closed: report.closed,
                 };
                 match contained(|| sync::run(&dir, &self.list_id, &listing, env, &input)) {
                     Ok(outcome) => {
@@ -129,6 +132,8 @@ impl ClaudeCode {
             complete: true,
             scope: Scope::Off,
             completion_ttl: report.completion_ttl,
+            // A delete-only pass removes what the state owns, nothing else.
+            closed: None,
         };
         match contained(|| sync::run(&dir, &self.list_id, &listing, env, &input)) {
             Ok(o) if o.deleted > 0 => format!("{off}; {} mirrored tasks removed.", o.deleted),
@@ -149,6 +154,11 @@ fn contained(pass: impl FnOnce() -> Result<Outcome, String>) -> Result<Outcome, 
         .unwrap_or_else(|_| Err("the sync failed with an internal error".to_string()))
 }
 
+/// *n* copies, singular for one: "1 duplicate copy", "2 duplicate copies".
+fn copies(n: usize, kind: &str) -> String {
+    format!("{n} {kind}{}", if n == 1 { "copy" } else { "copies" })
+}
+
 /// The line for a pass that ran.
 fn synced(o: &Outcome, complete: bool) -> String {
     let mut parts = vec![
@@ -164,7 +174,17 @@ fn synced(o: &Outcome, complete: bool) -> String {
         ));
     }
     if o.duplicates > 0 {
-        parts.push(format!("{} duplicate copies removed", o.duplicates));
+        parts.push(format!("{} removed", copies(o.duplicates, "duplicate ")));
+    }
+    if o.stale > 0 {
+        let what = copies(o.stale, "");
+        parts.push(format!("{what} of done or dropped tasks removed"));
+    }
+    if o.stale_kept > 0 {
+        let what = copies(o.stale_kept, "");
+        parts.push(format!(
+            "{what} of tasks out of scope kept, their status could not be read"
+        ));
     }
     if o.skipped > 0 {
         parts.push(format!("{} skipped, no task id", o.skipped));

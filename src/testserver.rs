@@ -60,6 +60,25 @@ pub async fn answer_each(
     (addr, served)
 }
 
+/// [`answer_each`], then accept ONE more connection and never answer it: a
+/// gateway that stalls after the first requests. The handle never completes;
+/// dropping the runtime ends it.
+pub async fn answer_each_then_hold(answers: Vec<(&'static str, &'static str)>) -> SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("a loopback port");
+    let addr = listener.local_addr().expect("the bound address");
+    tokio::spawn(async move {
+        for (status, body) in answers {
+            serve_one(&listener, status, body).await;
+        }
+        let held = listener.accept().await;
+        std::future::pending::<()>().await;
+        drop(held);
+    });
+    addr
+}
+
 /// Accept one connection on *listener*, read the whole request, answer it.
 async fn serve_one(
     listener: &tokio::net::TcpListener,

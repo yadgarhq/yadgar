@@ -1,5 +1,7 @@
 use super::*;
 
+use std::path::PathBuf;
+
 use serde_json::json;
 
 use crate::harness::shape;
@@ -452,7 +454,7 @@ fn an_interrupted_pass_then_a_resumed_one_leaves_exactly_one_file_per_task() {
 }
 
 #[test]
-fn an_orphan_a_create_left_is_adopted_only_on_its_intent() {
+fn an_orphan_a_create_left_is_adopted_on_its_intent_or_its_urn() {
     let f = fixture("sync-orphan-intent");
     std::fs::create_dir_all(&f.dir).unwrap();
     let (a, b, c) = (task(1, "open", 1), task(2, "open", 1), task(3, "open", 1));
@@ -490,10 +492,14 @@ fn an_orphan_a_create_left_is_adopted_only_on_its_intent() {
         "adopted, not duplicated"
     );
     assert!(st.creating.is_empty(), "every intent is settled");
-    assert_ne!(
+    // #458: a file that carries a task's ownership line IS that task's record
+    // (a fork copies the parent's list), so it is adopted, not written twice.
+    // Adopting gives the file no say: the pass only ever rewrites it from
+    // yaadgaar.
+    assert_eq!(
         st.entries[b.urn.as_deref().unwrap()].harness_id,
         6,
-        "never adopted by URN alone"
+        "adopted by its URN, not duplicated"
     );
     assert_ne!(st.entries[c.urn.as_deref().unwrap()].harness_id, 7);
     assert_eq!(
@@ -506,7 +512,7 @@ fn an_orphan_a_create_left_is_adopted_only_on_its_intent() {
         before7,
         "untouched"
     );
-    assert_eq!((out.created, out.recreated), (2, 0), "{out:?}");
+    assert_eq!((out.created, out.recreated), (1, 0), "{out:?}");
     let owners_of_a = files(&f.dir)
         .values()
         .filter(|v| record::owner(v) == a.urn.as_deref())
@@ -665,4 +671,307 @@ fn every_pass_prunes_stale_markers_and_markers_for_tasks_it_no_longer_mirrors() 
     pass(&f, &[task(1, "open", 1), task(2, "open", 1)]).unwrap();
     let kept: Vec<String> = state_of(&f).pending_completions.into_keys().collect();
     assert_eq!(kept, ["1"]);
+}
+
+// yaadgaar #458: a fork copies the parent's list into the new session's dir.
+// The new list id has no state, so before the fix every copied record read
+// as foreign and the pass wrote a second set above the copied mark.
+
+/// One pass on the list *id* beside the fixture's own list.
+fn pass_on(f: &Fixture, id: &str, tasks: &[Task]) -> Result<Outcome, String> {
+    let dir = f.root.join(".claude/tasks").join(id);
+    let input = Input {
+        project: PROJECT,
+        tasks,
+        complete: true,
+        scope: Scope::AllOpen,
+        completion_ttl: crate::harness::scope::COMPLETION_TTL,
+    };
+    run(&dir, id, &listing(&dir), &f.env, &input)
+}
+
+/// Copy every entry of *from* into a new dir *to*, as a fork does.
+fn copy_list(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
+        std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+    }
+}
+
+fn hwm(dir: &Path) -> u64 {
+    std::fs::read_to_string(dir.join(".highwatermark"))
+        .map(|t| t.trim().parse().unwrap())
+        .unwrap_or(0)
+}
+
+/// The record the hand-run `seed_tasks.py` wrote on 2026-09-27: no metadata,
+/// no ownership line, the URN inside a one-line description.
+fn legacy(id: u64, t: &Task) -> String {
+    json!({
+        "id": id.to_string(),
+        "subject": format!("#{} {}", t.number, t.title),
+        "description": format!("yaadgaar #{} · {} · {}", t.number, t.urn.as_deref().unwrap(), t.status),
+        "status": "pending",
+        "blocks": [],
+        "blockedBy": []
+    })
+    .to_string()
+}
+
+#[test]
+fn a_forked_list_adopts_the_copied_mirror_and_a_second_pass_writes_nothing() {
+    let f = fixture("sync-fork");
+    let tasks: Vec<Task> = (1..=3).map(|n| task(n, "open", 1)).collect();
+    pass(&f, &tasks).unwrap();
+    let fork = f.root.join(".claude/tasks/s-2");
+    copy_list(&f.dir, &fork);
+    let before = snapshot(&fork);
+
+    let out = pass_on(&f, "s-2", &tasks).unwrap();
+    assert_eq!((out.created, out.recreated), (0, 0), "{out:?}");
+    assert_eq!(out.mirrored, 3);
+    assert_eq!(snapshot(&fork), before, "the copies are already current");
+    let st = state::load(&state::path(&state::state_dir(&f.env).unwrap(), "s-2"))
+        .unwrap()
+        .unwrap();
+    let mut owned: Vec<u64> = st.entries.values().map(|e| e.harness_id).collect();
+    owned.sort_unstable();
+    assert_eq!(owned, [1, 2, 3], "the fork owns the copied ids");
+
+    // The SessionStart after the next resume or compact: nothing new.
+    let again = pass_on(&f, "s-2", &tasks).unwrap();
+    assert_eq!((again.created, again.updated), (0, 0), "{again:?}");
+    assert_eq!(snapshot(&fork), before);
+}
+
+#[test]
+fn two_files_for_one_urn_collapse_to_the_owned_one_updated_in_place() {
+    // The state of bcdb580d: the fork's state owns 5, the copied 2 carries
+    // the same URN. The owned record wins over a lower copy: the live
+    // session's own file is never the one deleted.
+    let f = fixture("sync-collapse");
+    std::fs::create_dir_all(&f.dir).unwrap();
+    let t = task(1, "open", 1);
+    std::fs::write(
+        f.dir.join("2.json"),
+        record::record(2, &desired_of(&t)).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        f.dir.join("5.json"),
+        record::record(5, &desired_of(&t)).to_string(),
+    )
+    .unwrap();
+    let mut st = State::new(PROJECT, &f.dir);
+    st.entries
+        .insert(t.urn.clone().unwrap(), entry(5, &desired_of(&t)));
+    save_state(&f, &st);
+
+    let mut moved = task(1, "in_progress", 2);
+    moved.title = "renamed".into();
+    let out = pass(&f, &[moved]).unwrap();
+    assert_eq!((out.created, out.duplicates), (0, 1), "{out:?}");
+    assert_eq!(files(&f.dir).keys().copied().collect::<Vec<_>>(), [5]);
+    assert_eq!(
+        files(&f.dir)[&5]["subject"],
+        "#1 renamed",
+        "updated in place"
+    );
+    assert_eq!(
+        state_of(&f).entries[t.urn.as_deref().unwrap()].harness_id,
+        5
+    );
+    assert!(hwm(&f.dir) >= 2, "the deleted id is never handed out again");
+
+    let again = pass(&f, &[task(1, "in_progress", 2)]).unwrap();
+    assert_eq!((again.created, again.duplicates), (0, 0), "{again:?}");
+}
+
+#[test]
+fn an_owned_record_the_agent_edited_is_kept_and_counted_and_a_lower_copy_dropped() {
+    let f = fixture("sync-collapse-diverged");
+    let t = task(1, "open", 1);
+    std::fs::create_dir_all(&f.dir).unwrap();
+    std::fs::write(
+        f.dir.join("2.json"),
+        record::record(2, &desired_of(&t)).to_string(),
+    )
+    .unwrap();
+    let mut st = State::new(PROJECT, &f.dir);
+    st.entries
+        .insert(t.urn.clone().unwrap(), entry(5, &desired_of(&t)));
+    save_state(&f, &st);
+    let mut edited = record::record(5, &desired_of(&t));
+    edited["subject"] = json!("#1 the agent's name");
+    std::fs::write(f.dir.join("5.json"), edited.to_string()).unwrap();
+
+    let out = pass(&f, std::slice::from_ref(&t)).unwrap();
+    assert_eq!((out.diverged, out.duplicates), (1, 1), "{out:?}");
+    assert_eq!(files(&f.dir).keys().copied().collect::<Vec<_>>(), [5]);
+    assert_eq!(
+        files(&f.dir)[&5],
+        edited,
+        "the edit is kept, not overwritten"
+    );
+}
+
+#[test]
+fn a_legacy_seed_record_is_adopted_and_its_later_copies_dropped() {
+    let f = fixture("sync-legacy");
+    std::fs::create_dir_all(&f.dir).unwrap();
+    let t = task(1, "open", 1);
+    std::fs::write(f.dir.join("1.json"), legacy(1, &t)).unwrap();
+    std::fs::write(
+        f.dir.join("4.json"),
+        record::record(4, &desired_of(&t)).to_string(),
+    )
+    .unwrap();
+    // A model's own task that only LOOKS like one: same subject prefix, no URN.
+    let lookalike = r##"{"id":"3","subject":"#1 task 1","description":"mine","status":"pending","blocks":[],"blockedBy":[]}"##;
+    std::fs::write(f.dir.join("3.json"), lookalike).unwrap();
+    // No state owns either record (a fresh fork): the LOWEST is kept.
+
+    let out = pass(&f, std::slice::from_ref(&t)).unwrap();
+    assert_eq!((out.created, out.duplicates), (0, 1), "{out:?}");
+    let now = files(&f.dir);
+    assert_eq!(now.keys().copied().collect::<Vec<_>>(), [1, 3]);
+    assert_eq!(
+        now[&1],
+        record::record(1, &desired_of(&t)),
+        "adopted: metadata set"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.dir.join("3.json")).unwrap(),
+        lookalike
+    );
+    assert_eq!(
+        state_of(&f).entries[t.urn.as_deref().unwrap()].harness_id,
+        1
+    );
+    assert!(hwm(&f.dir) >= 4);
+
+    // And the adoption holds: the next pass neither drops nor recreates it.
+    let again = pass(&f, &[t]).unwrap();
+    assert_eq!(
+        (again.created, again.recreated, again.updated),
+        (0, 0, 0),
+        "{again:?}"
+    );
+    assert_eq!(files(&f.dir).keys().copied().collect::<Vec<_>>(), [1, 3]);
+}
+
+#[test]
+fn a_legacy_seed_record_for_a_task_not_in_scope_is_left_alone() {
+    let f = fixture("sync-legacy-terminal");
+    std::fs::create_dir_all(&f.dir).unwrap();
+    let t = task(1, "done", 1);
+    std::fs::write(f.dir.join("1.json"), legacy(1, &t)).unwrap();
+    let before = snapshot(&f.dir);
+    pass(&f, &[t]).unwrap();
+    assert_eq!(snapshot(&f.dir), before);
+}
+
+/// A pass's `files` map, as the scan saw it, for calling [`apply`] directly.
+fn scan(dir: &Path) -> BTreeMap<u64, Value> {
+    files(dir)
+}
+
+#[test]
+fn a_failed_adopt_drops_no_copy_so_the_task_keeps_its_records() {
+    // The scan saw 1, 2 and 3 as records of the task; before the writes, the
+    // agent replaced 1.json with its own task. The adopt of 1 fails, and the
+    // drops of 2 and 3 must not run: they would leave the task no file.
+    let f = fixture("sync-adopt-fails");
+    std::fs::create_dir_all(&f.dir).unwrap();
+    let t = task(1, "open", 1);
+    let d = desired_of(&t);
+    for id in 1..=3 {
+        std::fs::write(
+            f.dir.join(format!("{id}.json")),
+            record::record(id, &d).to_string(),
+        )
+        .unwrap();
+    }
+    let seen = scan(&f.dir);
+    let st0 = State::new(PROJECT, &f.dir);
+    let actions = plan(std::slice::from_ref(&d), &st0, &seen, true);
+    assert!(
+        matches!(actions[0], Action::Adopt { harness_id: 1, .. }),
+        "{actions:?}"
+    );
+    std::fs::write(f.dir.join("1.json"), FOREIGN).unwrap();
+    let mut st = st0.clone();
+    let mut out = Outcome::default();
+    let listed = listing(&f.dir);
+    apply(
+        &f.dir,
+        &listed,
+        &seen,
+        std::slice::from_ref(&d),
+        &actions,
+        &mut st,
+        &mut out,
+        &|_| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(out.duplicates, 0, "{out:?}");
+    assert_eq!(
+        files(&f.dir).keys().copied().collect::<Vec<_>>(),
+        [1, 2, 3],
+        "both extra copies survive"
+    );
+    assert_eq!(
+        std::fs::read_to_string(f.dir.join("1.json")).unwrap(),
+        FOREIGN
+    );
+    assert!(st.entries.is_empty());
+}
+
+#[test]
+fn a_pass_that_fails_midway_still_stamps_the_ids_it_already_deleted() {
+    let f = fixture("sync-hwm-on-error");
+    std::fs::create_dir_all(&f.dir).unwrap();
+    let (a, b) = (
+        desired_of(&task(1, "open", 1)),
+        desired_of(&task(2, "done", 1)),
+    );
+    std::fs::write(f.dir.join("1.json"), record::record(1, &a).to_string()).unwrap();
+    std::fs::write(f.dir.join("7.json"), record::record(7, &a).to_string()).unwrap();
+    std::fs::write(f.dir.join("9.json"), record::record(9, &b).to_string()).unwrap();
+    let mut st = State::new(PROJECT, &f.dir);
+    st.entries.insert(a.urn.clone(), entry(1, &a));
+    st.entries.insert(b.urn.clone(), entry(9, &b));
+    let actions = [
+        Action::Drop {
+            urn: a.urn.clone(),
+            harness_id: 7,
+        },
+        Action::Delete {
+            urn: b.urn.clone(),
+            harness_id: 9,
+        },
+        // Fails: no such task in the desired set.
+        Action::Update {
+            urn: "yadgar:task:0000-404".into(),
+            harness_id: 1,
+            refreshed: false,
+        },
+    ];
+    let seen = scan(&f.dir);
+    let listed = listing(&f.dir);
+    let mut out = Outcome::default();
+    let result = apply(
+        &f.dir,
+        &listed,
+        &seen,
+        std::slice::from_ref(&a),
+        &actions,
+        &mut st,
+        &mut out,
+        &|_| Ok(()),
+    );
+    assert!(result.is_err());
+    assert_eq!((out.duplicates, out.deleted), (1, 1), "{out:?}");
+    assert_eq!(files(&f.dir).keys().copied().collect::<Vec<_>>(), [1]);
+    assert!(hwm(&f.dir) >= 9, "hwm {} after a failed pass", hwm(&f.dir));
 }

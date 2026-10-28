@@ -79,3 +79,56 @@ fn an_engine_written_record_is_recognised() {
     let model = serde_json::json!({"id":"1","subject":"s","description":"d","status":"pending","blocks":[],"blockedBy":[]});
     assert!(!engine_written(&model));
 }
+
+/// A legacy `seed_tasks.py` record of *d*, with one field replaced.
+fn seeded(d: &Desired, field: &str, value: Value) -> Value {
+    let mut v = serde_json::json!({
+        "id": "1",
+        "subject": format!("#{} {}", d.number, d.title),
+        "description": format!("yaadgaar #{} · {} · open", d.number, d.urn),
+        "status": "pending",
+        "blocks": [],
+        "blockedBy": []
+    });
+    if !field.is_empty() {
+        v[field] = value;
+    }
+    v
+}
+
+#[test]
+fn a_legacy_seed_record_is_a_copy_of_its_task() {
+    let d = task("open", "Seed");
+    assert!(legacy_of(&seeded(&d, "", Value::Null), &d));
+    assert!(legacy_of(&seeded(&d, "metadata", Value::Null), &d));
+    assert!(copy_of(&seeded(&d, "", Value::Null), &d));
+}
+
+#[test]
+fn a_legacy_record_naming_another_urn_under_the_same_number_is_not_a_copy() {
+    // Another project's #395.
+    let d = task("open", "Seed");
+    let other = "yaadgaar #395 · yadgar:task:0000-other · open".to_string();
+    assert!(!legacy_of(&seeded(&d, "description", other.into()), &d));
+}
+
+#[test]
+fn a_multi_line_description_is_not_a_legacy_record() {
+    let d = task("open", "Seed");
+    let text = format!("yaadgaar #395 · {} · open\nand more the agent wrote", d.urn);
+    assert!(!legacy_of(&seeded(&d, "description", text.into()), &d));
+}
+
+#[test]
+fn a_record_with_metadata_is_not_a_legacy_record() {
+    let d = task("open", "Seed");
+    let meta = serde_json::json!({ "other": 1 });
+    assert!(!legacy_of(&seeded(&d, "metadata", meta), &d));
+}
+
+#[test]
+fn a_record_whose_subject_names_another_number_is_not_a_legacy_record() {
+    let d = task("open", "Seed");
+    assert!(!legacy_of(&seeded(&d, "subject", "#3950 Seed".into()), &d));
+    assert!(!legacy_of(&seeded(&d, "subject", "Seed #395".into()), &d));
+}

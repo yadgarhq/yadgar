@@ -229,3 +229,79 @@ fn a_re_run_after_a_clean_pass_only_keeps() {
         "{actions:?}"
     );
 }
+
+#[test]
+fn copies_of_one_task_are_adopted_at_the_lowest_id_and_the_rest_dropped() {
+    // #458: S owns nothing; a fork copied 3 and 7 in; the legacy seed holds 2.
+    let (state, mut files) = empty();
+    let want = d(1, "open", 1);
+    files.insert(7, record(7, &want));
+    files.insert(3, record(3, &want));
+    files.insert(
+        2,
+        json!({
+            "id": "2",
+            "subject": "#1 task 1",
+            "description": "yaadgaar #1 · yadgar:task:1 · open",
+            "status": "pending",
+            "blocks": [],
+            "blockedBy": []
+        }),
+    );
+    let actions = plan(std::slice::from_ref(&want), &state, &files, true);
+    let urn = want.urn.clone();
+    assert_eq!(
+        actions,
+        [
+            Action::Adopt {
+                urn: urn.clone(),
+                harness_id: 2
+            },
+            Action::Drop {
+                urn: urn.clone(),
+                harness_id: 3
+            },
+            Action::Drop { urn, harness_id: 7 },
+        ]
+    );
+}
+
+#[test]
+fn an_owned_record_at_the_lowest_id_is_kept_and_a_later_copy_dropped() {
+    let (mut state, mut files) = empty();
+    let want = d(1, "open", 1);
+    owned(&mut state, &mut files, 2, &want);
+    files.insert(9, record(9, &want));
+    let actions = plan(std::slice::from_ref(&want), &state, &files, true);
+    let urn = want.urn.clone();
+    assert_eq!(
+        actions,
+        [
+            Action::Drop {
+                urn: urn.clone(),
+                harness_id: 9
+            },
+            Action::Keep { urn },
+        ]
+    );
+}
+
+#[test]
+fn an_owned_record_is_kept_over_a_lower_copy() {
+    let (mut state, mut files) = empty();
+    let want = d(1, "open", 1);
+    owned(&mut state, &mut files, 7, &want);
+    files.insert(3, record(3, &want));
+    let actions = plan(std::slice::from_ref(&want), &state, &files, true);
+    let urn = want.urn.clone();
+    assert_eq!(
+        actions,
+        [
+            Action::Drop {
+                urn: urn.clone(),
+                harness_id: 3
+            },
+            Action::Keep { urn },
+        ]
+    );
+}

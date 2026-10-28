@@ -163,6 +163,9 @@ fn synced(o: &Outcome, complete: bool) -> String {
             o.diverged
         ));
     }
+    if o.duplicates > 0 {
+        parts.push(format!("{} duplicate copies removed", o.duplicates));
+    }
     if o.skipped > 0 {
         parts.push(format!("{} skipped, no task id", o.skipped));
     }

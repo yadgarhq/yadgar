@@ -94,6 +94,28 @@ pub fn owner(file: &Value) -> Option<&str> {
     description.lines().last()?.strip_prefix(URN_LINE)
 }
 
+/// Is *file* a record of *d* that the hand-run `seed_tasks.py` wrote before
+/// the sync existed (2026-09-27)? It has no ownership line and no metadata,
+/// and its whole description is `yaadgaar #<n> · <urn> · <status>`. The
+/// subject prefix `#<n> ` alone is NOT enough: an agent's own task may start
+/// the same way, and only the URN says the file is a record of this task.
+pub fn legacy_of(file: &Value, d: &Desired) -> bool {
+    let subject = file.get("subject").and_then(Value::as_str);
+    let description = file.get("description").and_then(Value::as_str);
+    owner(file).is_none()
+        && file.get("metadata").is_none_or(Value::is_null)
+        && subject.is_some_and(|s| s.starts_with(&format!("#{} ", d.number)))
+        && description.is_some_and(|s| {
+            !s.contains('\n') && s.starts_with(&format!("yaadgaar #{} · {} · ", d.number, d.urn))
+        })
+}
+
+/// Is *file* a record of *d*: one this client wrote (its ownership line names
+/// the URN, wherever it was written from), or a legacy one ([`legacy_of`])?
+pub fn copy_of(file: &Value, d: &Desired) -> bool {
+    owner(file) == Some(d.urn.as_str()) || legacy_of(file, d)
+}
+
 /// Does *file* look like a record the memory engine's seeder wrote (#391)?
 /// Such a list has a second writer with a second id scheme.
 ///

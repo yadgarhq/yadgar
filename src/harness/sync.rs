@@ -11,9 +11,16 @@
 //! only by that intent. A rewrite or a delete that a crash leaves unrecorded
 //! heals on the next pass: the rewritten file reads as yaadgaar moving on,
 //! and the deleted one as a file that is gone.
+//!
+//! ONE FILE PER TASK (#458). Claude Code's fork copies the parent's list into
+//! the new session's dir, and the new list id has no state. The record the
+//! state owns is kept; with none owned, the lowest-id record of a task in
+//! scope is ADOPTED. Every other record of it is deleted, and
+//! `.highwatermark` is raised over them even when a later action fails. A file owned by nothing is never
+//! written from: adoption only writes it from yaadgaar.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -24,6 +31,10 @@ use super::scope::Scope;
 use super::shape::Listing;
 use super::state::{self, State};
 use super::Env;
+
+mod files;
+use files::{adopt_copy, drop_copy, temp_with};
+pub(crate) use files::{read_json, remove, rewrite, stamp_highwatermark};
 
 /// One yaadgaar task from the listing. `urn` and `version` are optional
 /// because the listing must still render a banner from a row that lacks them;
@@ -59,6 +70,8 @@ pub struct Outcome {
     pub refreshed: usize,
     pub deleted: usize,
     pub diverged: usize,
+    /// Extra copies of a mirrored task deleted (a fork's copied list, #458).
+    pub duplicates: usize,
     /// In-scope rows with no usable URN or version.
     pub skipped: usize,
     /// The lowest owned task id and its state's harness status; set when the pass wrote.
@@ -245,11 +258,6 @@ fn read_files(dir: &Path, listing: &Listing) -> Result<BTreeMap<u64, Value>, Str
     Ok(files)
 }
 
-pub(crate) fn read_json(path: &Path) -> Result<Value, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
-}
-
 /// The in-scope rows, and how many in-scope rows had no usable URN or version.
 fn desired(input: &Input) -> (Vec<Desired>, usize) {
     let mut out = Vec::new();
@@ -307,58 +315,91 @@ fn apply(
     if !st.creating.is_empty() {
         save(st)?;
     }
+    // The highest id deleted so far. Stamped into `.highwatermark` even when
+    // a later action fails: a deleted id must never be handed out again.
     let mut deleted_max = None;
-    for action in actions {
-        match action {
-            Action::Create { urn, recreated } => {
-                let d = find(urn).ok_or("a create for a task not in scope")?;
-                let id = create(dir, &mut next, d, st, save)?;
-                st.entries.insert(urn.clone(), entry(id, d));
-                if *recreated {
-                    out.recreated += 1;
-                } else {
-                    out.created += 1;
-                }
-            }
-            Action::Update {
-                urn,
-                harness_id,
-                refreshed,
-            } => {
-                let d = find(urn).ok_or("an update for a task not in scope")?;
-                if rewrite(dir, *harness_id, d)? {
-                    st.entries.insert(urn.clone(), entry(*harness_id, d));
-                    if *refreshed {
-                        out.refreshed += 1;
+    let applied = (|| {
+        for action in actions {
+            match action {
+                Action::Create { urn, recreated } => {
+                    let d = find(urn).ok_or("a create for a task not in scope")?;
+                    let id = create(dir, &mut next, d, st, save)?;
+                    st.entries.insert(urn.clone(), entry(id, d));
+                    if *recreated {
+                        out.recreated += 1;
                     } else {
-                        out.updated += 1;
+                        out.created += 1;
                     }
-                } else {
+                }
+                Action::Update {
+                    urn,
+                    harness_id,
+                    refreshed,
+                } => {
+                    let d = find(urn).ok_or("an update for a task not in scope")?;
+                    if rewrite(dir, *harness_id, d)? {
+                        st.entries.insert(urn.clone(), entry(*harness_id, d));
+                        if *refreshed {
+                            out.refreshed += 1;
+                        } else {
+                            out.updated += 1;
+                        }
+                    } else {
+                        st.entries.remove(urn);
+                    }
+                }
+                Action::Keep { urn } => {
+                    if let (Some(d), Some(e)) = (find(urn), st.entries.get_mut(urn)) {
+                        (e.version, e.status, e.title) =
+                            (d.version, d.status.clone(), d.title.clone());
+                    }
+                }
+                Action::Diverged { .. } => out.diverged += 1,
+                Action::Delete { urn, harness_id } => {
+                    if remove(dir, *harness_id, urn)? {
+                        out.deleted += 1;
+                        deleted_max = deleted_max.max(Some(*harness_id));
+                    }
                     st.entries.remove(urn);
                 }
-            }
-            Action::Keep { urn } => {
-                if let (Some(d), Some(e)) = (find(urn), st.entries.get_mut(urn)) {
-                    (e.version, e.status, e.title) = (d.version, d.status.clone(), d.title.clone());
+                Action::Forget { urn } => {
+                    st.entries.remove(urn);
                 }
-            }
-            Action::Diverged { .. } => out.diverged += 1,
-            Action::Delete { urn, harness_id } => {
-                if remove(dir, *harness_id, urn)? {
-                    out.deleted += 1;
-                    deleted_max = deleted_max.max(Some(*harness_id));
+                Action::Adopt { urn, harness_id } => {
+                    let d = find(urn).ok_or("an adopt for a task not in scope")?;
+                    match adopt_copy(dir, *harness_id, d)? {
+                        Some(wrote) => {
+                            st.entries.insert(urn.clone(), entry(*harness_id, d));
+                            out.updated += usize::from(wrote);
+                        }
+                        // Changed hands since the scan: the next pass settles it.
+                        None => {
+                            st.entries.remove(urn);
+                        }
+                    }
                 }
-                st.entries.remove(urn);
-            }
-            Action::Forget { urn } => {
-                st.entries.remove(urn);
+                Action::Drop { urn, harness_id } => {
+                    let d = find(urn).ok_or("a drop for a task not in scope")?;
+                    // Only while a kept record of the task is owned: a failed
+                    // adopt must never leave the task with no file at all.
+                    let kept = st
+                        .entries
+                        .get(urn)
+                        .is_some_and(|e| e.harness_id != *harness_id);
+                    if kept && drop_copy(dir, *harness_id, d)? {
+                        out.duplicates += 1;
+                        deleted_max = deleted_max.max(Some(*harness_id));
+                    }
+                }
             }
         }
-    }
-    match deleted_max {
+        Ok::<(), String>(())
+    })();
+    let stamped = match deleted_max {
         Some(id) => stamp_highwatermark(dir, listing.highwatermark.unwrap_or(0).max(id)),
         None => Ok(()),
-    }
+    };
+    applied.and(stamped)
 }
 
 pub(crate) fn entry(id: u64, d: &Desired) -> state::Entry {
@@ -370,25 +411,6 @@ pub(crate) fn entry(id: u64, d: &Desired) -> state::Entry {
         title: d.title.clone(),
         written: record::record(id, d),
     }
-}
-
-/// A temporary file BESIDE the list (in `tasks/`, same filesystem, not a list
-/// directory the probe reads), created exclusively, never through a link.
-fn temp_with(dir: &Path, body: &[u8]) -> Result<PathBuf, String> {
-    use std::io::Write as _;
-    let parent = dir.parent().ok_or("the list has no parent directory")?;
-    let stem = format!(
-        ".yaadgaar-{}",
-        dir.file_name().and_then(|n| n.to_str()).unwrap_or("list")
-    );
-    let (tmp, mut file) =
-        crate::config::create_first_free(crate::config::temp_names(parent, &stem))
-            .map_err(|e| format!("{}: {e}", parent.display()))?;
-    if let Err(e) = file.write_all(body).and_then(|()| file.sync_all()) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("{}: {e}", tmp.display()));
-    }
-    Ok(tmp)
 }
 
 /// Create the record under the first free id from *next*, NEVER replacing a
@@ -439,60 +461,6 @@ fn create(
     // Settled either way: linked (the caller records the entry), or not.
     st.creating.remove(&d.urn);
     result
-}
-
-/// Rewrite an owned file. `false` when it no longer carries the URN: then it
-/// is not ours, and it is left alone.
-pub(crate) fn rewrite(dir: &Path, id: u64, d: &Desired) -> Result<bool, String> {
-    let target = dir.join(format!("{id}.json"));
-    if record::owner(&read_json(&target)?) != Some(d.urn.as_str()) {
-        return Ok(false);
-    }
-    let tmp = temp_with(dir, record::record(id, d).to_string().as_bytes())?;
-    std::fs::rename(&tmp, &target).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("{}: {e}", target.display())
-    })?;
-    Ok(true)
-}
-
-/// Delete an owned file, after checking again that it is ours.
-pub(crate) fn remove(dir: &Path, id: u64, urn: &str) -> Result<bool, String> {
-    let target = dir.join(format!("{id}.json"));
-    match read_json(&target) {
-        Ok(file) if record::owner(&file) == Some(urn) => std::fs::remove_file(&target)
-            .map(|()| true)
-            .map_err(|e| format!("{}: {e}", target.display())),
-        _ => Ok(false),
-    }
-}
-
-/// Raise `.highwatermark` to at least *id*, as Claude Code does on its own
-/// deletes, so an id this client used is never handed out again.
-///
-/// NEVER LOWERS IT: the mark is read again right before the write, and the
-/// larger of that and *id* is written, so a mark Claude Code raised after the
-/// scan survives. A RACE REMAINS: Claude Code takes no lock this client knows
-/// of (its `.lock` is unexplained, plan F10), so a delete Claude Code stamps
-/// between this read and the rename below is overwritten with the smaller
-/// value. The window is one read and one rename; ids it could hand out again
-/// are only the ones that one delete freed.
-///
-/// The write-back hooks call this too, after a delete outside a pass.
-pub(crate) fn stamp_highwatermark(dir: &Path, id: u64) -> Result<(), String> {
-    let target = dir.join(super::shape::HIGHWATERMARK);
-    let on_disk = std::fs::read_to_string(&target)
-        .ok()
-        .and_then(|t| t.trim().parse::<u64>().ok())
-        .unwrap_or(0);
-    if on_disk >= id {
-        return Ok(());
-    }
-    let tmp = temp_with(dir, id.to_string().as_bytes())?;
-    std::fs::rename(&tmp, &target).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("{}: {e}", target.display())
-    })
 }
 
 #[cfg(test)]

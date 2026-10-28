@@ -5,8 +5,11 @@
 //! returns the actions. Every rule of the three-way table in
 //! `plans/harness-task-sync.md` is here, so every rule is a unit test.
 //!
-//! A file that S does not list is never in an action: model-written tasks,
-//! engine-written tasks and other tools' tasks are left exactly as they are.
+//! A file that S does not list is never in an action, with one exception: a
+//! record of a task in D (its ownership line names the task's URN, or it is a
+//! legacy seed of it) is adopted or dropped, so each task has ONE file (#458).
+//! Model-written tasks, engine-written tasks and other tools' tasks are left
+//! exactly as they are.
 
 use std::collections::BTreeMap;
 
@@ -38,6 +41,12 @@ pub enum Action {
     /// Drop from S without touching the file: it is gone, or no longer
     /// carries this URN.
     Forget { urn: String },
+    /// Take over an existing record of this task at `harness_id`, the LOWEST
+    /// id that holds one when S owns none, and write it from yaadgaar. The record is a copy S
+    /// does not own (a fork copies the parent's list, #458) or a legacy seed.
+    Adopt { urn: String, harness_id: u64 },
+    /// Delete another record of the same task: one file per URN.
+    Drop { urn: String, harness_id: u64 },
 }
 
 /// Plan one pass. *complete* is false when the listing stopped early: then
@@ -51,6 +60,41 @@ pub fn plan(
     let mut actions = Vec::new();
     for d in desired {
         let urn = d.urn.clone();
+        // Every record of this task on disk: ONE is kept. The one S owns, so
+        // the live session's file (and an edit in it) survives; else the
+        // LOWEST id, which is adopted.
+        let copies: Vec<u64> = files
+            .iter()
+            .filter(|(_, f)| record::copy_of(f, d))
+            .map(|(id, _)| *id)
+            .collect();
+        if let Some(&lowest) = copies.first() {
+            let owned = state
+                .entries
+                .get(&d.urn)
+                .map(|e| e.harness_id)
+                .filter(|id| {
+                    files
+                        .get(id)
+                        .is_some_and(|f| record::owner(f) == Some(d.urn.as_str()))
+                });
+            let keep = owned.unwrap_or(lowest);
+            if owned.is_none() {
+                actions.push(Action::Adopt {
+                    urn: urn.clone(),
+                    harness_id: keep,
+                });
+            }
+            actions.extend(copies.iter().filter(|&&id| id != keep).map(|&harness_id| {
+                Action::Drop {
+                    urn: urn.clone(),
+                    harness_id,
+                }
+            }));
+            if owned.is_none() {
+                continue;
+            }
+        }
         let Some(entry) = state.entries.get(&d.urn) else {
             actions.push(Action::Create {
                 urn,

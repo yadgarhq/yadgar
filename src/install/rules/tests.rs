@@ -299,3 +299,57 @@ fn the_rules_say_to_ask_once_when_no_ledger_is_named_for_deferred_work() {
         "no fallback for an unattended run"
     );
 }
+
+/// The rules with every run of whitespace folded to one space, so a needle
+/// does not depend on where a line wraps or how a bullet indents.
+fn folded() -> String {
+    RULES_BODY.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn the_rules_teach_edit_task_patch_mode() {
+    // Ledger 418: gateway 0.15.2 and task 0.8.6 serve `edit_task` patch mode
+    // and the reason tokens. An agent that never reads this resends a whole
+    // body for a one-line change, or puts `expect_new_sha256` at top level,
+    // where the gateway refuses it.
+    let body = folded();
+    for needle in [
+        "`patch: {old, new, expect_count}`",
+        "at most 64 KiB",
+        "at most 1 MiB",
+        "`patch.expect_new_sha256`",
+        "inside `patch`",
+        "refused at top level",
+        "`expect_body_sha256` is the hash of the body before the edit",
+        "`VERSION_MISMATCH`",
+        "`PATCH_COUNT_MISMATCH`",
+        "`PATCH_RESULT_TOO_LARGE`",
+        "`BODY_SHA256_MISMATCH`",
+        "`PATCH_NEW_SHA256_MISMATCH`",
+        "`transition_task` can also return `VERSION_MISMATCH`",
+        "`unspecified` means the prior status is unknown",
+        "This section describes gateway version 0.15.2.",
+    ] {
+        assert!(body.contains(needle), "the rules never say: {needle}");
+    }
+    assert!(
+        !body.contains("gateway version 0.12.27"),
+        "the rules still describe the old gateway"
+    );
+}
+
+#[test]
+fn the_rules_do_not_promise_a_retry_key_on_edit_or_transition() {
+    // `edit_task` and `transition_task` take no idempotency key; only
+    // `create_task` does. The gateway mints a fresh key per call, so a retry
+    // is a new request, never a replay.
+    let body = folded();
+    assert!(
+        body.contains("`edit_task` and `transition_task` take no idempotency key"),
+        "the rules do not say edit and transition take no key"
+    );
+    assert!(
+        body.contains("a retry is a new request, not a replay"),
+        "the rules do not say a retry is a new request"
+    );
+}

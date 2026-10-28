@@ -70,17 +70,35 @@ without the `mcp__yaadgaar__` prefix:
   cut off in transit, send `expect_body_sha256` with the new `body`: the
   SHA-256 of that body as 64 lowercase hex characters. The gateway refuses the
   edit when the digest does not match.
+  To change part of a body, send `patch: {old, new, expect_count}` instead of
+  `body`; never send both. It is a literal replace of every occurrence of
+  `old` by `new`, with no regex. An empty `new` deletes. The edit is refused
+  unless `old` occurs exactly `expect_count` times. `old` and `new` are each
+  at most 64 KiB, and the resulting body is at most 1 MiB. With `patch`,
+  `expect_body_sha256` is the hash of the body before the edit, as you read
+  it. To detect a `new` that was cut off in transit, send
+  `patch.expect_new_sha256`, the SHA-256 of `new` as 64 lowercase hex
+  characters. It must sit inside `patch`; it is refused at top level.
 - `transition_task` moves a task to another status: `open`, `in_progress`,
-  `blocked`, `done`, or `dropped`. It also takes `expect_version`.
+  `blocked`, `done`, or `dropped`. It also takes `expect_version`. The answer
+  carries `from`, the status the task had before the move. `unspecified`
+  means the prior status is unknown.
+- `edit_task` and `transition_task` take no idempotency key. The gateway uses
+  a fresh key for each call, so a retry is a new request, not a replay. After
+  a call with no answer, read the task again before you retry.
 - `read_task`, `edit_task` and `transition_task` each take either the `id` or
   the `number` of the task, never both. A `number` is the task's number in the
   caller's own project.
 
-This section describes gateway version 0.12.27. A newer gateway can serve
+This section describes gateway version 0.15.2. A newer gateway can serve
 more; its tool list is the authority.
 
-**When a call is refused, read the message.** If the task's version changed
-after you read it, read the task again and retry once with the new version.
+**When a call is refused, read the message.** A refusal a program can act on
+starts with a reason token and a colon: `VERSION_MISMATCH`,
+`PATCH_COUNT_MISMATCH`, `PATCH_RESULT_TOO_LARGE`, `BODY_SHA256_MISMATCH` or
+`PATCH_NEW_SHA256_MISMATCH`. On `VERSION_MISMATCH` the task's version changed
+after you read it: read the task again and retry once with the new version.
+`transition_task` can also return `VERSION_MISMATCH`, as `edit_task` does.
 For any other refusal — a move the task's status does not allow, an edit with
 neither a title nor a body, a status that does not exist — do not retry the
 same call. Fix the request, or tell the person.

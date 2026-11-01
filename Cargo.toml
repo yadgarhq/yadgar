@@ -33,7 +33,7 @@ name = "yaadgaar"
 # the Python 5.x files under PEP 592 — and this file chooses neither.
 version = "0.1.0-alpha.8"
 edition = "2021"
-rust-version = "1.90"
+rust-version = "1.99.1"
 license = "Apache-2.0"
 description = "The yadgar client: one binary that logs in, proxies MCP to the gateway, and owns the agent environment (D75, D76)."
 

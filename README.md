@@ -307,6 +307,28 @@ To move to a newer release, `pipx install --force yaadgaar==<version>`.
    mkdir -p .yadgar && printf '%s\n' 'owner/repo' > .yadgar/project-id
    ```
 
+   A key can also be refused with HTTP 403 and the reason `PROJECT_NOT_MEMBER`,
+   when the gateway runs project validation in `enforcing` mode. In `counting`
+   mode the call is counted and served, and the agent sees no 403. The account
+   may not reach that project. Three shapes give this answer: a `local/…`
+   project that another account owns (refused even when it is not registered),
+   a project that has another account's `local/…` project beneath it, and an
+   organisation project that none of the account's teams holds a grant on
+   (ADR-0962). The organisation case needs both settings: project validation
+   `enforcing` AND `orgGrants: enforcing`. A read and a write get the same
+   answer. With `orgGrants: enforcing` the message is the same for every shape,
+   so it does not say which one applied. The agent sees
+   `yadgar gateway rejected the credential (403 Forbidden): <message>`. That
+   text does not contain the `PROJECT_NOT_MEMBER` token. The token is only in
+   `error.data.reason` and in the gateway's refusal metric, because the client
+   drops the reason. The credential is valid, and logging in again as the same
+   account does not change the answer. For a personal project, use your own
+   prefix (see
+   [Finding your private project prefix](#finding-your-private-project-prefix)).
+   For an organisation project, ask an administrator for a team grant. Under
+   `orgGrants: enforcing`, a team that holds only a read grant gets
+   `PROJECT_READ_ONLY` (also 403) on a write.
+
 4. **Verify**, now and on a schedule. It exits non-zero when the installed
    environment has drifted from what `install` left.
 

@@ -9,7 +9,9 @@ repos:
       - id: mixed-line-ending
         args: [--fix=lf]
       - id: check-merge-conflict
+        args: [--assume-in-merge]
       - id: check-added-large-files
+        args: [--enforce-all]
       # No exclusions. The services exclude `chart/templates/` because a Helm
       # template is a Go template that only looks like YAML; there is no chart
       # here, so every YAML in this repository is real YAML.
